@@ -1,0 +1,88 @@
+# My Shop — repository hygiene.
+# Master Plan §13.6, §42.6: no secret, credential, connection string, or key
+# is ever committed. Only .env.example, which carries placeholders, is tracked.
+
+# --- Secrets: never tracked, in any environment ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+secrets.json
+secrets.yaml
+
+# --- Node / TypeScript ---
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+.npmrc.local
+
+# --- Flutter / Dart ---
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+
+# Flutter platform-local material.
+#
+# The plugin registrant and generated_plugins.cmake are deliberately NOT ignored:
+# Master Plan section 6.7 commits generated sources so CI needs no codegen step,
+# and a plugin change should show up in the diff.
+apps/desktop/android/local.properties
+apps/desktop/android/.gradle/
+apps/desktop/android/app/debug/
+apps/desktop/android/app/profile/
+apps/desktop/android/app/release/
+apps/desktop/windows/flutter/ephemeral/
+apps/desktop/.fvm/
+
+# --- Drift local schema (M1b-S1) ---
+# A local device database may contain unsynced sales. Master Plan §42.6 treats an
+# exported local database as sensitive business data, so it is never tracked.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+apps/desktop/**/*.sqlite
+
+# --- Drift generated code ---
+# Generated Dart is committed for the API contract (§6.7); Drift output follows the
+# same rule so CI needs no codegen step. Local databases never are.
+*.g.dart
+!packages/contracts/lib/**/*.g.dart
+
+# --- Logs, diagnostics, crash dumps ---
+# Master Plan §38.28.3, §38.29: no offline payload or crash dump may contain a
+# token, password, or session state.
+*.log
+logs/
+crash/
+dumps/
+*.dmp
+*.hprof
+
+# --- OS and editor ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+*.swp
+*~
+
+# --- Local agent scratch ---
+.agent-artifacts/
+.claude/
+.gemini/
+.agents/

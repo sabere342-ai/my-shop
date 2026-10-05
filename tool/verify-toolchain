@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# My Shop — toolchain verification, shell entry point.
+#
+# The implementation is Node (tool/verify-toolchain.mjs) and this is a thin wrapper.
+# Node was chosen because this host carries three bash flavours (WSL, Git Bash, and
+# none on a bare PATH) and a guard that silently skips under two of them is not a guard.
+#
+# Exits non-zero on any mismatch between the active toolchain and .tool-versions.
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "verify-toolchain: node is not on PATH" >&2
+  exit 1
+fi
+
+exec node "${repo_root}/tool/verify-toolchain.mjs"

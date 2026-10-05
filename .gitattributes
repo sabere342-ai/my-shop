@@ -1,0 +1,24 @@
+# Normalize line endings on commit so the repository is byte-identical across
+# Windows, macOS, and Linux contributors and CI (Master Plan §36.1 T-6: no test
+# may depend on host platform behaviour).
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.jar binary
+*.db binary
+
+pubspec.lock text eol=lf
+package-lock.json text eol=lf

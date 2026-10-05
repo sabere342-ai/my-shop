@@ -1,0 +1,23 @@
+﻿name: my_shop_desktop
+description: My Shop - Arabic-first point-of-sale and back-office client for Windows and Android.
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  # Pinned to the toolchain recorded in .tool-versions (Flutter 3.47.5,
+  # Dart 3.13.4). Master Plan R-5: V1 must not be built on the stale SDK
+  # that was found on PATH.
+  sdk: ^3.13.4
+  flutter: ">=3.47.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

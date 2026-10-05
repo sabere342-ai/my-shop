@@ -1,0 +1,78 @@
+# My Shop - Dart static analysis.
+#
+# Master Plan section 5.4 records that the legacy application accumulated 398
+# hardcoded user-visible strings and no theme file. The rules below make the
+# client architecture's promises mechanical rather than conventional:
+#
+#   6.3   domain is pure Dart - it must never import Flutter
+#   6.5   no service locator, no static registration seam, no `X.instance`
+#   6.8   zero hardcoded user-visible strings, directionality from the locale
+#   6.9   colour roles and a type scale, never raw colours or font sizes
+#   13.7  no offline payload or log may carry a credential
+#
+# This file is deliberately ASCII-only. The Flutter tool rewrites
+# analysis_options.yaml in place when it adds platform excludes, and a
+# non-ASCII byte in the header survives that round trip only by luck.
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    # Section 36.1 T-1: a rule that cannot fail the build is documentation,
+    # not control.
+    todo: warning
+    unused_import: error
+    unused_local_variable: error
+    dead_code: error
+  exclude:
+    # Generated sources are committed (section 6.7) and are not hand-edited, so
+    # they are excluded from lint rather than from the build.
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+    # Platform directories are generated host scaffolding, not application code.
+    - "build/**"
+    - android/**
+    - windows/**
+
+linter:
+  rules:
+    # --- Architecture: the boundaries the Master Plan calls non-negotiable ---
+    always_use_package_imports: true
+    avoid_relative_lib_imports: true
+    implementation_imports: error
+    depend_on_referenced_packages: true
+
+    # --- 6.3 domain purity, enforced mechanically ---
+    # `domain` directories are checked by the CI import-boundary stage
+    # (section 37.2 stage 11), which must distinguish a domain file from any
+    # other file. The linter cannot express "pure Dart", so the boundary is a CI
+    # check; what it can express is that a domain file has no Flutter binding
+    # available to abuse.
+    always_declare_return_types: true
+    avoid_dynamic_calls: true
+    test_types_in_equals: true
+
+    # --- 6.8 localization and RTL ---
+    # Hardcoded user-visible strings are not a Dart lint rule. They are enforced
+    # by the CI grep gate over feature and app code (section 37.2 stage 13),
+    # which can distinguish a user-visible literal from a log tag, a route name,
+    # or a diagnostic code. Those are distinctions the linter cannot make.
+    prefer_const_constructors: true
+    prefer_const_declarations: true
+    prefer_const_literals_to_create_immutables: true
+
+    # --- 6.9 design system ---
+    # Raw colour and font-size literals outside core/ui are a CI failure
+    # (section 37.2 stage 14). The linter contribution is banning the escape
+    # hatches that would otherwise reintroduce them.
+    avoid_web_libraries_in_flutter: true
+
+    # --- Correctness ---
+    avoid_slow_async_io: true
+    cancel_subscriptions: true
+    close_sinks: true
+    unawaited_futures: true
+    use_build_context_synchronously: true

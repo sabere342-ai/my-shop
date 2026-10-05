@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# My Shop — pinned Flutter SDK runner, shell entry point.
+#
+# The implementation is Node (tool/flutterw.mjs); this is a convenience wrapper for
+# contributors who prefer a shell. Use it from the repository root or anywhere:
+#
+#   ./tool/flutterw analyze --fatal-infos
+#   ./tool/flutterw test
+#   ./tool/flutterw doctor
+#
+# It selects the SDK pinned in .tool-versions for a single invocation. It never
+# installs, upgrades, or deletes an SDK, and never mutates PATH globally. Installing
+# or upgrading a host SDK is a global machine change and is outside repository scope.
+#
+# If no bash is available, the equivalent is:
+#   node tool/flutterw.mjs analyze --fatal-infos
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "tool/flutterw: node is not on PATH" >&2
+  exit 1
+fi
+
+exec node "${repo_root}/tool/flutterw.mjs" "$@"
