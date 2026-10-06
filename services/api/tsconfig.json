@@ -5,7 +5,14 @@
     "moduleResolution": "node",
     "rootDir": "./src",
     "outDir": "./dist",
-    "types": ["node", "jest"]
+    "types": ["node", "jest"],
+
+    // Required by NestJS: dependency injection is implemented with parameter
+    // decorators, and class-transformer's plainToInstance relies on emitted design:type
+    // metadata to construct a nested configuration object. Without these the module
+    // compiles and then fails at runtime, which is a worse failure than a build error.
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
   },
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules"],

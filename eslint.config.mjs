@@ -44,6 +44,25 @@ export default tseslint.config(
     },
   },
   {
+    // The backend integration tree is outside `tsconfig.json`'s `include`, because the
+    // build config emits into `dist/` and test sources must never reach the shipped
+    // process. Without this project assignment the type-aware rules below cannot parse
+    // them, which would silently drop `services/api/test/**` out of Master Plan §37.2
+    // stage 3 — the gate would still be "green" while linting nothing.
+    files: ['services/api/test/**/*.ts'],
+    languageOptions: {
+      parserOptions: {
+        // `projectService` is switched off explicitly here. Flat config deep-merges
+        // `parserOptions`, so the shared `projectService: true` from the block above would
+        // otherwise survive alongside `project`, and typescript-eslint rejects having
+        // both.
+        projectService: false,
+        project: './services/api/tsconfig.test.json',
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
+  {
     // Tests assert outcomes, not implementation, and legitimately reach for
     // loosely typed fixtures. Strictness still applies to `any`.
     files: ['**/*.spec.ts', '**/test/**/*.ts'],

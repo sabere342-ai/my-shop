@@ -1,31 +1,65 @@
 /**
- * Backend entry point placeholder.
+ * Process entry point.
  *
- * Master Plan §7.3 makes the backend the only authority for every business
- * invariant. This slice establishes the module boundary and nothing else:
- * NestJS, configuration validation, health and readiness, and the error contract
- * belong to M1-S2.
+ * Kept to the minimum a process needs: load and validate configuration, create the
+ * application, listen, and shut down cleanly. Everything else lives in `bootstrap.ts`
+ * so it can be exercised by tests without binding a port.
  *
- * The import boundary is present now because Master Plan §6.3 makes layering a
- * structural property rather than a convention, and a boundary that only starts
- * existing once code has been written is a boundary that will not hold.
+ * §13.6: nothing here reads a secret from source. Configuration arrives from the
+ * environment and invalid configuration aborts the process rather than starting with a
+ * default.
  */
 
-import { CONTRACT_VERSION } from '@my-shop/contracts';
+import 'reflect-metadata';
+import { createApplication } from './bootstrap';
+import { ConfigurationError, loadConfig } from './common/config/app.config';
 
-export interface ApiBootstrap {
-  readonly contractVersion: string;
-  readonly namespace: string;
-}
+async function main(): Promise<void> {
+  let config;
+  try {
+    config = loadConfig();
+  } catch (error) {
+    if (error instanceof ConfigurationError) {
+      // Configuration failures are written to stderr as plain text: the logger does not
+      // exist yet, and a process that cannot start must not depend on the subsystem it
+      // failed to configure.
+      process.stderr.write(`${error.message}\n`);
+      process.exitCode = 78; // EX_CONFIG, the conventional code for a configuration error.
+      return;
+    }
+    throw error;
+  }
 
-/**
- * The descriptor of the backend surface. M1-S2 replaces this with a real NestJS
- * application factory; the shape stays so nothing downstream depends on a
- * framework-specific constructor.
- */
-export function describeApi(): ApiBootstrap {
-  return {
-    contractVersion: CONTRACT_VERSION,
-    namespace: '/api/v1',
+  const { app, logger } = await createApplication(config);
+
+  // Awaited: a port already in use rejects here, and an unhandled rejection at this point
+  // would leave a process that appears to have started and serves nothing. The catch
+  // turns EADDRINUSE into a clean non-zero exit.
+  await app.listen(config.http.port, '0.0.0.0');
+
+  logger.info(
+    { component: 'bootstrap', port: config.http.port, apiPrefix: config.http.apiPrefix, nodeEnv: config.nodeEnv },
+    'my-shop api listening',
+  );
+
+  const shutdown = (signal: string): void => {
+    logger.info({ component: 'bootstrap', signal }, 'shutting down');
+    void app
+      .close()
+      .then(() => {
+        process.exit(0);
+      })
+      .catch((error: unknown) => {
+        logger.error({ component: 'bootstrap', err: error }, 'shutdown failed');
+        process.exit(1);
+      });
   };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
+
+main().catch((error: unknown) => {
+  process.stderr.write(`fatal: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exit(1);
+});

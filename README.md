@@ -16,8 +16,9 @@ Where the code and that document disagree, the document wins and the code is the
 |---|---|---|
 | M0 | P1 — Foundation, discovery, master plan | complete, PR open |
 | M0 | P2 — Offline-capable POS architecture amendment | complete, PR open |
-| M1 | **S1 — Monorepo skeleton and pinned toolchain** | **in progress on this branch** |
-| M1 | S2–S6 | not started |
+| M1 | S1 — Monorepo skeleton and pinned toolchain | complete, PR open |
+| M1 | **S2 — Backend skeleton** | **complete on this branch** |
+| M1 | S3–S6 | not started |
 
 Nothing is deployed. Nothing is released. No PR has been merged — Master Plan gate G-12
 and CI gate G-4 require an explicit, separate owner authorization to merge, and there is
@@ -96,6 +97,24 @@ npm run build                # composite build in dependency order
 
 Secrets live in the environment. Only `.env.example`, which contains placeholders, is
 committed (Master Plan §13.6, §42.6).
+
+### Running the backend
+
+The API reads its configuration from the environment and **refuses to start** on invalid
+input rather than falling back to a default — an operator mistake must not be discovered
+at the point of sale (Master Plan §22.3).
+
+```bash
+npm run build
+node services/api/dist/main.js        # honours PORT, LOG_LEVEL, LOG_PRETTY, API_PREFIX
+
+curl -i localhost:3000/healthz        # liveness  — touches no dependency
+curl -i localhost:3000/readyz         # readiness — runs registered checks, 503 on failure
+```
+
+Both probes are unauthenticated, so neither discloses a version number, a dependency name,
+or a connection string. Every other response is an RFC 7807 `application/problem+json`
+document with a stable machine-readable `code` (Master Plan §34.3).
 
 ## Governance
 
