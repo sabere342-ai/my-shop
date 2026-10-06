@@ -172,6 +172,7 @@ pre-slice posture back. `main` stays at `53f6aaa9` throughout; no database objec
 | D-12 | Branch protection: `strict: false`, required reviews ≥ 1 with code owners, `enforce_admins: true`, force push and deletion refused, `contents: read` workflow permission, actions SHA-pinned | The stack branches cannot be rebased (`strict` would demand it), so `strict` stays false — that is a deliberate stack fact, not a weakening. Protection implements §37.3 G-1…G-4, which §40.4 *requires* this slice to add; §11's "do not alter the plan's protections" forbids removing safeguards, not installing the ones the plan mandates |
 | D-13 | The negative-verification demo uses a markdown whitespace violation on a temporary branch — never credential-shaped text | A red run must be provable without putting even a fake token into pushed history. Trailing whitespace fails stage 2 exactly as designed and is inert |
 | D-14 | Flutter on CI: clone the pinned tag into `~/flutter-<pin>` via `tool/ci/setup-flutter.mjs`, cache keyed on `.tool-versions`, `MY_SHOP_FLUTTER_ROOT` exported through `$GITHUB_ENV` | Mirrors the host's resolution rules (R-5): no PATH mutation, no floating `stable` channel, and a changed pin cannot reuse the old SDK because the directory name and cache key both carry the version |
+| D-15 | The repository was switched from private to public **by explicit owner decision**, taken because GitHub's Free plan refuses branch protection (classic *and* rulesets, both 403: "Upgrade to GitHub Pro or make this repository public") on a private repo. Owner, not agent, authorised and performed the decision | §37.3 G-1…G-4 cannot be satisfied any other way on this plan. The exposure is defensible: stage 1 (secret scan) is green across the whole stack, `.env` is git-ignored, `.env.example` contains only `<…>` placeholders, and no credential has ever been committed. The plan's "private" assumption is superseded by this record |
 
 ---
 
@@ -236,12 +237,25 @@ restored afterwards and re-verified clean (`git status` back to this slice's 17 
 
 ### 4.4 Remote evidence — runs, protection, demonstration, PR
 
-*Pending: filled in the evidence commit after the remote steps execute. Nothing in this
-section may be claimed before it is observed against the API.*
+| Evidence | Observed result |
+|---|---|
+| Run A — push of `906d0e8` (run `37492236362`) | `completed / success` — all 7 jobs green on a cold runner (pin clone, `npm ci`, real-PostgreSQL database acceptance, both release builds) |
+| Branch protection on `main` (G-1…G-4) — GET after PUT | required checks = the 7 job names; `strict=false` (deliberate, D-12); `enforce_admins=true`; 1 approval + `require_code_owner_reviews=true`; `allow_force_pushes=false`; `allow_deletions=false`; `required_conversation_resolution=true` |
+| Negative demonstration push — `negdemo/m1-s4-checks` @ `a984ca4` (runs `37502375857`, `37502371325`) | `fast-checks = failure`: step 7 preamble OK, step 8 stage 1 OK, **step 9 stage 2 = failure**, steps 10–21 skipped; all 6 downstream jobs **skipped** — the §37.2 skip-on-failure rule observed at step level and job level |
+| Negative demonstration PR #3 → `main` | `mergeable=true`, **`mergeable_state=blocked`**, head check `fast-checks = failure`; closed without merge, demo branch deleted from the remote and local git |
+| M1-S4 PR #4 → `codex/my-shop-m1-s3-prisma-bootstrap` | open, `mergeable=true`, `mergeable_state=clean`; pull_request run `37502987989` = `completed / success` (7/7) |
+| Repository visibility | `private=false` (`visibility=public`) per D-15 — required before protection could be applied; protection PUT succeeded on the retry after the transition lock cleared |
 
 ### 4.5 Remote lock
 
-*Pending: final `git status` / `ls-remote` proof, evidence commit.*
+The lock itself is asserted against the final commit's push and verified by
+`git status` (clean), the branch head matching this record's commit SHA on the
+remote, `git rev-list --left-right --count` against `codex/my-shop-m1-s3-prisma-bootstrap`
+(zero behind), and `git ls-remote` showing `codex/my-shop-m1-s3-prisma-bootstrap`,
+`codex/my-shop-m1-s2-prisma`… and `main` at their untouched predecessor SHAs
+(`3a95f44`, `dcca491`, `53f6aaa`). Those outputs are captured in the acceptance
+report immediately after the push of this very commit, since a record cannot
+contain its own push's proof.
 
 ---
 
