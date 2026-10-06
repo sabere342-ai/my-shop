@@ -1,0 +1,314 @@
+# My Shop continuous integration — Master Plan §37.2 (stages 1–24), §37.3 (gates G-1…G-9).
+#
+# Stage-to-job map ("as far as defined at M1-S4", §40.4):
+#
+#   fast-checks          preamble (pin verification), 1, 2, 3, 4, 8, 9, 10,
+#                        11, 12, 13, 14, 15, 23, 24, and gate G-6.
+#                        Later stages are later steps: a red stage skips the rest.
+#   backend-unit         5   — API unit project + contracts + testkit
+#   backend-integration-database
+#                        6 + 7 — integration over HTTP, then the real-PostgreSQL
+#                        database acceptance, against a postgres:18 service.
+#                        The test-setup step provisions the fixed test database
+#                        that stage 6's harness connects to.
+#   contract-drift       16  — composite `tsc --build` (ADR-001). The generator
+#                        itself is M1-S6; this stage grows with it.
+#   dependency-audit     17  — `npm audit --audit-level=high` (G-9's dependency
+#                        half at this slice; offline-invariant G-9 lands with M1b).
+#   flutter-build-windows
+#   flutter-build-android
+#                        18  — release builds on the pinned Flutter 3.47.5.
+#
+#   19–22 (device provisioning, device tests, golden review, adversarial sync
+#   interruption) are deliberately absent: their artifacts do not exist until
+#   M1b (§40.5). They arrive as new jobs, never as silent omissions.
+#
+# Every job name above is registered as a required status check on `main`
+# (S-11 / gates G-1, G-2). A job that stops reporting therefore *blocks*
+# instead of passing — removing a check fails closed, not open.
+#
+# Supply chain: official actions only, each pinned to a full commit SHA;
+# `permissions: contents: read`; no secrets are provisioned to any step.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fast-checks:
+    name: fast-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Diff base for the stage-1 secret scan: the PR base on pull requests,
+      # the pushed-to commit's predecessor on pushes, empty on manual runs —
+      # tool/ci/shared.mjs falls back to merge-base with origin/main.
+      CI_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          fetch-depth: 0 # diff gates need merge-base and migration history
+
+      - name: Node setup
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Flutter SDK cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: ~/flutter-*
+          key: ${{ runner.os }}-flutter-sdk-${{ hashFiles('.tool-versions') }}
+
+      - name: Flutter SDK (pinned by .tool-versions)
+        run: node tool/ci/setup-flutter.mjs
+
+      - name: Preamble — toolchain pin verification
+        run: npm run toolchain:verify
+
+      - name: Stage 1 — secret scan
+        run: npm run gate:secret-scan
+
+      - name: Stage 2 — markdown lint and link check
+        run: npm run gate:markdown
+
+      - name: Stage 3 — format and lint
+        run: |
+          npm run format:check
+          npm run lint
+
+      - name: Stage 4 — typecheck
+        run: npm run typecheck
+
+      - name: Flutter packages
+        run: node tool/flutterw.mjs pub get
+
+      - name: Stage 8 — flutter analyze
+        run: npm run flutter:analyze
+
+      - name: Stages 9-10 — flutter tests
+        run: npm run flutter:test
+
+      - name: Stage 11 — import boundary (§6.3)
+        run: npm run gate:import-boundary
+
+      - name: Stage 12 — vocabulary ban (§2.2)
+        run: npm run gate:vocabulary
+
+      - name: Stage 13 — localization and bidi (§6.8)
+        run: npm run gate:localization
+
+      - name: Stage 14 — design system (§6.9)
+        run: npm run gate:design-system
+
+      - name: Stage 15 — journal immutability (§31.1)
+        run: npm run gate:immutability
+
+      - name: Stages 23-24 — offline path guards (§38.12.1)
+        run: npm run gate:offline
+
+      - name: Gate G-6 — migration immutability (§35.1)
+        run: npm run gate:migrations
+
+  backend-unit:
+    name: backend-unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: fast-checks
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+
+      - name: Node setup
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Stage 5 — API unit tests
+        run: npm run test:unit --workspace @my-shop/api
+
+      - name: Stage 5 — contracts tests
+        run: npm test --workspace @my-shop/contracts
+
+      - name: Stage 5 — testkit tests
+        run: npm test --workspace @my-shop/testkit
+
+  backend-integration-database:
+    name: backend-integration-database
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: fast-checks
+    services:
+      postgres:
+        # §36.1 T-2 / M1-S3 acceptance: real PostgreSQL, never a mock. The
+        # version matches the local acceptance target (PostgreSQL 18).
+        image: postgres:18
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Passwordless over localhost with the service's trust auth — the same
+      # posture as the local development server. The redaction guard in
+      # test-setup.base.ts refuses credential-shaped URLs, so none of these
+      # may ever gain an inline password.
+      DATABASE_URL: postgresql://my_shop_app@127.0.0.1:5432/my_shop_test?schema=public
+      MIGRATION_DATABASE_URL: postgresql://my_shop_migrator@127.0.0.1:5432/my_shop_test?schema=public
+      ADMIN_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/postgres?schema=public
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+
+      - name: Node setup
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Stage 7 prerequisite — fixed test database from empty
+        run: npm run db:migrate --workspace @my-shop/api -- test-setup
+
+      - name: Stage 6 — integration tests over HTTP
+        run: npm run test:integration --workspace @my-shop/api
+
+      - name: Stage 7 — database acceptance (real PostgreSQL 18)
+        run: npm run test:database --workspace @my-shop/api
+
+  contract-drift:
+    name: contract-drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: fast-checks
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+
+      - name: Node setup
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Stage 16 — contract drift via composite build (ADR-001; generator is M1-S6)
+        run: npm run build
+
+  dependency-audit:
+    name: dependency-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: fast-checks
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+
+      - name: Node setup
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Stage 17 — dependency audit (0 high allowed)
+        run: npm audit --audit-level=high
+
+  flutter-build-windows:
+    name: flutter-build-windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    needs: fast-checks
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+
+      - name: Node setup
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Flutter SDK cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: ~/flutter-*
+          key: ${{ runner.os }}-flutter-sdk-${{ hashFiles('.tool-versions') }}
+
+      - name: Flutter SDK (pinned by .tool-versions)
+        run: node tool/ci/setup-flutter.mjs
+
+      - name: Flutter packages
+        run: node tool/flutterw.mjs pub get
+
+      - name: Enable Windows desktop
+        run: node tool/flutterw.mjs config --enable-windows-desktop
+
+      - name: Stage 18 — release build (Windows)
+        run: node tool/flutterw.mjs build windows --release
+
+  flutter-build-android:
+    name: flutter-build-android
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: fast-checks
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+
+      - name: Node setup
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Java setup (Gradle 9 / AGP need a JDK; matches the host's JDK 21)
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Gradle wrapper cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-wrapper-${{ hashFiles('apps/desktop/android/gradle/wrapper/gradle-wrapper.properties') }}
+
+      - name: Flutter SDK cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: ~/flutter-*
+          key: ${{ runner.os }}-flutter-sdk-${{ hashFiles('.tool-versions') }}
+
+      - name: Flutter SDK (pinned by .tool-versions)
+        run: node tool/ci/setup-flutter.mjs
+
+      - name: Flutter packages
+        run: node tool/flutterw.mjs pub get
+
+      - name: Stage 18 — release build (Android APK)
+        run: node tool/flutterw.mjs build apk --release
