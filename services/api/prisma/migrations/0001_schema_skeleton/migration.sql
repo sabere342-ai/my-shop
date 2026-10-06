@@ -1,0 +1,11 @@
+-- M1-S3 schema skeleton (Master Plan section 40.4): no domain tables yet.
+--
+-- section 39.5 forbids a table for a capability whose slice has not authorized it,
+-- so the first migration is intentionally empty beyond this note. `prisma migrate
+-- deploy` still runs it end to end from an empty database: the migrator role
+-- applies the file, `_prisma_migrations` records it, and the acceptance suite
+-- asserts that `public` contains nothing else.
+--
+-- Generated with:
+--   prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script
+-- This is an empty migration.

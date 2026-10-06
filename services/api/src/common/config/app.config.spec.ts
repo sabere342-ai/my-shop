@@ -85,6 +85,88 @@ describe('loadConfig', () => {
   it('reports the violating property in the error message', () => {
     expect(() => loadConfig({ PORT: '0' })).toThrow(/http\.port/);
   });
+
+  it('accepts both database URLs when they name different roles', () => {
+    const config = loadConfig({
+      DATABASE_URL: 'postgresql://app@localhost:5432/myshop',
+      MIGRATION_DATABASE_URL: 'postgresql://migrator@localhost:5432/myshop',
+    });
+
+    expect(config.database.applicationUrl).toBeDefined();
+    expect(config.database.migrationUrl).toBeDefined();
+  });
+
+  it('accepts one database URL without the other', () => {
+    // The pairing check only applies when both are known. An operator who set one
+    // is not told the other is wrong — it was never declared.
+    const appOnly = loadConfig({ DATABASE_URL: 'postgresql://app@localhost:5432/myshop' });
+    const migrationOnly = loadConfig({ MIGRATION_DATABASE_URL: 'postgresql://m@localhost:5432/myshop' });
+
+    expect(appOnly.database.migrationUrl).toBeUndefined();
+    expect(migrationOnly.database.applicationUrl).toBeUndefined();
+  });
+
+  it('refuses to start when both database URLs identify the same role', () => {
+    // §13.4: a deployment where the migrator is the application credential has no
+    // role separation, and the comment on DatabaseConfig promises this refusal.
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: 'postgresql://same@localhost:5432/myshop',
+        MIGRATION_DATABASE_URL: 'postgresql://same@localhost:5432/myshop',
+      }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it('treats a rotated password on the same role as the same identity', () => {
+    // The password is excluded from the identity on purpose: same role, same
+    // server, same database is one credential whichever password it carries.
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: 'postgresql://app:old-password@localhost:5432/myshop',
+        MIGRATION_DATABASE_URL: 'postgresql://app:new-password@localhost:5432/myshop',
+      }),
+    ).toThrow(/section 13\.4/);
+  });
+
+  it('never echoes the connection URLs in the refusal', () => {
+    // An exit-code-78 failure routinely lands in CI output (§13.6).
+    let caught: unknown;
+    try {
+      loadConfig({
+        DATABASE_URL: 'postgresql://app:do-not-log-this@localhost:5432/myshop',
+        MIGRATION_DATABASE_URL: 'postgresql://app:do-not-log-that@localhost:5432/myshop',
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ConfigurationError);
+    const message = (caught as ConfigurationError).message;
+    expect(message).not.toContain('do-not-log-this');
+    expect(message).not.toContain('do-not-log-that');
+    expect(message).not.toContain('localhost');
+    expect(message).toContain('DATABASE_URL');
+    expect(message).toContain('MIGRATION_DATABASE_URL');
+  });
+
+  it('rejects a database URL that is not a postgresql URL', () => {
+    // Prisma would fail at first use; §22.3 requires the failure at startup.
+    expect(() => loadConfig({ DATABASE_URL: 'mysql://app@localhost:3306/myshop' })).toThrow(
+      /DATABASE_URL must be a postgresql connection URL/,
+    );
+    expect(() => loadConfig({ DATABASE_URL: 'not a url' })).toThrow(ConfigurationError);
+  });
+
+  it('rejects a database URL that cannot be parsed as a URL', () => {
+    // The shape check above catches most malformations; this catches the rest
+    // without echoing the offending value.
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: 'postgresql://app@localhost:not-a-port/myshop',
+        MIGRATION_DATABASE_URL: 'postgresql://migrator@localhost:5432/myshop',
+      }),
+    ).toThrow(ConfigurationError);
+  });
 });
 
 describe('ConfigurationError', () => {

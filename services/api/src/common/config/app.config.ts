@@ -91,12 +91,22 @@ class DatabaseConfig {
    * migration jobs, and an application role with DML only, subject to forced RLS and
    * without BYPASSRLS. Having both URLs present is what lets the startup check refuse
    * a deployment where they are the same credential.
+   *
+   * M1-S3 begins consuming these values, so the shape is validated too: a
+   * connection URL that Prisma would reject later must be refused now, at the same
+   * exit code 78 as every other configuration failure, rather than at first query.
    */
   @IsString()
+  @Matches(/^postgres(?:ql)?:\/\/\S+$/, {
+    message: 'DATABASE_URL must be a postgresql connection URL (Master Plan section 13.6)',
+  })
   @IsOptional()
   applicationUrl?: string;
 
   @IsString()
+  @Matches(/^postgres(?:ql)?:\/\/\S+$/, {
+    message: 'MIGRATION_DATABASE_URL must be a postgresql connection URL (Master Plan section 13.6)',
+  })
   @IsOptional()
   migrationUrl?: string;
 }
@@ -225,6 +235,55 @@ function flattenViolations(violations: readonly ValidationError[], prefix = ''):
 }
 
 /**
+ * The role identity of a connection URL for the §13.4 separation check.
+ *
+ * User, host, port, and database only. The password is deliberately excluded: the
+ * same role with a rotated password is still the same role, and two roles are
+ * distinct the moment any component differs. Returns `undefined` when the value
+ * cannot be parsed as a URL at all, so the caller can report the failure without
+ * echoing the value itself.
+ */
+function roleIdentity(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.username}|${parsed.hostname}|${parsed.port}|${parsed.pathname}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Master Plan §13.4: the migrator and the application must be separate roles.
+ *
+ * When both URLs are configured and resolve to the same identity, the deployment
+ * is a migration job running with the application's credential — the exact
+ * configuration `app.config.ts` promises to refuse at startup. The message names
+ * the variables and the rule, never the URLs: an exit-code-78 failure can land in
+ * CI logs (§13.6).
+ */
+function checkRoleSeparation(database: DatabaseConfig): readonly string[] {
+  if (database.applicationUrl === undefined || database.migrationUrl === undefined) {
+    return [];
+  }
+
+  const application = roleIdentity(database.applicationUrl);
+  const migration = roleIdentity(database.migrationUrl);
+
+  if (application === undefined || migration === undefined) {
+    return ['database: a connection URL is not a parseable URL'];
+  }
+
+  if (application === migration) {
+    return [
+      'database: DATABASE_URL and MIGRATION_DATABASE_URL identify the same role, host, and database; ' +
+        'Master Plan section 13.4 requires a separate migrator and application role',
+    ];
+  }
+
+  return [];
+}
+
+/**
  * Builds and validates the configuration, or throws ConfigurationError.
  *
  * Throwing is deliberate. Master Plan §36.1 T-1 requires that a rule be able to fail
@@ -247,8 +306,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfigShape
     skipMissingProperties: false,
   });
 
-  if (violations.length > 0) {
-    throw new ConfigurationError(flattenViolations(violations));
+  const allViolations = [...flattenViolations(violations), ...checkRoleSeparation(instance.database)];
+
+  if (allViolations.length > 0) {
+    throw new ConfigurationError(allViolations);
   }
 
   const config: AppConfigShape = {

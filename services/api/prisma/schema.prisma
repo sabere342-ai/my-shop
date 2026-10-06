@@ -1,0 +1,24 @@
+// My Shop — Prisma schema skeleton (Master Plan section 40.4, slice M1-S3).
+//
+// section 8.3 makes `prisma migrate deploy` the only migration command permitted
+// outside a developer machine, and section 35 keeps migrations forward-only: this
+// file is the single source of truth the migration workflow diffs against.
+//
+// M1-S3 deliberately defines **no models**. A table exists only for a capability
+// whose slice authorized it (section 39.5), and domain tables arrive with their
+// owning slices. The skeleton covers the workflow and the roles, not the data.
+//
+// The datasource URL is read from `DATABASE_URL`, which the application role owns.
+// The migration wrapper (`scripts/db.mjs`) runs the Prisma CLI with `DATABASE_URL`
+// rebound to `MIGRATION_DATABASE_URL`, so the migrator role is selected by the
+// process environment rather than by a second block in this file — one datasource
+// block, one schema, and no ambient way for a migration to run as the application.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}

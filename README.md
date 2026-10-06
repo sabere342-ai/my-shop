@@ -14,11 +14,12 @@ Where the code and that document disagree, the document wins and the code is the
 
 | Phase | Slice | State |
 |---|---|---|
-| M0 | P1 — Foundation, discovery, master plan | complete, PR open |
-| M0 | P2 — Offline-capable POS architecture amendment | complete, PR open |
-| M1 | S1 — Monorepo skeleton and pinned toolchain | complete, PR open |
-| M1 | **S2 — Backend skeleton** | **complete on this branch** |
-| M1 | S3–S6 | not started |
+| M0 | P1 — Foundation, discovery, master plan | complete, PR #1 open |
+| M0 | P2 — Offline-capable POS architecture amendment | complete, PR #2 open |
+| M1 | S1 — Monorepo skeleton and pinned toolchain | complete, branch pushed; no PR yet (`gh` unavailable) |
+| M1 | S2 — Backend skeleton | complete, branch pushed; no PR yet (`gh` unavailable) |
+| M1 | **S3 — Prisma bootstrap** | **complete on this branch** |
+| M1 | S4–S6 | not started |
 
 Nothing is deployed. Nothing is released. No PR has been merged — Master Plan gate G-12
 and CI gate G-4 require an explicit, separate owner authorization to merge, and there is
@@ -97,6 +98,29 @@ npm run build                # composite build in dependency order
 
 Secrets live in the environment. Only `.env.example`, which contains placeholders, is
 committed (Master Plan §13.6, §42.6).
+
+### Local database
+
+The backend talks to PostgreSQL 18 through Prisma (ADR-005) under two roles
+(Master Plan §13.4): `my_shop_migrator` owns DDL and is used only by the migration
+workflow, `my_shop_app` owns DML only. With the three URLs from `.env.example` set
+in the environment:
+
+```bash
+npm run db:bootstrap        # create/refresh both roles and their grants (prisma/roles.sql)
+npm run db:migrate          # prisma migrate deploy, as the migrator role
+npm run db:migrate -- dev   # create a migration — local development only (§8.3)
+```
+
+The target database must already exist: neither role may create one (§13.4), so
+`db:bootstrap`/`db:migrate` fail with a clear error until it does. Locally,
+`node scripts/db.mjs test-setup` (from `services/api`) creates it first.
+
+The root `npm test` runs the database acceptance suite, which drops and recreates a
+fixed database named `my_shop_test`. It therefore requires `DATABASE_URL`,
+`MIGRATION_DATABASE_URL`, and `ADMIN_DATABASE_URL` to be set **and to name that
+database** (the maintenance URL must name another); anything else is refused before
+anything is touched (Master Plan §36.1 T-5 — no silent skips).
 
 ### Running the backend
 

@@ -24,6 +24,7 @@ import { Module, type DynamicModule, type Provider } from '@nestjs/common';
 import { APP_FILTER, APP_PIPE } from '@nestjs/core';
 import type { Logger as PinoLogger } from 'pino';
 import { HealthModule } from './common/health/health.module';
+import { DatabaseModule } from './common/database/database.module';
 import { ProblemDetailsFilter } from './common/errors/problem.filter';
 import { createValidationPipe } from './common/pipes/validation.pipe';
 import { APP_LOGGER, createAppLogger } from './app.providers';
@@ -58,7 +59,10 @@ export class AppModule {
   static forRoot(config: AppConfigShape): DynamicModule {
     return {
       module: AppModule,
-      imports: [HealthModule],
+      // The database module is global (M1-S3): business modules will inject the
+      // Prisma service without importing it, the same way they will inject the
+      // configuration and the logger.
+      imports: [HealthModule, DatabaseModule.forRoot(config)],
       providers: coreProviders(config),
       exports: [APP_CONFIG, APP_LOGGER],
     };

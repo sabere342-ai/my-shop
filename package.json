@@ -28,6 +28,8 @@
     "format": "npm run format --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build --workspace @my-shop/contracts && npm run build --workspace @my-shop/testkit && npm run build --workspace @my-shop/api",
+    "db:bootstrap": "npm run db:bootstrap --workspace @my-shop/api",
+    "db:migrate": "npm run db:migrate --workspace @my-shop/api --",
     "verify": "npm run toolchain:verify && npm run format:check && npm run lint && npm run typecheck && npm run test && npm run flutter:analyze && npm run flutter:test",
     "verify:node": "npm run toolchain:verify && npm run format:check && npm run lint && npm run typecheck && npm run test",
     "verify:flutter": "npm run flutter:analyze && npm run flutter:test"
