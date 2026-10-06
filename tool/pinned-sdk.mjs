@@ -119,7 +119,16 @@ export function resolvePinnedSdk() {
             cwd: repoRoot,
             stdio: ['ignore', 'pipe', 'ignore'],
           });
-    const sdk = JSON.parse(output);
+    // A cold clone (a fresh CI runner, or a brand-new local install) prints
+    // bootstrap progress on stdout — "Expanding downloaded archive with
+    // PowerShell…" and friends — before the JSON report. The report is the
+    // only line guaranteed to start a JSON object, so parsing starts there;
+    // on an already-warm SDK this is a no-op.
+    const jsonStart = output.indexOf('{');
+    if (jsonStart === -1) {
+      throw new Error('flutter --version --machine produced no JSON report');
+    }
+    const sdk = JSON.parse(output.slice(jsonStart));
     if (sdk['frameworkVersion'] !== version) {
       // Found a different SDK at that path. Reporting it is more useful than
       // searching on, because it names the actual discrepancy.

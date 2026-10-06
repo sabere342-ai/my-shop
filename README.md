@@ -18,8 +18,9 @@ Where the code and that document disagree, the document wins and the code is the
 | M0 | P2 — Offline-capable POS architecture amendment | complete, PR #2 open |
 | M1 | S1 — Monorepo skeleton and pinned toolchain | complete, branch pushed; no PR yet (`gh` unavailable) |
 | M1 | S2 — Backend skeleton | complete, branch pushed; no PR yet (`gh` unavailable) |
-| M1 | **S3 — Prisma bootstrap** | **complete on this branch** |
-| M1 | S4–S6 | not started |
+| M1 | S3 — Prisma bootstrap | complete, branch pushed; no PR yet (`gh` unavailable) |
+| M1 | **S4 — CI pipeline** | **complete on this branch** |
+| M1 | S5—S6 | not started |
 
 Nothing is deployed. Nothing is released. No PR has been merged — Master Plan gate G-12
 and CI gate G-4 require an explicit, separate owner authorization to merge, and there is
@@ -85,7 +86,8 @@ stale was found there.
 
 ```bash
 npm run toolchain:verify     # node, dart, flutter all match the pin
-npm run verify               # toolchain + format + lint + typecheck + tests
+npm run gates                # every mechanical CI gate, locally
+npm run verify               # toolchain + gates + format + lint + typecheck + tests
 
 ./tool/flutterw doctor       # the pinned Flutter SDK
 ./tool/flutterw analyze --fatal-infos
@@ -139,6 +141,23 @@ curl -i localhost:3000/readyz         # readiness — runs registered checks, 50
 Both probes are unauthenticated, so neither discloses a version number, a dependency name,
 or a connection string. Every other response is an RFC 7807 `application/problem+json`
 document with a stable machine-readable `code` (Master Plan §34.3).
+
+### Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and pull request
+(Master Plan §37.2). The `fast-checks` job carries the toolchain pin verification, the
+secret scan, the markdown checks, format, lint, typecheck, Flutter analyze and tests, the
+mechanical §6/§2.2/§31.1 gates, the offline-path guards (stages 23–24), and migration
+immutability (G-6). Parallel jobs behind it run the backend unit suite, integration and
+database acceptance against a real PostgreSQL 18 service, the composite build (contract
+drift), the dependency audit, and the Flutter release builds for Windows and Android.
+Stages 19–22 arrive with M1b, when the artifacts they test exist (§40.5).
+
+Every job name is a required status check on `main`, alongside code-owner review
+([`.github/CODEOWNERS`](.github/CODEOWNERS)), `enforce_admins`, and refused force pushes
+and deletions (§37.3 G-1…G-4). A deliberately failing check therefore blocks the PR it is
+attached to: the check is the gate, not the ceremony. The same gates run locally with
+`npm run gates`.
 
 ## Governance
 
