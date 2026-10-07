@@ -1,0 +1,9 @@
+{
+  "@@locale": "en",
+  "appTitle": "My Shop",
+  "shellTitle": "Foundation ready",
+  "shellBody": "No business screens in this build.",
+  "notFoundTitle": "Page not found",
+  "notFoundBody": "The link may have been removed or changed.",
+  "backToHome": "Back to start"
+}

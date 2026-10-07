@@ -19,8 +19,9 @@ Where the code and that document disagree, the document wins and the code is the
 | M1 | S1 — Monorepo skeleton and pinned toolchain | complete, branch pushed; no PR yet (`gh` unavailable) |
 | M1 | S2 — Backend skeleton | complete, branch pushed; no PR yet (`gh` unavailable) |
 | M1 | S3 — Prisma bootstrap | complete, branch pushed; no PR yet (`gh` unavailable) |
-| M1 | **S4 — CI pipeline** | **complete on this branch** |
-| M1 | S5—S6 | not started |
+| M1 | S4 — CI pipeline | complete, branch pushed; no PR yet (`gh` unavailable) |
+| M1 | **S5 — App skeleton (design system, l10n, router, bootstrap)** | **complete on this branch (no PR yet)** |
+| M1 | S6 | not started |
 
 Nothing is deployed. Nothing is released. No PR has been merged — Master Plan gate G-12
 and CI gate G-4 require an explicit, separate owner authorization to merge, and there is

@@ -1,0 +1,7 @@
+arb-dir: lib/l10n
+template-arb-file: app_ar.arb
+output-dir: lib/l10n
+output-localization-file: app_localizations.dart
+output-class: AppLocalizations
+# Master Plan 6.8: ar (Egypt) is the default locale and en is the fallback.
+# Both catalogs are complete, so nothing is reported as untranslated.
