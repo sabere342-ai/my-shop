@@ -13,11 +13,47 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  # Master Plan 6.8: ARB catalogs via flutter_localizations + gen-l10n.
+  # The version matches the flutter_localizations pin exactly.
+  intl: ^0.20.3
+  # Master Plan 6.6: go_router with a redirect guard. No version is pinned by
+  # the plan; ^18 is the current stable at this slice.
+  go_router: ^18.0.2
+  # Master Plan 6.4: Riverpod with code generation. The plan's original 2.x
+  # line cannot build on the pinned Dart 3.13 SDK: the Riverpod 2.x generator
+  # (riverpod_generator 2.6.5) caps `analyzer <8`, and analyzer 7.x crashes
+  # analysing the Dart 3.13 SDK sources (dot-shorthands). Owner-authorized
+  # plan-level amendment: the minimum supported Riverpod 3.x line, which pulls
+  # a modern analyzer. See the M1-S5 slice record for the evidence.
+  flutter_riverpod: ^3.4.3
+  riverpod_annotation: ^4.0.7
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  # Master Plan 6.7: build_runner is the only code generator in the client.
+  # 2.16.1 is the current 2.x line; it resolves `build ^4`, which the Riverpod
+  # 3.x generator depends on. Still 2.x, so the plan's build_runner decision
+  # is unchanged.
+  build_runner: ^2.16.1
+  # Riverpod 3.x generator line; requires analyzer >=13, which clears the
+  # Dart 3.13 dot-shorthand crash that blocked generation (see 6.4 note).
+  riverpod_generator: ^4.0.9
+
+# Pin `analyzer` to 14.4.0. build_runner 2.16.1 (the current 2.x line) declares
+# `analyzer >=13.3 <15`, but its resolver still assigns
+# `AnalysisOptionsImpl.contextFeatures`, a setter analyzer 14.5.0 moved to
+# `AnalysisOptionsBuilder`. 14.4.0 is the newest analyzer that still exposes it
+# and still clears the Dart 3.13 dot-shorthand crash. Drop this override when a
+# build_runner release catches up with analyzer 14.5+.
+dependency_overrides:
+  analyzer: 14.4.0
 
 flutter:
   uses-material-design: true
+  # Master Plan 6.8: gen-l10n runs against l10n.yaml; the generated
+  # localizations are committed (6.7).
+  generate: true
