@@ -217,10 +217,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Stage 16a — contract drift via composite build (ADR-001; generator is M1-S6)
+      - name: Stage 16a - contract drift via composite build (ADR-001; generator is M1-S6)
         run: npm run build
 
-      - name: Stage 16b — contract drift gate: committed OpenAPI and generated types must match the backend byte-for-byte
+      - name: Stage 16b - contract drift gate, committed OpenAPI and generated types must match the backend byte-for-byte
         run: npm run contracts:check
 
       - name: Stage 16c — publish the OpenAPI contract as a build artifact
