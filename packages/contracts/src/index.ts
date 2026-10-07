@@ -30,10 +30,11 @@ export const API_NAMESPACE = '/api/v1';
 
 /**
  * Contract surface version. Bumped by M1-S6 (0.1.0 → 0.2.0) when the generated
- * contract types were introduced; a mismatch between client and server is a
+ * contract types were introduced and by M1b-S2 (0.2.0 → 0.3.0) when the sync
+ * contract (§40.5) joined them; a mismatch between client and server is a
  * build failure, not a runtime surprise.
  */
-export const CONTRACT_VERSION = '0.2.0';
+export const CONTRACT_VERSION = '0.3.0';
 
 /**
  * Correlation identifier present on every request and echoed on every error, so a

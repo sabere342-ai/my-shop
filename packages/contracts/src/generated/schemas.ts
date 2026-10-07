@@ -10,6 +10,26 @@ export interface LivenessReport {
   readonly status: 'ok';
 }
 
+/** OpenAPI schema `MutationId` (Master Plan §7.1, ADR-001). */
+export type MutationId = string;
+
+/** OpenAPI schema `MutationPayload` (Master Plan §7.1, ADR-001). */
+export interface MutationPayload {
+  readonly mutationId: MutationId;
+  readonly organizationId: string;
+  readonly deviceId: string;
+  readonly actorUserId: string;
+  readonly actorRoleSnapshot: object;
+  readonly aggregateType: string;
+  readonly aggregateId: string;
+  readonly operationType: 'CREATE' | 'VOID' | 'RETURN' | 'REVERSE';
+  readonly payload: object;
+  readonly payloadVersion: number;
+  readonly deviceLocalSequence: number;
+  readonly localCreatedAt: string;
+  readonly deviceIdempotencyKey: string;
+}
+
 /** OpenAPI schema `ProblemDocument` (Master Plan §7.1, ADR-001). */
 export interface ProblemDocument {
   readonly type: string;
@@ -61,3 +81,7 @@ export interface ReadinessReport {
   readonly ready: boolean;
   readonly checks: Readonly<Record<string, ReadinessDetail>>;
 }
+
+/** OpenAPI schema `SyncState` (Master Plan §7.1, ADR-001). */
+export type SyncState =
+  'LOCAL_ONLY' | 'PENDING' | 'SYNCING' | 'SYNCED' | 'RETRYABLE_ERROR' | 'CONFLICT' | 'PERMANENT_REJECTED';

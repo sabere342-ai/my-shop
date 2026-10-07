@@ -5,6 +5,12 @@
  * and is committed at `packages/contracts/openapi.json`; CI regenerates it into a
  * temporary directory and refuses the build on any byte difference (G-7, stage 16).
  *
+ * The M1b-S2 sync contract (§40.5) arrives in two pieces of the same single
+ * source: `MutationPayload` is a decorated class registered as an extra model,
+ * and `syncContractSchemas()` contributes the two standalone components
+ * (`MutationId`, `SyncState`) that a class declaration cannot express. Both are
+ * code in `common/sync/sync.contract.ts` — still no hand-maintained JSON.
+ *
  * Deliberate headlessness. Pros, §37.4, /healthz and /readyz never touch a
  * dependency, and the body of this document is a pure function of the module graph.
  * The documented endpoints are exactly the controllers bound to the real
@@ -28,6 +34,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { AppModule } from '../../app.module';
 import { loadConfig } from '../config/app.config';
+import { MutationPayload, syncContractSchemas } from '../sync/sync.contract';
 
 export const OPENAPI_TITLE = 'My Shop API';
 export const OPENAPI_VERSION = '1';
@@ -70,7 +77,10 @@ export async function openapiDocument(env: NodeJS.ProcessEnv = process.env): Pro
       .setDescription(OPENAPI_DESCRIPTION)
       .setVersion(OPENAPI_VERSION)
       .build();
-    return SwaggerModule.createDocument(app, options);
+    const document = SwaggerModule.createDocument(app, options, { extraModels: [MutationPayload] });
+    const schemas = ((document.components ??= {}).schemas ??= {});
+    Object.assign(schemas, syncContractSchemas());
+    return document;
   } finally {
     await app.close();
   }

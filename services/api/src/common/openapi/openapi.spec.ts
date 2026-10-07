@@ -14,6 +14,7 @@
 
 import type { OpenAPIObject, ReferenceObject, SchemaObject } from '@nestjs/swagger';
 import { ERROR_CODES } from '../errors/problem';
+import { MUTATION_ID_DESCRIPTION } from '../sync/sync.contract';
 import { OPENAPI_DESCRIPTION, OPENAPI_TITLE, OPENAPI_VERSION, openapiDocument } from './openapi';
 
 type Document = OpenAPIObject;
@@ -132,6 +133,86 @@ describe('OpenAPI document builder', () => {
     expect(prop(fieldError, 'field').type).toBe('string');
     expect(prop(fieldError, 'messages').type).toBe('array');
     expect(prop(fieldError, 'messages').items).toEqual({ type: 'string' });
+  });
+
+  it('publishes the M1b-S2 sync contract from the decorated source', async () => {
+    // §40.5: mutation payload schema, mutation_id, sync state enum — asserted
+    // against the built document, so the extra model, the composed components,
+    // and the $ref all resolve exactly as CI publishes them.
+    const document = await buildDocument();
+
+    const payload = objectSchema('MutationPayload', document);
+    expect(payload.type).toBe('object');
+    expect(Object.keys(payload.properties ?? {})).toEqual([
+      'mutationId',
+      'organizationId',
+      'deviceId',
+      'actorUserId',
+      'actorRoleSnapshot',
+      'aggregateType',
+      'aggregateId',
+      'operationType',
+      'payload',
+      'payloadVersion',
+      'deviceLocalSequence',
+      'localCreatedAt',
+      'deviceIdempotencyKey',
+    ]);
+    expect(payload.required).toEqual([
+      'mutationId',
+      'organizationId',
+      'deviceId',
+      'actorUserId',
+      'actorRoleSnapshot',
+      'aggregateType',
+      'aggregateId',
+      'operationType',
+      'payload',
+      'payloadVersion',
+      'deviceLocalSequence',
+      'localCreatedAt',
+      'deviceIdempotencyKey',
+    ]);
+
+    // §38.9.1: mutation_id is one uuid definition the whole document points at.
+    expect(payload.properties?.['mutationId']).toEqual({
+      type: 'string',
+      format: 'uuid',
+      $ref: '#/components/schemas/MutationId',
+      description: MUTATION_ID_DESCRIPTION,
+    });
+    const mutationId = objectSchema('MutationId', document);
+    expect(mutationId.type).toBe('string');
+    expect(mutationId.format).toBe('uuid');
+
+    expect(prop(payload, 'operationType')).toMatchObject({
+      type: 'string',
+      enum: ['CREATE', 'VOID', 'RETURN', 'REVERSE'],
+    });
+    expect(prop(payload, 'aggregateType').enum).toBeUndefined();
+    expect(prop(payload, 'payloadVersion').type).toBe('integer');
+    expect(prop(payload, 'deviceLocalSequence').type).toBe('integer');
+    expect(prop(payload, 'localCreatedAt').format).toBe('date-time');
+    expect(prop(payload, 'payload').type).toBe('object');
+
+    // §38.10.1: the push carries the mutation, never the queue's own accounting.
+    expect(payload.properties).not.toHaveProperty('syncState');
+    expect(payload.properties).not.toHaveProperty('attemptCount');
+    expect(payload.properties).not.toHaveProperty('lastErrorCode');
+    expect(payload.properties).not.toHaveProperty('lastAttemptAt');
+
+    // §38.13: the lifecycle is a named component for the client's state machine.
+    const syncState = objectSchema('SyncState', document);
+    expect(syncState.type).toBe('string');
+    expect([...(syncState.enum ?? [])]).toEqual([
+      'LOCAL_ONLY',
+      'PENDING',
+      'SYNCING',
+      'SYNCED',
+      'RETRYABLE_ERROR',
+      'CONFLICT',
+      'PERMANENT_REJECTED',
+    ]);
   });
 
   it('is deterministic across independent builds', async () => {
