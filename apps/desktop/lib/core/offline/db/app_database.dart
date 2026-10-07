@@ -16,7 +16,7 @@ class LocalMeta extends Table {
 }
 
 @DriftDatabase(tables: [LocalMeta])
-class AppDatabase extends _ {
+class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
