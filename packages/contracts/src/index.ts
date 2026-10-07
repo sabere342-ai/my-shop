@@ -6,11 +6,19 @@
  * backend and consumed as a package, so contract drift becomes a compile-time
  * failure rather than a runtime surprise.
  *
- * Generation and the drift gate belong to M1-S6. This slice establishes the
- * package, its compiler contract, and the typed primitives the generator will
- * emit into — deliberately no hand-written request or response shapes, because
- * a hand-maintained contract is exactly the drift the ADR rejects.
+ * Generation and the drift gate are M1-S6: the generated contract lives in
+ * `./generated/schemas` and is regenerated from the backend's OpenAPI document.
+ * This index adds the typed primitives and the contract version alongside —
+ * deliberately no hand-written request or response shapes, because a
+ * hand-maintained contract is exactly the drift the ADR rejects.
  */
+
+/**
+ * The contract types generated from the backend's OpenAPI document (M1-S6).
+ * Do not hand-edit: `npm run contracts:check` fails CI when these drift from the
+ * backend (Master Plan §7.1 G-7, ADR-001).
+ */
+export * from './generated/schemas';
 
 /** Stable, machine-readable error codes carried by every problem document. */
 export const PROBLEM_CONTENT_TYPE = 'application/problem+json';
@@ -21,11 +29,11 @@ export const PROBLEM_CONTENT_TYPE = 'application/problem+json';
 export const API_NAMESPACE = '/api/v1';
 
 /**
- * Contract surface version. Incremented by M1-S6 when the generator is
- * introduced; a mismatch between client and server is a build failure, not a
- * runtime surprise.
+ * Contract surface version. Bumped by M1-S6 (0.1.0 → 0.2.0) when the generated
+ * contract types were introduced; a mismatch between client and server is a
+ * build failure, not a runtime surprise.
  */
-export const CONTRACT_VERSION = '0.1.0';
+export const CONTRACT_VERSION = '0.2.0';
 
 /**
  * Correlation identifier present on every request and echoed on every error, so a

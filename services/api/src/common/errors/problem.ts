@@ -17,6 +17,8 @@
  * blocking a sale (§34.4 as amended by M0-P2).
  */
 
+import { ApiProperty } from '@nestjs/swagger';
+
 /** Stable, machine-readable error codes. Values are API surface: never change one. */
 export const ERROR_CODES = {
   // --- Request shape (400, 422) ---
@@ -151,21 +153,90 @@ export function messageForCode(code: ErrorCode): string {
   return MESSAGE_BY_CODE[code] ?? MESSAGE_BY_CODE.INTERNAL_ERROR;
 }
 
-export interface ProblemDocument {
+/**
+ * RFC 7807 extension: one field's validation detail, carried only by
+ * `VALIDATION_FAILED` problem documents. Mirrors the shape the validation pipe
+ * reports, field name plus the messages applicable to it.
+ */
+export class ProblemFieldError {
+  @ApiProperty({
+    description: 'The request property that failed validation.',
+    example: 'http.port',
+  })
+  readonly field!: string;
+
+  @ApiProperty({
+    description: 'Every validation message applicable to the field.',
+    example: ['http.port must be an integer'],
+  })
+  readonly messages!: readonly string[];
+}
+
+/**
+ * The RFC 7807 problem document (Master Plan §34.3, ADR-028).
+ *
+ * A class rather than an interface so the OpenAPI document is generated from the
+ * same type the handlers return (Master Plan §7.1, ADR-001) — the contract test
+ * "response shape matches the generated contract" (§36.2) is enforceable because
+ * there is no second, hand-written shape to drift from.
+ */
+export class ProblemDocument {
   /** RFC 7807 `type`. A stable URN identifying the problem class. */
-  readonly type: string;
+  @ApiProperty({
+    description: 'RFC 7807 type. A stable URN identifying the problem class, one page per code.',
+    example: 'https://docs.my-shop/errors/INSUFFICIENT_STOCK',
+  })
+  readonly type!: string;
+
   /** RFC 7807 `title`. Short, human-readable, code-derived. */
-  readonly title: string;
-  readonly status: number;
+  @ApiProperty({
+    description: 'RFC 7807 title. Short, human-readable, code-derived.',
+    example: 'Insufficient stock',
+  })
+  readonly title!: string;
+
+  @ApiProperty({
+    description: 'RFC 7807 status. The HTTP status the code maps to.',
+    type: 'integer',
+    example: 409,
+  })
+  readonly status!: number;
+
   /** The stable machine-readable code the Flutter client branches on. */
-  readonly code: ErrorCode;
-  readonly detail: string;
+  @ApiProperty({
+    description: 'The stable machine-readable code the client branches on. Values are API surface: never change one.',
+    enum: Object.values(ERROR_CODES),
+  })
+  readonly code!: ErrorCode;
+
+  @ApiProperty({
+    description: 'RFC 7807 detail. A safe, user-presentable sentence; never an internal message.',
+    example: 'Not enough stock is available.',
+  })
+  readonly detail!: string;
+
   /** RFC 7807 `instance`. The request path. */
-  readonly instance: string;
+  @ApiProperty({
+    description: 'RFC 7807 instance. The request path.',
+    example: '/api/v1/sales',
+  })
+  readonly instance!: string;
+
   /** Correlates the response with the server log line. §13.1: the only internals exposed. */
-  readonly traceId: string;
+  @ApiProperty({
+    description:
+      'Correlates the response with the server log line. The only internal detail a production error carries (Master Plan §13.1).',
+    example: '01JB8Q2W7XK9V4M6N3P5R0T2YD',
+  })
+  readonly traceId!: string;
+
   /** RFC 7807 extension: field-level validation detail. Absent for non-validation errors. */
-  readonly errors?: readonly { readonly field: string; readonly messages: readonly string[] }[];
+  @ApiProperty({
+    description: 'RFC 7807 extension: field-level validation detail. Absent for non-validation errors.',
+    required: false,
+    type: () => [ProblemFieldError],
+  })
+  readonly errors?: readonly ProblemFieldError[];
 }
 
 const PROBLEM_TYPE_PREFIX = 'https://docs.my-shop/errors/';

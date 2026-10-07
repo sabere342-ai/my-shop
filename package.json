@@ -19,6 +19,8 @@
     "flutter:analyze": "node ./tool/flutterw.mjs analyze --fatal-infos",
     "flutter:test": "node ./tool/flutterw.mjs test",
     "flutter:doctor": "node ./tool/flutterw.mjs doctor",
+    "contracts:generate": "node ./tool/contract/generate.mjs",
+    "contracts:check": "node ./tool/contract/generate.mjs --check",
     "contracts:typecheck": "npm run typecheck --workspace @my-shop/contracts",
     "testkit:typecheck": "npm run typecheck --workspace @my-shop/testkit",
     "api:typecheck": "npm run typecheck --workspace @my-shop/api",
@@ -40,8 +42,8 @@
     "gate:offline": "node ./tool/ci/offline-guards.mjs",
     "gate:migrations": "node ./tool/ci/migration-immutability.mjs",
     "gates": "npm run gate:secret-scan && npm run gate:markdown && npm run gate:import-boundary && npm run gate:vocabulary && npm run gate:localization && npm run gate:design-system && npm run gate:immutability && npm run gate:offline && npm run gate:migrations",
-    "verify": "npm run toolchain:verify && npm run gates && npm run format:check && npm run lint && npm run typecheck && npm run test && npm run flutter:analyze && npm run flutter:test",
-    "verify:node": "npm run toolchain:verify && npm run gates && npm run format:check && npm run lint && npm run typecheck && npm run test",
+    "verify": "npm run toolchain:verify && npm run gates && npm run format:check && npm run lint && npm run typecheck && npm run contracts:check && npm run test && npm run flutter:analyze && npm run flutter:test",
+    "verify:node": "npm run toolchain:verify && npm run gates && npm run format:check && npm run lint && npm run typecheck && npm run contracts:check && npm run test",
     "verify:flutter": "npm run flutter:analyze && npm run flutter:test"
   }
 }

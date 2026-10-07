@@ -19,9 +19,9 @@ Where the code and that document disagree, the document wins and the code is the
 | M1 | S1 — Monorepo skeleton and pinned toolchain | complete, branch pushed; no PR yet (`gh` unavailable) |
 | M1 | S2 — Backend skeleton | complete, branch pushed; no PR yet (`gh` unavailable) |
 | M1 | S3 — Prisma bootstrap | complete, branch pushed; no PR yet (`gh` unavailable) |
-| M1 | S4 — CI pipeline | complete, branch pushed; no PR yet (`gh` unavailable) |
-| M1 | **S5 — App skeleton (design system, l10n, router, bootstrap)** | **complete on this branch (no PR yet)** |
-| M1 | S6 | not started |
+| M1 | S4 — CI pipeline | complete, PR #4 open |
+| M1 | **S5 — App skeleton (design system, l10n, router, bootstrap)** | **complete, PR #5 open** |
+| M1 | **S6 — Shared contract generation and drift check** | **complete, PR #6 open** |
 
 Nothing is deployed. Nothing is released. No PR has been merged — Master Plan gate G-12
 and CI gate G-4 require an explicit, separate owner authorization to merge, and there is
@@ -95,6 +95,8 @@ npm run verify               # toolchain + gates + format + lint + typecheck + t
 ./tool/flutterw test
 
 npm run typecheck            # every TypeScript workspace
+npm run contracts:check      # drift gate: committed OpenAPI + generated types match the backend
+npm run contracts:generate   # regenerate openapi.json and src/generated/schemas.ts
 npm run test                 # Jest across every workspace
 npm run build                # composite build in dependency order
 ```
@@ -150,8 +152,11 @@ document with a stable machine-readable `code` (Master Plan §34.3).
 secret scan, the markdown checks, format, lint, typecheck, Flutter analyze and tests, the
 mechanical §6/§2.2/§31.1 gates, the offline-path guards (stages 23–24), and migration
 immutability (G-6). Parallel jobs behind it run the backend unit suite, integration and
-database acceptance against a real PostgreSQL 18 service, the composite build (contract
-drift), the dependency audit, and the Flutter release builds for Windows and Android.
+database acceptance against a real PostgreSQL 18 service, the composite build and the
+byte-level contract drift gate — regenerating the committed OpenAPI document and generated
+client types from the backend and failing on any byte difference, then publishing the
+OpenAPI contract as a build artifact (stage 16) — the dependency audit, and the Flutter
+release builds for Windows and Android.
 Stages 19–22 arrive with M1b, when the artifacts they test exist (§40.5).
 
 Every job name is a required status check on `main`, alongside code-owner review
