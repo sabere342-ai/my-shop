@@ -13,9 +13,13 @@
  * Stage 24 — **remote applies write through one door.** Inside
  * `lib/core/offline/`, a local database write outside
  * `lib/core/offline/apply/apply_remote_without_outbox.dart` is a finding.
- * Three exemptions are declared: the outbox module (the sanctioned write path
- * for *local* mutations, §38.8), migration DDL directories, and the guard
- * entry file itself.
+ * Four exemptions are declared: the outbox module (the sanctioned write path
+ * for *local* mutations, §38.8), migration DDL directories, the guard
+ * entry file itself, and build-generated `*.g.dart` companions. Generated
+ * files are committed only so a fresh clone compiles; their content belongs
+ * to the generator, a hand edit would be erased by regeneration, and the
+ * patterns below steer authored code — so a finding there could never be
+ * fixed by an author and would only train the gate to be ignored.
  *
  * Heuristic form, declared: the write patterns are Drift-shaped (`into(`,
  * `update(x).replace(`, `insert(`, `put(`, `customStatement(`, raw
@@ -56,10 +60,15 @@ const LOCAL_WRITE_RULES = [
 
 const findings = [];
 const dartFiles = walkFiles(LIB, (path) => path.endsWith('.dart'));
+let generatedCount = 0;
 
 for (const rel of dartFiles) {
-  const text = stripComments(readFileSync(join(repoRoot, rel), 'utf8'), 'c-style');
   const relFromLib = rel.replace(/^apps\/desktop\/lib\//, '');
+  if (relFromLib.endsWith('.g.dart')) {
+    generatedCount += 1;
+    continue;
+  }
+  const text = stripComments(readFileSync(join(repoRoot, rel), 'utf8'), 'c-style');
   const isOffline = relFromLib.startsWith('core/offline/');
   const isOutbox = relFromLib.startsWith('core/offline/outbox/');
   const isMigration = relFromLib.includes('/migrations/');
@@ -92,9 +101,10 @@ for (const rel of dartFiles) {
   }
 }
 
+const generatedNote = generatedCount > 0 ? `; ${generatedCount} generated *.g.dart exempt` : '';
 const status =
   dartFiles.length === 0
     ? 'no dart source yet — armed'
-    : `${dartFiles.length} dart file(s); offline module ${walkFiles(OFFLINE, () => true).length > 0 ? 'present' : 'not yet present (armed)'}`;
+    : `${dartFiles.length} dart file(s)${generatedNote}; offline module ${walkFiles(OFFLINE, () => true).length > 0 ? 'present' : 'not yet present (armed)'}`;
 
 finish('offline-guards', findings, `${status} (§37.2 stages 23–24)`);

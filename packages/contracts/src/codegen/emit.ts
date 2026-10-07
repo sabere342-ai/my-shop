@@ -21,6 +21,8 @@ export interface EmitSchemaProperty {
 
 export interface EmitSchema {
   type?: string;
+  description?: string;
+  enum?: ReadonlyArray<string | number>;
   properties?: Readonly<Record<string, EmitSchemaProperty>>;
   required?: ReadonlyArray<string>;
 }
@@ -68,6 +70,11 @@ function additionalType(additional: EmitSchemaProperty['additionalProperties']):
   return additional.type === 'string' ? 'Readonly<Record<string, string>>' : 'object';
 }
 
+/** The `'a' | 'b'` rendering of a string enum, or a numeric union for numbers. */
+function enumUnion(values: ReadonlyArray<string | number>): string {
+  return values.map((value) => (typeof value === 'number' ? `${value}` : `'${value}'`)).join(' | ');
+}
+
 /** The TypeScript type annotation for one schema property. */
 export function propertyType(prop: EmitSchemaProperty): string {
   if (prop.$ref !== undefined) {
@@ -75,7 +82,7 @@ export function propertyType(prop: EmitSchemaProperty): string {
   }
   const enumValues = prop.enum;
   if (enumValues !== undefined && enumValues.length > 0) {
-    return enumValues.map((value) => (typeof value === 'number' ? `${value}` : `'${value}'`)).join(' | ');
+    return enumUnion(enumValues);
   }
   switch (prop.type) {
     case 'string':
@@ -94,17 +101,49 @@ export function propertyType(prop: EmitSchemaProperty): string {
   }
 }
 
+/**
+ * The `export type` rendering for a schema that is not an object shape: a
+ * top-level enum (the sync state machine, §38.13) or a named primitive (the
+ * `MutationId` identity, §38.9.1) — both introduced by M1b-S2 (§40.5).
+ *
+ * Anything else — a schema with neither properties, enum, nor a primitive type —
+ * has no honest rendering, and the emitter refuses it rather than guessing.
+ */
+function aliasType(name: string, schema: EmitSchema): string {
+  const enumValues = schema.enum;
+  if (enumValues !== undefined && enumValues.length > 0) {
+    return enumUnion(enumValues);
+  }
+  switch (schema.type) {
+    case 'string':
+      return 'string';
+    case 'boolean':
+      return 'boolean';
+    case 'integer':
+    case 'number':
+      return 'number';
+    default:
+      throw new Error(
+        `unsupported top-level schema \`${name}\`: expected an object with properties, an enum, or a string/number/boolean type`,
+      );
+  }
+}
+
 /** Render the TypeScript module for a document. Deterministic by construction. */
 export function emit(document: EmitDocument): string {
   const schemas = document.components?.schemas ?? {};
   const lines: string[] = [HEADER];
   const entries = Object.entries(schemas).sort(([a], [b]) => a.localeCompare(b));
   for (const [name, schema] of entries) {
-    const required = new Set(schema.required ?? []);
     lines.push('');
     lines.push(`/** OpenAPI schema \`${name}\` (Master Plan §7.1, ADR-001). */`);
+    if (schema.properties === undefined) {
+      lines.push(`export type ${name} = ${aliasType(name, schema)};`);
+      continue;
+    }
+    const required = new Set(schema.required ?? []);
     lines.push(`export interface ${name} {`);
-    for (const [member, prop] of Object.entries(schema.properties ?? {})) {
+    for (const [member, prop] of Object.entries(schema.properties)) {
       const optional = required.has(member) ? '' : '?';
       lines.push(`  readonly ${member}${optional}: ${propertyType(prop)};`);
     }

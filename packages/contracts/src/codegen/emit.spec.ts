@@ -1,4 +1,4 @@
-import { emit, propertyType, type EmitDocument } from './emit';
+import { emit, propertyType, type EmitDocument, type EmitSchema } from './emit';
 
 const fixture: EmitDocument = {
   openapi: '3.0.0',
@@ -90,6 +90,55 @@ describe('contracts emitter', () => {
     expect(source).toContain('  readonly colors?: readonly string[];');
     expect(source).toContain('  readonly widget?: Widget;');
     expect(source).toContain('  readonly entries: Readonly<Record<string, Widget>>;');
+  });
+
+  it('emits a top-level enum as a union type', () => {
+    // M1b-S2 (§40.5): the §38.13 sync states reach the client as a named union,
+    // not as an empty interface or a silently dropped schema.
+    const source = emit({
+      openapi: '3.0.0',
+      info: { title: 'Fixture API', version: '1' },
+      components: {
+        schemas: {
+          SyncState: { type: 'string', enum: ['PENDING', 'SYNCED'] },
+        },
+      },
+    });
+
+    expect(source).toContain("export type SyncState = 'PENDING' | 'SYNCED';");
+    expect(source).not.toContain('export interface SyncState');
+  });
+
+  it('emits a named primitive as a type alias', () => {
+    // M1b-S2 (§40.5): MutationId (§38.9.1) is one uuid definition everywhere.
+    const source = emit({
+      openapi: '3.0.0',
+      info: { title: 'Fixture API', version: '1' },
+      components: {
+        schemas: {
+          MutationId: { type: 'string' },
+        },
+      },
+    });
+
+    expect(source).toContain('export type MutationId = string;');
+    expect(source).not.toContain('export interface MutationId');
+  });
+
+  it('refuses a top-level schema it cannot honestly render', () => {
+    // An empty or free-form top-level schema has no TypeScript equivalent the
+    // contract can rely on; failing the generation beats guessing one.
+    const document = (schema: unknown): EmitDocument => ({
+      openapi: '3.0.0',
+      info: { title: 'Fixture API', version: '1' },
+      components: { schemas: { Broken: schema as EmitSchema } },
+    });
+
+    expect(() => emit(document({ type: 'object' }))).toThrow(/unsupported top-level schema `Broken`/);
+    expect(() => emit(document({}))).toThrow(/unsupported top-level schema `Broken`/);
+    expect(() => emit(document({ type: 'array', items: { type: 'string' } }))).toThrow(
+      /unsupported top-level schema `Broken`/,
+    );
   });
 
   it('is deterministic for the same input', () => {
