@@ -13,18 +13,54 @@
  */
 
 import { Injectable } from '@nestjs/common';
+import { ApiExtraModels, ApiProperty, getSchemaPath } from '@nestjs/swagger';
 
 export type ReadinessCheck = () => Promise<{ readonly ok: boolean; readonly reason?: string }>;
 
-export interface ReadinessDetail {
-  readonly ok: boolean;
+/**
+ * One check's outcome inside a readiness report (Master Plan §37.4).
+ *
+ * A class rather than an interface so the OpenAPI document is generated from the
+ * same type the handler returns (Master Plan §7.1, ADR-001).
+ */
+export class ReadinessDetail {
+  @ApiProperty({
+    description: 'Whether the check passed.',
+    example: true,
+  })
+  readonly ok!: boolean;
+
   /** Safe for an unauthenticated caller: a short class of failure, never a diagnostic. */
+  @ApiProperty({
+    description:
+      'A short class of failure, never a diagnostic. Safe for an unauthenticated caller: a failing check reports only the failure class (Master Plan §13.1).',
+    required: false,
+    example: 'unavailable',
+  })
   readonly reason?: string;
 }
 
-export interface ReadinessReport {
-  readonly ready: boolean;
-  readonly checks: Readonly<Record<string, ReadinessDetail>>;
+/**
+ * The readiness report body (Master Plan §37.4).
+ *
+ * `@ApiExtraModels` registers `ReadinessDetail` so the `additionalProperties`
+ * `$ref` below resolves: the checks map is keyed by check name, and the valueless
+ * `$ref` form is the plugin-free way to describe a `Record<string, ReadinessDetail>`.
+ */
+@ApiExtraModels(ReadinessDetail)
+export class ReadinessReport {
+  @ApiProperty({
+    description: 'Whether this instance should receive traffic: every registered check passed.',
+    example: true,
+  })
+  readonly ready!: boolean;
+
+  @ApiProperty({
+    description: 'One entry per registered check, keyed by its registered name.',
+    type: 'object',
+    additionalProperties: { $ref: getSchemaPath(ReadinessDetail) },
+  })
+  readonly checks!: Readonly<Record<string, ReadinessDetail>>;
 }
 
 @Injectable()

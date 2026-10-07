@@ -11,8 +11,9 @@
 #                        database acceptance, against a postgres:18 service.
 #                        The test-setup step provisions the fixed test database
 #                        that stage 6's harness connects to.
-#   contract-drift       16  — composite `tsc --build` (ADR-001). The generator
-#                        itself is M1-S6; this stage grows with it.
+#   contract-drift       16  — composite `tsc --build` (ADR-001), then the
+#                        byte-level drift gate (G-7) and the OpenAPI artifact
+#                        publication (§40.4 M1-S6).
 #   dependency-audit     17  — `npm audit --audit-level=high` (G-9's dependency
 #                        half at this slice; offline-invariant G-9 lands with M1b).
 #   flutter-build-windows
@@ -216,8 +217,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Stage 16 — contract drift via composite build (ADR-001; generator is M1-S6)
+      - name: Stage 16a — contract drift via composite build (ADR-001; generator is M1-S6)
         run: npm run build
+
+      - name: Stage 16b — contract drift gate: committed OpenAPI and generated types must match the backend byte-for-byte
+        run: npm run contracts:check
+
+      - name: Stage 16c — publish the OpenAPI contract as a build artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: openapi
+          path: packages/contracts/openapi.json
+          if-no-files-found: error
 
   dependency-audit:
     name: dependency-audit
