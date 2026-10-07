@@ -264,6 +264,21 @@ pre-existing, none high or critical; zero npm dependencies added.
 `build\windows\x64\runner\Release\my_shop_desktop.exe`, exit 0. `flutter build apk --release` →
 `build\app\outputs\flutter-apk\app-release.apk` (45.6 MB), exit 0.
 
+**R-10 — Remote CI and publication (stages 1–24 in CI).** The branch
+`codex/my-shop-m1-s5-app-skeleton` was pushed at implementation SHA
+`7b81c6f97516d047bb50b5f9b3b4b6040dfcade9`, and PR **#5** was opened with base
+`codex/my-shop-m1-s4-ci-pipeline`, state `OPEN`, `mergeable=MERGEABLE`,
+`mergeStateStatus=CLEAN`, not merged. Both workflow runs completed **success**: run
+`37568861870` (push) and run `37568876518` (pull_request) — `fast-checks` (including
+`flutter analyze` and the full `flutter test` with the goldens on ubuntu-latest),
+`backend-unit`, `backend-integration-database`, `contract-drift`, `dependency-audit`,
+`flutter-build-windows`, and `flutter-build-android`. The Linux `fast-checks` pass confirms the
+committed goldens compare within tolerance across the Windows generation host and the
+ubuntu-latest runner (D-2). This record's own commit is documentation-only and re-runs the same
+workflow; it changes no source, gate, or test. Local lock after the push: `HEAD` =
+`origin/codex/my-shop-m1-s5-app-skeleton`, ahead/behind `0/0`, worktree clean; `origin/main`,
+`origin/codex/my-shop-m1-s4-ci-pipeline`, and the earlier stack refs are untouched.
+
 **Acceptance criteria.**
 
 | AC | Result |
@@ -280,5 +295,5 @@ pre-existing, none high or critical; zero npm dependencies added.
 | AC-10 | pass — `MY_SHOP_MASTER_PLAN.md` byte-identical, SHA-256 `E7B50B24…78688` (§2.5 AC-10; D-1) |
 | AC-11 | pass — no migration created/modified/deleted; gate green (R-5) |
 | AC-12 | pass — secret-scan green; `.env.example` untouched (R-5) |
-| AC-13 | pending — remote CI green on the final SHA and the stacked PR, publication step |
-| AC-14 | pending — remote lock (local HEAD = origin, ahead/behind 0/0), publication step |
+| AC-13 | pass — CI green on the M1-S5 implementation SHA and PR #5 open, `CLEAN`, unmerged (R-10) |
+| AC-14 | pass — local HEAD = origin, ahead/behind 0/0, clean; predecessor refs unchanged (R-10) |
