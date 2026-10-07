@@ -21,7 +21,7 @@ Where the code and that document disagree, the document wins and the code is the
 | M1 | S3 — Prisma bootstrap | complete, branch pushed; no PR yet (`gh` unavailable) |
 | M1 | S4 — CI pipeline | complete, PR #4 open |
 | M1 | **S5 — App skeleton (design system, l10n, router, bootstrap)** | **complete, PR #5 open** |
-| M1 | S6 | in progress — this branch |
+| M1 | **S6 — Shared contract generation and drift check** | **complete, PR #6 open** |
 
 Nothing is deployed. Nothing is released. No PR has been merged — Master Plan gate G-12
 and CI gate G-4 require an explicit, separate owner authorization to merge, and there is

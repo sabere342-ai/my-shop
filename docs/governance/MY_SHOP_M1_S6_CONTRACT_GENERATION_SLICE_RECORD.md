@@ -234,4 +234,87 @@ sync-side contract row; both stay out (§2.2).
 
 ## 4. Results
 
-_Pending — recorded at closeout before publication._
+**R-1 — Dependency, version-matched (D-1, AC-8).** `@nestjs/swagger@11.4.7` added to
+`services/api/package.json` with `--save-exact` (peers `@nestjs/core ^11.0.1`, matching the
+backend's NestJS 11.2.7; official `@nestjs/*` family only). The install added 7 packages.
+`npm audit --audit-level=high` exits 0 with **21 moderate / 0 high** (the baseline 20
+moderates plus one from the swagger tree; `npm audit fix --force` would force a breaking
+Nest 12 upgrade and was declined).
+
+**R-2 — Generated OpenAPI document (S-2, S-3, D-2, D-3).** `openapiDocument()` boots the real
+`AppModule` headlessly (`NestFactory.create(..., { logger: false })`, no `init`/`listen`),
+strips `DATABASE_URL`/`MIGRATION_DATABASE_URL`, and forces `LOG_LEVEL=silent` — generation
+runs on this host, which has no `.env`. The document exposes 5 schemas (`LivenessReport`,
+`ReadinessReport`, `ReadinessDetail`, `ProblemDocument`, `ProblemFieldError`), both probes
+with honest 200/503 responses, and a problem-document 500 with `application/problem+json`
+media type; the info block states the §34.1 v1 EOL rule, §34.3, and that the probes are
+unauthenticated by design. Committed artifact `packages/contracts/openapi.json` SHA-256
+`491358E4335B58C98AF611476E6F336BCAF4E14DFDDAEE7930BEA8B76B60359C`. Two independent builds
+produced byte-identical documents (both `3246A208C28C7EAA05B4AB5947B65BA4C863E10DEF9954AC87552CFD195DEA08`),
+and the serialized document contains no `postgres://` or `secret` material (§13.6/§13.1).
+
+**R-3 — Generated TypeScript contract (S-3, S-4, D-2).** `packages/contracts/src/generated/schemas.ts`
+(SHA-256 `3103505F65AE83EC6AE9A7E2360A8DCE69CF06F5EC8861632B3029CD195AAA4D`) is derived from
+the document by the pure, dependency-free emitter `src/codegen/emit.ts` and formatted by the
+CLI with the repository's prettier rules resolved against the real committed target path.
+`LivenessReport.status` is the single-value union `'ok'`; `ProblemDocument` carries the full
+22-member `ErrorCode` union and an optional `errors` array; `ReadinessReport.checks` is
+`Readonly<Record<string, ReadinessDetail>>`. `index.ts` re-exports the generated types and
+bumps `CONTRACT_VERSION` to `0.2.0`; `index.spec.ts` proves the generated `ProblemDocument`
+compiles to the backend-declared shape (ADR-001).
+
+**R-4 — Gate positives (stages 1, 2, 11–15, 23–24, G-6).** `npm run gates` — **9/9 OK**:
+secret-scan (diff since `53f6aaa`); markdown (16 files); import-boundary (29 files, armed);
+vocabulary (armed); localization (29 files); design-system (12 files); immutability (36
+backend files); offline-guards (29 files, armed); migration-immutability (2 paths, none
+rewritten). `toolchain:verify` pin checks, `format:check`, `lint`, `typecheck` (all three
+workspaces + `tsconfig.test.json`), `flutter analyze --fatal-infos`, and `flutter test` (20
+tests) all exit 0.
+
+**R-5 — Drift gate positives (S-5, S-6, AC-3).** `npm run contracts:check` exits 0 on the
+committed tree (`contracts are in sync`); `npm run contracts:generate` twice changes no bytes
+(after the first materialization it reports `unchanged` for both artifacts). The gate is wired
+into `verify`/`verify:node` (S-8) and CI stage 16 grows exactly within the `contract-drift`
+job: 16a composite build, 16b `npm run contracts:check`, 16c
+`actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` (v7.0.1) publishing
+`packages/contracts/openapi.json`. Job names and all other workflow lines unchanged (AC-1).
+
+**R-6 — Local negatives (AC-2, G-7 non-vacuous).** (a) Perturbing committed
+`openapi.json` (`"3.0.0"` → `"3.1.0"`) made `contracts:check` exit 1 naming the file
+(`contract drift detected:\n  openapi.json: drifted`); regeneration restored it and the gate
+returned green. (b) Changing a backend `@ApiOperation` summary, rebuilding the api, and *not*
+regenerating made the regenerated document differ → exit 1 (`openapi.json: drifted`; generated
+TS correctly stayed stable because no schema changed), restored → green. Both files restored
+byte-identically.
+
+**R-7 — Tests (stage 5).** `npm run test:unit --workspace @my-shop/api` — **106/106 pass** (9
+suites), including the new `openapi.spec.ts` battery (info block, both probes' response
+schemas, `ProblemDocument` completeness vs `Object.values(ERROR_CODES)`, determinism, no-leak).
+`npm run test --workspace @my-shop/contracts` — **12/12** (index + emitter). 
+`npm run test --workspace @my-shop/testkit` — **5/5**. Database suites are CI-run on the
+real-PostgreSQL 18 service (§36.1 T-5 — this host has no `.env`), and passed in CI (R-9).
+
+**R-8 — Remote CI and publication (AC-12, AC-13).** Branch
+`codex/my-shop-m1-s6-contract-generation` pushed at final head `66ece81c4c24768cedeb3a57ee5a95a1a75c1586`
+(impl `dfdeff9` + the ci.yml fix). PR **#6** opened with base `codex/my-shop-m1-s5-app-skeleton`,
+state `OPEN`, `mergeable=TRUE`, `mergeStateStatus=CLEAN`, not merged. Both runs on `66ece81`
+completed **success**: push run `37605858078` and pull_request run `37605862989`; the
+`contract-drift` job `112741603869` in the PR run passed all of 16a/16b/16c including the
+artifact upload. No earlier branch moved (R-11).
+
+**R-9 — Remote negative demo, "drift fails CI" (AC-2, AC-14, M1-S4 negdemo precedent).**
+A deliberately drifting branch `negdemo/m1-s6-drift` (`1b4932f`, only change:
+`"3.0.0"` → `"3.1.0"` in the committed `openapi.json`) was pushed; run `37605947965` completed
+**failure**, with the **only** red job `contract-drift` (`112742097957`) failing at the step
+"Stage 16b - contract drift gate, committed OpenAPI and generated types must match the backend
+byte-for-byte" (16c skipped) while all six other jobs passed. The demo branch was then deleted
+from remote and local (0 `negdemo` refs remain on origin).
+
+**R-10 — The ci.yml fix, recorded honestly.** The first branch push (`dfdeff9`) failed the
+workflow *parse* (0 jobs) — the new step names contained `: ` (colon-space) in a plain YAML
+scalar. Fixed by rewording the step names (`66ece81`), validated with the repo's js-yaml
+parser, and re-run green. The two parse-failed runs are not counted as slice evidence.
+
+**R-11 — Master Plan byte-identical (AC-6).** SHA-256
+`E7B50B24B6D5A358FFC2965AED3A7EFAD03B32E34BE0A841A9148B22D7178688` — unchanged from the
+M1-S5 closeout. No merge performed; `main` still `53f6aaa9`, PRs #1/#2/#4/#5 untouched.
