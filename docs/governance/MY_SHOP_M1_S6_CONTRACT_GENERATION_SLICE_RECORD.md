@@ -290,7 +290,7 @@ byte-identically.
 **R-7 — Tests (stage 5).** `npm run test:unit --workspace @my-shop/api` — **106/106 pass** (9
 suites), including the new `openapi.spec.ts` battery (info block, both probes' response
 schemas, `ProblemDocument` completeness vs `Object.values(ERROR_CODES)`, determinism, no-leak).
-`npm run test --workspace @my-shop/contracts` — **12/12** (index + emitter). 
+`npm run test --workspace @my-shop/contracts` — **12/12** (index + emitter).
 `npm run test --workspace @my-shop/testkit` — **5/5**. Database suites are CI-run on the
 real-PostgreSQL 18 service (§36.1 T-5 — this host has no `.env`), and passed in CI (R-9).
 
