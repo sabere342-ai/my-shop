@@ -123,8 +123,10 @@ export class MutationLedgerService {
     return this.host.prisma.$transaction(async (tx) => {
       // §38.9.2 / T-O5: two devices racing the same mutation are serialized here,
       // before the lookup, so the second waits and then replays instead of applying.
+      // `pg_advisory_xact_lock` returns the Postgres type `void`, which `$queryRaw`
+      // cannot deserialize — a statement, so it belongs in `$executeRaw`.
       const lockKey = `${request.organizationId}:${request.mutationId}`;
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
 
       const existing = await tx.mutationLedger.findUnique({
         where: {

@@ -94,15 +94,15 @@ function fakeTransaction(initial: readonly StoredLedgerRow[] = []): FakeTx {
         sequence += 1;
         return Promise.resolve([{ last_sequence: BigInt(sequence) }]);
       }
-      if (sql.includes('pg_advisory_xact_lock')) {
-        calls.push('advisory-lock');
-        return Promise.resolve([]);
-      }
       return Promise.resolve([]);
     }),
     $executeRaw: jest.fn((strings: TemplateStringsArray) => {
-      if (strings.join('|').toLowerCase().includes('device_sync_cursors')) {
+      const sql = strings.join('|').toLowerCase();
+      if (sql.includes('device_sync_cursors')) {
         calls.push('cursor-upsert');
+      }
+      if (sql.includes('pg_advisory_xact_lock')) {
+        calls.push('advisory-lock');
       }
       return Promise.resolve(1);
     }),
@@ -185,9 +185,12 @@ describe('MutationLedgerService', () => {
     });
 
     // §38.9.2 / T-O5: competing requests are serialized before the lookup, and
-    // the cursor advance is part of the same transaction.
+    // the cursor advance is part of the same transaction. The lock and cursor
+    // advance are statements (`$executeRaw`); the counter allocation is a
+    // `$queryRaw` reading `last_sequence`.
     expect(tx.calls).toEqual(['advisory-lock', 'cursor-upsert']);
-    expect(tx.tx.$queryRaw).toHaveBeenCalledTimes(2); // lock + sequence allocation
+    expect(tx.tx.$executeRaw).toHaveBeenCalledTimes(2);
+    expect(tx.tx.$queryRaw).toHaveBeenCalledTimes(1);
   });
 
   it('an identical replay returns the stored response and applies nothing (§38.9.2)', async () => {
@@ -271,9 +274,11 @@ describe('MutationLedgerService', () => {
       serverSequence: null,
     });
     expect(tx.tx.changeLog.create).not.toHaveBeenCalled();
-    expect(tx.tx.$executeRaw).not.toHaveBeenCalled();
-    // The only `$queryRaw` is the advisory lock; the counter was never touched.
-    expect(tx.tx.$queryRaw).toHaveBeenCalledTimes(1);
+    // The advisory lock is a statement (`$executeRaw`) and the only one: the
+    // counter was never allocated (`$queryRaw` untouched), and no cursor upsert.
+    expect(tx.tx.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(tx.calls).toEqual(['advisory-lock']);
+    expect(tx.tx.$queryRaw).not.toHaveBeenCalled();
   });
 
   it('an identical replay of a stored rejection returns the stored rejection (§38.13)', async () => {
