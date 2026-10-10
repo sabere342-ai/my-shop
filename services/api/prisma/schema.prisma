@@ -31,9 +31,13 @@ datasource db {
 
 /// section 38.9.1: the append-only per-mutation record. One row per
 /// (organization_id, mutation_id); a pushed mutation is never applied twice.
+/// Mapped to the snake_case type the migration creates (§8.3 name discipline);
+/// without this Prisma would look for a quoted "MutationLedgerStatus" type.
 enum MutationLedgerStatus {
   APPLIED
   REJECTED
+
+  @@map("mutation_ledger_status")
 }
 
 /// section 38.9.1: the server mutation ledger. The primary key IS the idempotency

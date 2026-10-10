@@ -289,7 +289,7 @@ export class MutationLedgerService {
   private async allocateSequence(tx: Prisma.TransactionClient, organizationId: string): Promise<bigint> {
     const rows = await tx.$queryRaw<{ last_sequence: unknown }[]>`
       INSERT INTO sync_sequences (organization_id, last_sequence)
-      VALUES (${organizationId}, 1)
+      VALUES (${organizationId}::uuid, 1)
       ON CONFLICT (organization_id)
       DO UPDATE SET last_sequence = sync_sequences.last_sequence + 1
       RETURNING last_sequence
@@ -319,7 +319,7 @@ export class MutationLedgerService {
         last_pull_server_sequence,
         updated_at
       )
-      VALUES (${request.organizationId}, ${request.deviceId}, ${serverSequence}, 0, now())
+      VALUES (${request.organizationId}::uuid, ${request.deviceId}::uuid, ${serverSequence}::bigint, 0, now())
       ON CONFLICT (organization_id, device_id)
       DO UPDATE SET
         last_pushed_server_sequence = GREATEST(

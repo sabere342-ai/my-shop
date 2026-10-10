@@ -375,7 +375,7 @@ describe('database acceptance (real PostgreSQL)', () => {
     function probeEffect(counter: { n: number }, org: string, note: string): ApplyMutationRequest['apply'] {
       return async (tx: Prisma.TransactionClient): Promise<MutationEffectResult> => {
         counter.n += 1;
-        await tx.$executeRaw`INSERT INTO acceptance_probe (org_tag, effect_note) VALUES (${org}, ${note})`;
+        await tx.$executeRaw`INSERT INTO acceptance_probe (org_tag, effect_note) VALUES (${org}::uuid, ${note})`;
         return {
           entityType: 'PROBE',
           entityId: `probe:${note}`,
@@ -398,7 +398,7 @@ describe('database acceptance (real PostgreSQL)', () => {
     /** Counts effect rows for one organization (int8 narrowed to int, so jest sees numbers). */
     async function probeRowCount(org: string): Promise<number> {
       const rows = await app.$queryRaw<{ n: number }[]>`
-        SELECT count(*)::int AS n FROM acceptance_probe WHERE org_tag = ${org}
+        SELECT count(*)::int AS n FROM acceptance_probe WHERE org_tag = ${org}::uuid
       `;
       return rows[0]?.n ?? 0;
     }
@@ -437,14 +437,14 @@ describe('database acceptance (real PostgreSQL)', () => {
       // §38.11.1: one change-log row at server_sequence 1, with the entity stamp.
       const feed = await app.$queryRaw<{ server_sequence: string; entity_type: string }[]>`
         SELECT server_sequence::text AS server_sequence, entity_type
-        FROM change_log WHERE organization_id = ${org}
+        FROM change_log WHERE organization_id = ${org}::uuid
       `;
       expect(feed).toEqual([{ server_sequence: '1', entity_type: 'PROBE' }]);
 
       // §40.5: one cursor, exactly at the sequence that was applied.
       const cursors = await app.$queryRaw<{ device_id: string; seq: string }[]>`
         SELECT device_id, last_pushed_server_sequence::text AS seq
-        FROM device_sync_cursors WHERE organization_id = ${org}
+        FROM device_sync_cursors WHERE organization_id = ${org}::uuid
       `;
       expect(cursors).toEqual([{ device_id: deviceId, seq: '1' }]);
     });
@@ -471,7 +471,7 @@ describe('database acceptance (real PostgreSQL)', () => {
 
       const [row] = await app.$queryRaw<{ status: string; payload_hash: string }[]>`
         SELECT status, payload_hash FROM mutation_ledger
-        WHERE organization_id = ${org} AND mutation_id = ${mutationId}
+        WHERE organization_id = ${org}::uuid AND mutation_id = ${mutationId}::uuid
       `;
       expect(row).toMatchObject({ status: 'APPLIED' });
       expect(row?.payload_hash).toBe(payloadHashOf({ probe: { note: 'version-a' } }));
@@ -498,7 +498,7 @@ describe('database acceptance (real PostgreSQL)', () => {
 
       const [ledger] = await app.$queryRaw<{ status: string; rejection_code: string | null }[]>`
         SELECT status, rejection_code FROM mutation_ledger
-        WHERE organization_id = ${org} AND mutation_id = ${mutationId}
+        WHERE organization_id = ${org}::uuid AND mutation_id = ${mutationId}::uuid
       `;
       expect(ledger).toEqual({ status: 'REJECTED', rejection_code: ERROR_CODES.INSUFFICIENT_STOCK });
 
@@ -507,17 +507,17 @@ describe('database acceptance (real PostgreSQL)', () => {
       expect(
         await app.$queryRaw<
           { last_sequence: string }[]
-        >`SELECT last_sequence::text AS last_sequence FROM sync_sequences WHERE organization_id = ${org}`,
+        >`SELECT last_sequence::text AS last_sequence FROM sync_sequences WHERE organization_id = ${org}::uuid`,
       ).toEqual([]);
       expect(
         await app.$queryRaw<
           { entity_type: string }[]
-        >`SELECT entity_type FROM change_log WHERE organization_id = ${org}`,
+        >`SELECT entity_type FROM change_log WHERE organization_id = ${org}::uuid`,
       ).toEqual([]);
       expect(
         await app.$queryRaw<
           { device_id: string }[]
-        >`SELECT device_id FROM device_sync_cursors WHERE organization_id = ${org}`,
+        >`SELECT device_id FROM device_sync_cursors WHERE organization_id = ${org}::uuid`,
       ).toEqual([]);
 
       // A resend must not re-run the rejecting effect: the stored rejection IS
@@ -539,7 +539,7 @@ describe('database acceptance (real PostgreSQL)', () => {
 
       const failingApply: ApplyMutationRequest['apply'] = async (tx: Prisma.TransactionClient) => {
         counter.n += 1;
-        await tx.$executeRaw`INSERT INTO acceptance_probe (org_tag, effect_note) VALUES (${org}, 'boom')`;
+        await tx.$executeRaw`INSERT INTO acceptance_probe (org_tag, effect_note) VALUES (${org}::uuid, 'boom')`;
         throw new Error('effect exploded');
       };
 
@@ -550,12 +550,14 @@ describe('database acceptance (real PostgreSQL)', () => {
       expect(counter.n).toBe(1);
       expect(await probeRowCount(org)).toBe(0);
       expect(
-        await app.$queryRaw<{ status: string }[]>`SELECT status FROM mutation_ledger WHERE organization_id = ${org}`,
+        await app.$queryRaw<
+          { status: string }[]
+        >`SELECT status FROM mutation_ledger WHERE organization_id = ${org}::uuid`,
       ).toEqual([]);
       expect(
         await app.$queryRaw<
           { last_sequence: string }[]
-        >`SELECT last_sequence::text AS last_sequence FROM sync_sequences WHERE organization_id = ${org}`,
+        >`SELECT last_sequence::text AS last_sequence FROM sync_sequences WHERE organization_id = ${org}::uuid`,
       ).toEqual([]);
     });
 
@@ -610,7 +612,7 @@ describe('database acceptance (real PostgreSQL)', () => {
 
       const cursorA2 = await app.$queryRaw<{ seq: string }[]>`
         SELECT last_pushed_server_sequence::text AS seq FROM device_sync_cursors
-        WHERE organization_id = ${orgA} AND device_id = ${deviceA2}
+        WHERE organization_id = ${orgA}::uuid AND device_id = ${deviceA2}::uuid
       `;
       expect(cursorA2).toEqual([{ seq: '2' }]);
 
