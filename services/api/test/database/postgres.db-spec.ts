@@ -26,9 +26,19 @@
 
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { PrismaClient } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
+import { PrismaClient, type Prisma } from '@prisma/client';
 import { loadConfig } from '../../src/common/config/app.config';
 import { PrismaService } from '../../src/common/database/prisma.service';
+import { ERROR_CODES } from '../../src/common/errors/problem';
+import { MutationContradictionError, MutationRejectedError } from '../../src/common/sync/ledger/mutation-ledger.errors';
+import { payloadHashOf } from '../../src/common/sync/ledger/payload-hash';
+import {
+  type ApplyMutationRequest,
+  type MutationAppliedOutcome,
+  type MutationEffectResult,
+  MutationLedgerService,
+} from '../../src/common/sync/ledger/mutation-ledger.service';
 import { createTestHarness, destroyTestHarness, type TestHarness } from '../harness';
 
 /** The one database this suite may destroy; `scripts/db.mjs` enforces the same name. */
@@ -166,34 +176,47 @@ describe('database acceptance (real PostgreSQL)', () => {
   }, 120_000);
 
   describe('migration workflow from an empty database', () => {
-    it('applies every migration and records exactly one applied row', async () => {
+    it('applies every migration and records exactly one applied row each', async () => {
       const rows = await migrator.$queryRaw<MigrationRow[]>`
         SELECT migration_name, finished_at, rolled_back_at FROM _prisma_migrations
+        ORDER BY migration_name
       `;
 
-      expect(rows).toHaveLength(1);
-      expect(rows[0]?.migration_name).toBe('0001_schema_skeleton');
-      expect(rows[0]?.finished_at).not.toBeNull();
-      expect(rows[0]?.rolled_back_at).toBeNull();
+      // M1b-S4 adds the sync ledger migrations to M1-S3's skeleton; every applied
+      // migration must be finished and never rolled back (migration history is
+      // append-only, Master Plan §44.1).
+      expect(rows.map((row) => row.migration_name)).toEqual(['0001_schema_skeleton', '0002_mutation_ledger']);
+      for (const row of rows) {
+        expect(row.finished_at).not.toBeNull();
+        expect(row.rolled_back_at).toBeNull();
+      }
     });
 
-    it('creates no domain tables — the schema skeleton stays a skeleton', async () => {
+    it('creates exactly the sync-ledger tables and no domain tables yet', async () => {
       // §39.5: a table exists only for a capability whose slice authorized it.
-      // The only table in public may be Prisma's own bookkeeping.
+      // M1b-S4 authorizes the four tables of the sync ledger (§38.9, §38.11,
+      // §40.5): the idempotency table, the change feed, the per-device cursors,
+      // and the per-organization sequence counter. No business table exists yet —
+      // the first is a business slice's to authorize.
       const rows = await migrator.$queryRaw<NameRow[]>`
         SELECT tablename FROM pg_tables
         WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'
         ORDER BY tablename
       `;
 
-      expect(rows).toEqual([]);
+      expect(rows.map((row) => row.tablename)).toEqual([
+        'change_log',
+        'device_sync_cursors',
+        'mutation_ledger',
+        'sync_sequences',
+      ]);
     });
 
     it('is idempotent: a second deploy applies nothing and succeeds', async () => {
       dbScript('deploy');
 
       const rows = await migrator.$queryRaw<MigrationRow[]>`SELECT migration_name FROM _prisma_migrations`;
-      expect(rows).toHaveLength(1);
+      expect(rows).toHaveLength(2);
     });
   });
 
@@ -321,6 +344,281 @@ describe('database acceptance (real PostgreSQL)', () => {
       // §37.4: liveness must not follow readiness into the outage — restarting
       // the process during a migration window would not help it.
       await harness.http.get('/healthz').expect(200);
+    });
+  });
+
+  describe('mutation ledger (M1b-S4)', () => {
+    let service: MutationLedgerService;
+    const probeEffects = { n: 0 };
+
+    // A migrator-owned table the ledger's caller-effects write to through the
+    // application role. It exists only while this suite runs, so its
+    // acceptance is proof of the §38.9.3 atomicity claim: "10 replays produce
+    // one effect" counts probe rows, not in-memory flags.
+    beforeAll(async () => {
+      await migrator.$executeRaw`
+        CREATE TABLE acceptance_probe (
+          id bigserial PRIMARY KEY,
+          org_tag uuid NOT NULL,
+          effect_note text NOT NULL
+        )
+      `;
+      probeEffects.n = 0;
+      service = new MutationLedgerService({ prisma: app });
+    }, 30_000);
+
+    afterAll(async () => {
+      await migrator.$executeRaw`DROP TABLE acceptance_probe`;
+    });
+
+    /** A business effect for the probe table; `counter` counts invocations. */
+    function probeEffect(counter: { n: number }, org: string, note: string): ApplyMutationRequest['apply'] {
+      return async (tx: Prisma.TransactionClient): Promise<MutationEffectResult> => {
+        counter.n += 1;
+        await tx.$executeRaw`INSERT INTO acceptance_probe (org_tag, effect_note) VALUES (${org}, ${note})`;
+        return {
+          entityType: 'PROBE',
+          entityId: `probe:${note}`,
+          resultRef: `probes/${note}`,
+          resultHash: 'f'.repeat(64),
+        };
+      };
+    }
+
+    function mutationRequest(
+      org: string,
+      mutationId: string,
+      deviceId: string,
+      note: string,
+      apply: ApplyMutationRequest['apply'],
+    ): ApplyMutationRequest {
+      return { organizationId: org, mutationId, deviceId, payload: { probe: { note } }, apply };
+    }
+
+    /** Counts effect rows for one organization (int8 narrowed to int, so jest sees numbers). */
+    async function probeRowCount(org: string): Promise<number> {
+      const rows = await app.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM acceptance_probe WHERE org_tag = ${org}
+      `;
+      return rows[0]?.n ?? 0;
+    }
+
+    it('accepts once and answers nine replays from the store with exactly one effect (§38.9.2)', async () => {
+      const org = randomUUID();
+      const mutationId = randomUUID();
+      const deviceId = randomUUID();
+      const counter = { n: 0 };
+      const request = mutationRequest(
+        org,
+        mutationId,
+        deviceId,
+        'ten-replays',
+        probeEffect(counter, org, 'ten-replays'),
+      );
+
+      const first = await service.applyMutation(request);
+      expect(first).toMatchObject({ status: 'APPLIED', isReplay: false, serverSequence: BigInt(1) });
+
+      for (let i = 0; i < 9; i += 1) {
+        const replay = await service.applyMutation(request);
+        expect(replay).toMatchObject({
+          status: 'APPLIED',
+          isReplay: true,
+          serverSequence: BigInt(1),
+          resultRef: 'probes/ten-replays',
+        });
+        expect(replay).toMatchObject({ receivedAt: (first as MutationAppliedOutcome).receivedAt });
+      }
+
+      // The whole acceptance: one effect — one probe row — ten answers.
+      expect(counter.n).toBe(1);
+      expect(await probeRowCount(org)).toBe(1);
+
+      // §38.11.1: one change-log row at server_sequence 1, with the entity stamp.
+      const feed = await app.$queryRaw<{ server_sequence: string; entity_type: string }[]>`
+        SELECT server_sequence::text AS server_sequence, entity_type
+        FROM change_log WHERE organization_id = ${org}
+      `;
+      expect(feed).toEqual([{ server_sequence: '1', entity_type: 'PROBE' }]);
+
+      // §40.5: one cursor, exactly at the sequence that was applied.
+      const cursors = await app.$queryRaw<{ device_id: string; seq: string }[]>`
+        SELECT device_id, last_pushed_server_sequence::text AS seq
+        FROM device_sync_cursors WHERE organization_id = ${org}
+      `;
+      expect(cursors).toEqual([{ device_id: deviceId, seq: '1' }]);
+    });
+
+    it('a second payload under the same mutation_id is a 409 contradiction, never an effect (§38.9.2, F-14)', async () => {
+      const org = randomUUID();
+      const mutationId = randomUUID();
+      const deviceId = randomUUID();
+      const counter = { n: 0 };
+
+      const first = await service.applyMutation(
+        mutationRequest(org, mutationId, deviceId, 'version-a', probeEffect(counter, org, 'version-a')),
+      );
+      expect(first).toMatchObject({ status: 'APPLIED' });
+
+      await expect(
+        service.applyMutation(
+          mutationRequest(org, mutationId, deviceId, 'version-b', probeEffect(counter, org, 'version-b')),
+        ),
+      ).rejects.toBeInstanceOf(MutationContradictionError);
+
+      expect(counter.n).toBe(1);
+      expect(await probeRowCount(org)).toBe(1);
+
+      const [row] = await app.$queryRaw<{ status: string; payload_hash: string }[]>`
+        SELECT status, payload_hash FROM mutation_ledger
+        WHERE organization_id = ${org} AND mutation_id = ${mutationId}
+      `;
+      expect(row).toMatchObject({ status: 'APPLIED' });
+      expect(row?.payload_hash).toBe(payloadHashOf({ probe: { note: 'version-a' } }));
+    });
+
+    it('records a business rejection with no sequence, feed, or cursor, and replays it (§38.13)', async () => {
+      const org = randomUUID();
+      const mutationId = randomUUID();
+      const deviceId = randomUUID();
+      const counter = { n: 0 };
+
+      const rejectingApply: ApplyMutationRequest['apply'] = (): never => {
+        counter.n += 1;
+        throw new MutationRejectedError(ERROR_CODES.INSUFFICIENT_STOCK);
+      };
+      const request = mutationRequest(org, mutationId, deviceId, 'reject-me', rejectingApply);
+
+      const outcome = await service.applyMutation(request);
+      expect(outcome).toMatchObject({
+        status: 'REJECTED',
+        isReplay: false,
+        rejectionCode: ERROR_CODES.INSUFFICIENT_STOCK,
+      });
+
+      const [ledger] = await app.$queryRaw<{ status: string; rejection_code: string | null }[]>`
+        SELECT status, rejection_code FROM mutation_ledger
+        WHERE organization_id = ${org} AND mutation_id = ${mutationId}
+      `;
+      expect(ledger).toEqual({ status: 'REJECTED', rejection_code: ERROR_CODES.INSUFFICIENT_STOCK });
+
+      // A rejected mutation consumes no sequence, writes no change-log row, and
+      // leaves no cursor behind.
+      expect(
+        await app.$queryRaw<
+          { last_sequence: string }[]
+        >`SELECT last_sequence::text AS last_sequence FROM sync_sequences WHERE organization_id = ${org}`,
+      ).toEqual([]);
+      expect(
+        await app.$queryRaw<
+          { entity_type: string }[]
+        >`SELECT entity_type FROM change_log WHERE organization_id = ${org}`,
+      ).toEqual([]);
+      expect(
+        await app.$queryRaw<
+          { device_id: string }[]
+        >`SELECT device_id FROM device_sync_cursors WHERE organization_id = ${org}`,
+      ).toEqual([]);
+
+      // A resend must not re-run the rejecting effect: the stored rejection IS
+      // the answer (§38.13 "never silently dropped, never accidentally revived").
+      const replay = await service.applyMutation(request);
+      expect(replay).toMatchObject({
+        status: 'REJECTED',
+        isReplay: true,
+        rejectionCode: ERROR_CODES.INSUFFICIENT_STOCK,
+      });
+      expect(counter.n).toBe(1);
+    });
+
+    it('a failed effect rolls the probe insert, the feed, and the cursor all back (§38.9.3)', async () => {
+      const org = randomUUID();
+      const mutationId = randomUUID();
+      const deviceId = randomUUID();
+      const counter = { n: 0 };
+
+      const failingApply: ApplyMutationRequest['apply'] = async (tx: Prisma.TransactionClient) => {
+        counter.n += 1;
+        await tx.$executeRaw`INSERT INTO acceptance_probe (org_tag, effect_note) VALUES (${org}, 'boom')`;
+        throw new Error('effect exploded');
+      };
+
+      await expect(
+        service.applyMutation(mutationRequest(org, mutationId, deviceId, 'boom', failingApply)),
+      ).rejects.toThrow('effect exploded');
+
+      expect(counter.n).toBe(1);
+      expect(await probeRowCount(org)).toBe(0);
+      expect(
+        await app.$queryRaw<{ status: string }[]>`SELECT status FROM mutation_ledger WHERE organization_id = ${org}`,
+      ).toEqual([]);
+      expect(
+        await app.$queryRaw<
+          { last_sequence: string }[]
+        >`SELECT last_sequence::text AS last_sequence FROM sync_sequences WHERE organization_id = ${org}`,
+      ).toEqual([]);
+    });
+
+    it('serializes racing same-mutation requests into exactly one effect (T-O5)', async () => {
+      const org = randomUUID();
+      const mutationId = randomUUID();
+      const counter = { n: 0 };
+
+      const racing = Array.from({ length: 10 }, () =>
+        service.applyMutation(
+          mutationRequest(org, mutationId, randomUUID(), 'race', probeEffect(counter, org, 'race')),
+        ),
+      );
+      const outcomes = await Promise.all(racing);
+
+      expect(outcomes.filter((outcome) => outcome.status === 'APPLIED')).toHaveLength(10);
+      expect(outcomes.filter((outcome) => outcome.isReplay)).toHaveLength(9);
+      expect(counter.n).toBe(1);
+      expect(await probeRowCount(org)).toBe(1);
+    });
+
+    it('allocates sequences per organization and never moves a cursor backwards (§38.11.1, §40.5)', async () => {
+      const orgA = randomUUID();
+      const orgB = randomUUID();
+
+      const deviceA1 = randomUUID();
+      const deviceA2 = randomUUID();
+      const counterA = { n: 0 };
+
+      // Org A: two mutations through two devices land at sequences 1 and 2.
+      const first = await service.applyMutation(
+        mutationRequest(orgA, randomUUID(), deviceA1, 'a-first', probeEffect(counterA, orgA, 'a-first')),
+      );
+      const second = await service.applyMutation(
+        mutationRequest(orgA, randomUUID(), deviceA2, 'a-second', probeEffect(counterA, orgA, 'a-second')),
+      );
+      expect(first).toMatchObject({ serverSequence: BigInt(1) });
+      expect(second).toMatchObject({ serverSequence: BigInt(2) });
+
+      // A replay of the first mutation through the second device must not drag
+      // that device's cursor from 2 back to 1: GREATEST is a database property.
+      const replay = await service.applyMutation(
+        mutationRequest(
+          orgA,
+          (first as MutationAppliedOutcome).mutationId,
+          deviceA2,
+          'a-first',
+          probeEffect(counterA, orgA, 'a-first'),
+        ),
+      );
+      expect(replay).toMatchObject({ isReplay: true, serverSequence: BigInt(1) });
+
+      const cursorA2 = await app.$queryRaw<{ seq: string }[]>`
+        SELECT last_pushed_server_sequence::text AS seq FROM device_sync_cursors
+        WHERE organization_id = ${orgA} AND device_id = ${deviceA2}
+      `;
+      expect(cursorA2).toEqual([{ seq: '2' }]);
+
+      const counterB = { n: 0 };
+      const orgBBegin = await service.applyMutation(
+        mutationRequest(orgB, randomUUID(), randomUUID(), 'b-first', probeEffect(counterB, orgB, 'b-first')),
+      );
+      expect(orgBBegin).toMatchObject({ serverSequence: BigInt(1) });
     });
   });
 });

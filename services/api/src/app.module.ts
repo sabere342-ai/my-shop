@@ -25,6 +25,7 @@ import { APP_FILTER, APP_PIPE } from '@nestjs/core';
 import type { Logger as PinoLogger } from 'pino';
 import { HealthModule } from './common/health/health.module';
 import { DatabaseModule } from './common/database/database.module';
+import { LedgerModule } from './common/sync/ledger/mutation-ledger.module';
 import { ProblemDetailsFilter } from './common/errors/problem.filter';
 import { createValidationPipe } from './common/pipes/validation.pipe';
 import { APP_LOGGER, createAppLogger } from './app.providers';
@@ -61,8 +62,10 @@ export class AppModule {
       module: AppModule,
       // The database module is global (M1-S3): business modules will inject the
       // Prisma service without importing it, the same way they will inject the
-      // configuration and the logger.
-      imports: [HealthModule, DatabaseModule.forRoot(config)],
+      // configuration and the logger. The ledger module (M1b-S4) is registered
+      // as the single door for idempotent mutation acceptance; it publishes no
+      // controller, so the endpoint surface is unchanged until M1b-S5/S6.
+      imports: [HealthModule, DatabaseModule.forRoot(config), LedgerModule.forRoot(config)],
       providers: coreProviders(config),
       exports: [APP_CONFIG, APP_LOGGER],
     };
