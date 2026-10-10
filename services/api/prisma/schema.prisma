@@ -1,4 +1,4 @@
-// My Shop — Prisma schema skeleton (Master Plan section 40.4, slice M1-S3).
+// My Shop — Prisma schema (Master Plan section 40.4, slices M1-S3 and M1b-S4).
 //
 // section 8.3 makes `prisma migrate deploy` the only migration command permitted
 // outside a developer machine, and section 35 keeps migrations forward-only: this
@@ -6,7 +6,13 @@
 //
 // M1-S3 deliberately defines **no models**. A table exists only for a capability
 // whose slice authorized it (section 39.5), and domain tables arrive with their
-// owning slices. The skeleton covers the workflow and the roles, not the data.
+// owning slices.
+//
+// M1b-S4 adds the server mutation ledger (section 40.5 row M1b-S4): the four
+// infrastructure tables of the `sync` context (section 8.4) that make every offline
+// mutation idempotently replayable (section 38.9) and produce the per-organization
+// convergence feed (section 38.11). They are convergence artefacts, never business
+// tables (section 39.4, D-8), and none of them is posted to the accounting ledger.
 //
 // The datasource URL is read from `DATABASE_URL`, which the application role owns.
 // The migration wrapper (`scripts/db.mjs`) runs the Prisma CLI with `DATABASE_URL`
@@ -21,4 +27,80 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+/// section 38.9.1: the append-only per-mutation record. One row per
+/// (organization_id, mutation_id); a pushed mutation is never applied twice.
+/// Mapped to the snake_case type the migration creates (§8.3 name discipline);
+/// without this Prisma would look for a quoted "MutationLedgerStatus" type.
+enum MutationLedgerStatus {
+  APPLIED
+  REJECTED
+
+  @@map("mutation_ledger_status")
+}
+
+/// section 38.9.1: the server mutation ledger. The primary key IS the idempotency
+/// key: identical (organization_id, mutation_id) makes `REPLAY` or
+/// `MUTATION_CONTRADICTION` a lookup, never a second effect (section 38.9.2).
+/// `payload_hash` is SHA-256 over the canonical payload; `result_hash` over the
+/// resulting state, so a genuine contradiction is distinguishable from a replay.
+model MutationLedger {
+  organizationId String   @map("organization_id") @db.Uuid
+  mutationId     String   @map("mutation_id") @db.Uuid
+  deviceId       String   @map("device_id") @db.Uuid
+  receivedAt     DateTime @map("received_at") @db.Timestamptz(6)
+  payloadHash    String   @map("payload_hash") @db.VarChar(64)
+  resultRef      String?  @map("result_ref")
+  resultHash     String?  @map("result_hash") @db.VarChar(64)
+  serverSequence BigInt?  @map("server_sequence")
+  status         MutationLedgerStatus
+  rejectionCode  String?  @map("rejection_code")
+
+  @@id([organizationId, mutationId])
+  @@index([organizationId, deviceId])
+  @@index([organizationId, receivedAt])
+  @@map("mutation_ledger")
+}
+
+/// section 38.11.1: the per-organization change feed, written in the same
+/// transaction as the business change. Cursor-based pull pages on
+/// server_sequence (section 38.11.2); `entity_type`/`entity_id` carry the
+/// aggregate the change touched so the feed stays generic (section 39.5).
+model ChangeLog {
+  organizationId String   @map("organization_id") @db.Uuid
+  serverSequence BigInt   @map("server_sequence")
+  mutationId     String?  @map("mutation_id") @db.Uuid
+  entityType     String   @map("entity_type")
+  entityId       String   @map("entity_id")
+  changedAt      DateTime @map("changed_at") @db.Timestamptz(6)
+
+  @@id([organizationId, serverSequence])
+  @@index([organizationId, entityType, entityId])
+  @@map("change_log")
+}
+
+/// section 40.5 M1b-S4: per-device sync cursors. `last_push` tracks the highest
+/// server sequence this device's mutations reached at acceptance (never moved
+/// backwards); `last_pull` is the pull-resume cursor (section 38.11.2), advanced
+/// only after a batch is applied locally.
+model DeviceSyncCursor {
+  organizationId          String   @map("organization_id") @db.Uuid
+  deviceId                String   @map("device_id") @db.Uuid
+  lastPushedServerSequence BigInt? @map("last_pushed_server_sequence")
+  lastPullServerSequence  BigInt   @default(0) @map("last_pull_server_sequence")
+  updatedAt               DateTime @map("updated_at") @db.Timestamptz(6)
+
+  @@id([organizationId, deviceId])
+  @@map("device_sync_cursors")
+}
+
+/// implementation of section 38.11.1's single monotonic per-organization
+/// server sequence. Gaps are expected and harmless (section 38.11.1).
+model SyncSequence {
+  organizationId String @map("organization_id") @db.Uuid
+  lastSequence   BigInt @map("last_sequence")
+
+  @@id([organizationId])
+  @@map("sync_sequences")
 }
