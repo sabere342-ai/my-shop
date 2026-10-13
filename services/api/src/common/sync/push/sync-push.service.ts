@@ -26,7 +26,7 @@ import type { Logger as PinoLogger } from 'pino';
 import { DomainError } from '../../errors/domain.error';
 import { ERROR_CODES } from '../../errors/problem';
 import { MutationContradictionError } from '../ledger/mutation-ledger.errors';
-import type { MutationLedgerService} from '../ledger/mutation-ledger.service';
+import type { MutationLedgerService } from '../ledger/mutation-ledger.service';
 import { type MutationOutcome } from '../ledger/mutation-ledger.service';
 import type { MutationPayload } from '../sync.contract';
 import {

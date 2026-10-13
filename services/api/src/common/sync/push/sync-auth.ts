@@ -61,7 +61,7 @@ export interface SyncAuthenticator {
  * property of the module graph rather than of a configuration flag.
  */
 export class FailClosedSyncAuthenticator implements SyncAuthenticator {
-  authenticate(_request: SyncAuthRequest): Promise<SyncTrustedContext> {
+  authenticate(): Promise<SyncTrustedContext> {
     return Promise.reject(
       new DomainError(
         ERROR_CODES.UNAUTHENTICATED,

@@ -14,10 +14,7 @@
 
 import { DomainError } from '../../src/common/errors/domain.error';
 import { ERROR_CODES } from '../../src/common/errors/problem';
-import type {
-  SyncAuthenticator,
-  SyncTrustedContext,
-} from '../../src/common/sync/push/sync-auth';
+import type { SyncAuthenticator, SyncTrustedContext } from '../../src/common/sync/push/sync-auth';
 
 /** Answers every request with one fixed trusted context. */
 export class FixedSyncAuthenticator implements SyncAuthenticator {

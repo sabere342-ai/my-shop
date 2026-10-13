@@ -52,8 +52,7 @@ export class SyncPushController {
   })
   @ApiResponse({
     status: HttpStatus.FORBIDDEN,
-    description:
-      'The body asserted a device or organization other than the authenticated one (§38.16, §9.3).',
+    description: 'The body asserted a device or organization other than the authenticated one (§38.16, §9.3).',
     content: PROBLEM_CONTENT,
   })
   @ApiResponse({
@@ -74,10 +73,7 @@ export class SyncPushController {
   // single "Created" status would misdescribe a partial batch (§38.10.3).
   @HttpCode(HttpStatus.OK)
   @Post('push')
-  async push(
-    @Body() body: PushBatchRequest,
-    @SyncContext() context: SyncTrustedContext,
-  ): Promise<PushBatchResponse> {
+  async push(@Body() body: PushBatchRequest, @SyncContext() context: SyncTrustedContext): Promise<PushBatchResponse> {
     return this.service.pushBatch(body, context);
   }
 }

@@ -13,7 +13,7 @@ import type { Logger as PinoLogger } from 'pino';
 import { DomainError } from '../../errors/domain.error';
 import { ERROR_CODES } from '../../errors/problem';
 import { MutationContradictionError } from '../ledger/mutation-ledger.errors';
-import type { MutationLedgerService} from '../ledger/mutation-ledger.service';
+import type { MutationLedgerService } from '../ledger/mutation-ledger.service';
 import { type MutationAppliedOutcome, type MutationOutcome } from '../ledger/mutation-ledger.service';
 import type { MutationPayload } from '../sync.contract';
 import { MIN_SUPPORTED_LOCAL_SCHEMA_VERSION, type PushBatchRequest } from './push.contract';
@@ -72,7 +72,8 @@ function ledgerDouble(answers: readonly (MutationOutcome | Error)[]): {
   ledger: MutationLedgerService;
   calls: { organizationId: string; deviceId: string; mutationId: string; payload: Record<string, unknown> }[];
 } {
-  const calls: { organizationId: string; deviceId: string; mutationId: string; payload: Record<string, unknown> }[] = [];
+  const calls: { organizationId: string; deviceId: string; mutationId: string; payload: Record<string, unknown> }[] =
+    [];
   let index = 0;
   const applyMutation = (input: {
     organizationId: string;
@@ -191,9 +192,7 @@ describe('SyncPushService', () => {
         mutationId: '00000000-0000-4000-8000-000000000099',
         deviceIdempotencyKey: '00000000-0000-4000-8000-000000000099',
       });
-      await expect(service.pushBatch(request([mutation(1), second]), CONTEXT)).rejects.toBeInstanceOf(
-        DomainError,
-      );
+      await expect(service.pushBatch(request([mutation(1), second]), CONTEXT)).rejects.toBeInstanceOf(DomainError);
     });
   });
 

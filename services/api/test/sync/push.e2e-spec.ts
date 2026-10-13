@@ -54,7 +54,10 @@ function mutation(sequence: number, overrides: Record<string, unknown> = {}): Re
   };
 }
 
-function body(mutations: readonly Record<string, unknown>[], overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function body(
+  mutations: readonly Record<string, unknown>[],
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     deviceId: DEVICE_ID,
     syncBatchId: BATCH_ID,
@@ -78,7 +81,10 @@ describe('POST /api/v1/sync/push (no database)', () => {
     });
 
     it('refuses every push UNAUTHENTICATED until M2 supplies identity', async () => {
-      const response = await harness.http.post(PUSH_PATH).send(body([mutation(1)])).expect(401);
+      const response = await harness.http
+        .post(PUSH_PATH)
+        .send(body([mutation(1)]))
+        .expect(401);
 
       expect(response.headers['content-type']).toContain('application/problem+json');
       expect(response.body).toMatchObject({ status: 401, code: 'UNAUTHENTICATED', instance: PUSH_PATH });
@@ -134,13 +140,19 @@ describe('POST /api/v1/sync/push (no database)', () => {
 
     it('refuses a duplicate mutation_id with 400 (§38.10.2)', async () => {
       const duplicate = mutation(1);
-      const response = await harness.http.post(PUSH_PATH).send(body([duplicate, { ...duplicate }])).expect(400);
+      const response = await harness.http
+        .post(PUSH_PATH)
+        .send(body([duplicate, { ...duplicate }]))
+        .expect(400);
 
       expect(response.body).toMatchObject({ code: 'VALIDATION_FAILED' });
     });
 
     it('refuses a non-ascending device_local_sequence with 400 (§38.10.2)', async () => {
-      const response = await harness.http.post(PUSH_PATH).send(body([mutation(2), mutation(1)])).expect(400);
+      const response = await harness.http
+        .post(PUSH_PATH)
+        .send(body([mutation(2), mutation(1)]))
+        .expect(400);
 
       expect(response.body).toMatchObject({ code: 'VALIDATION_FAILED' });
     });
@@ -167,7 +179,10 @@ describe('POST /api/v1/sync/push (no database)', () => {
     });
 
     it('never leaks an internal detail on a refusal (§13.1)', async () => {
-      const response = await harness.http.post(PUSH_PATH).send(body([mutation(3), mutation(2)])).expect(400);
+      const response = await harness.http
+        .post(PUSH_PATH)
+        .send(body([mutation(3), mutation(2)]))
+        .expect(400);
       const serialized = JSON.stringify(response.body);
 
       expect(serialized).not.toContain('node_modules');

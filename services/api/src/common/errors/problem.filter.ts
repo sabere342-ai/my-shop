@@ -164,7 +164,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
 
     // §38.10.4: a 503 tells an offline device to try again later. `Retry-After` makes
     // that concrete so a retry stampede does not form the moment the dependency recovers.
-    if (problem.status === HttpStatus.SERVICE_UNAVAILABLE) {
+    if (problem.status === Number(HttpStatus.SERVICE_UNAVAILABLE)) {
       response.setHeader('Retry-After', String(RETRY_AFTER_SECONDS));
     }
 
