@@ -35,6 +35,7 @@ import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swag
 import { AppModule } from '../../app.module';
 import { loadConfig } from '../config/app.config';
 import { MutationPayload, syncContractSchemas } from '../sync/sync.contract';
+import { PushBatchRequest, PushBatchResponse, PushMutationOutcome } from '../sync/push/push.contract';
 
 export const OPENAPI_TITLE = 'My Shop API';
 export const OPENAPI_VERSION = '1';
@@ -77,7 +78,12 @@ export async function openapiDocument(env: NodeJS.ProcessEnv = process.env): Pro
       .setDescription(OPENAPI_DESCRIPTION)
       .setVersion(OPENAPI_VERSION)
       .build();
-    const document = SwaggerModule.createDocument(app, options, { extraModels: [MutationPayload] });
+    const document = SwaggerModule.createDocument(app, options, {
+      // `MutationPayload` is the M1b-S2 shared body; the M1b-S5 push envelope and
+      // its per-mutation outcome are registered explicitly so the document names
+      // them even where a controller reference alone would be ambiguous.
+      extraModels: [MutationPayload, PushBatchRequest, PushBatchResponse, PushMutationOutcome],
+    });
     const schemas = ((document.components ??= {}).schemas ??= {});
     Object.assign(schemas, syncContractSchemas());
     return document;

@@ -37,21 +37,18 @@ export interface ConfiguredApplication {
 }
 
 /**
- * Creates and configures the Nest application.
+ * Applies the process's transport and middleware configuration to an application.
  *
- * Exported separately from `main.ts` so integration tests boot the same application the
- * process boots. §36.2 requires integration tests through routing, validation, service,
- * repository, and the database — which means testing *this* application, not a reduced one.
+ * Extracted from `createApplication` so a test that builds the module graph through
+ * `@nestjs/testing` (for example to override the push authentication boundary) still
+ * runs the exact same helmet, request-logging, body-parsing, and shutdown wiring — a
+ * test application that configured itself differently would be testing something the
+ * process does not run (§36.2).
+ *
+ * `bodyParser: false` must be passed when the application is created, so the JSON limit
+ * installed here is the only one.
  */
-export async function createApplication(config: AppConfigShape): Promise<ConfiguredApplication> {
-  const app = await NestFactory.create(AppModule.forRoot(config), {
-    // The Nest internal logger is replaced by Pino. Two log formats interleaved in one
-    // process is worse than either alone, because an aggregator cannot parse both.
-    logger: false,
-    bodyParser: false,
-  });
-
-  const logger = createAppLogger(config);
+export async function configureApplication(app: INestApplication, logger: PinoLogger): Promise<void> {
   // Routed through the adapter so Nest's own framework diagnostics land in Pino with the
   // same format as application logs. Without it, `logger: false` would mean a failing
   // DI container produced no output at all.
@@ -83,6 +80,25 @@ export async function createApplication(config: AppConfigShape): Promise<Configu
   express.use(bodyParser.urlencoded({ extended: false, limit: MAX_JSON_BODY_BYTES }));
 
   app.enableShutdownHooks();
+}
+
+/**
+ * Creates and configures the Nest application.
+ *
+ * Exported separately from `main.ts` so integration tests boot the same application the
+ * process boots. §36.2 requires integration tests through routing, validation, service,
+ * repository, and the database — which means testing *this* application, not a reduced one.
+ */
+export async function createApplication(config: AppConfigShape): Promise<ConfiguredApplication> {
+  const app = await NestFactory.create(AppModule.forRoot(config), {
+    // The Nest internal logger is replaced by Pino. Two log formats interleaved in one
+    // process is worse than either alone, because an aggregator cannot parse both.
+    logger: false,
+    bodyParser: false,
+  });
+
+  const logger = createAppLogger(config);
+  await configureApplication(app, logger);
 
   return { app, logger };
 }

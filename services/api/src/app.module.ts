@@ -26,6 +26,7 @@ import type { Logger as PinoLogger } from 'pino';
 import { HealthModule } from './common/health/health.module';
 import { DatabaseModule } from './common/database/database.module';
 import { LedgerModule } from './common/sync/ledger/mutation-ledger.module';
+import { PushModule } from './common/sync/push/sync-push.module';
 import { ProblemDetailsFilter } from './common/errors/problem.filter';
 import { createValidationPipe } from './common/pipes/validation.pipe';
 import { APP_LOGGER, createAppLogger } from './app.providers';
@@ -64,8 +65,15 @@ export class AppModule {
       // Prisma service without importing it, the same way they will inject the
       // configuration and the logger. The ledger module (M1b-S4) is registered
       // as the single door for idempotent mutation acceptance; it publishes no
-      // controller, so the endpoint surface is unchanged until M1b-S5/S6.
-      imports: [HealthModule, DatabaseModule.forRoot(config), LedgerModule.forRoot(config)],
+      // controller. The push module (M1b-S5) sits on top of it and is the first
+      // sync route: `POST /api/v1/sync/push`, guarded and fail-closed until M2
+      // supplies real identity (§38.10.1, §38.16).
+      imports: [
+        HealthModule,
+        DatabaseModule.forRoot(config),
+        LedgerModule.forRoot(config),
+        PushModule.forRoot(config),
+      ],
       providers: coreProviders(config),
       exports: [APP_CONFIG, APP_LOGGER],
     };

@@ -3,7 +3,7 @@ import type { ArgumentsHost } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { pino } from 'pino';
 import { DomainError } from './domain.error';
-import { ProblemDetailsFilter } from './problem.filter';
+import { ProblemDetailsFilter, RETRY_AFTER_SECONDS } from './problem.filter';
 import { ERROR_CODES } from './problem';
 import { TRACE_HEADER } from '../logging/trace-id';
 
@@ -209,5 +209,21 @@ describe('ProblemDetailsFilter', () => {
     filter().catch(new DomainError(ERROR_CODES.REPLAY), host);
 
     expect(captured.headers[TRACE_HEADER]).toBeDefined();
+  });
+
+  it('advertises Retry-After on a 503 so an offline device backs off concretely (§38.10.4)', () => {
+    const { host, captured } = hostFor('/api/v1/sync/push');
+    filter().catch(new HttpException('dependency down', HttpStatus.SERVICE_UNAVAILABLE), host);
+
+    expect(captured.statusCode).toBe(503);
+    expect(captured.body).toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
+    expect(captured.headers['retry-after']).toBe(String(RETRY_AFTER_SECONDS));
+  });
+
+  it('does not advertise Retry-After on a non-503 rejection', () => {
+    const { host, captured } = hostFor('/api/v1/sync/push');
+    filter().catch(new DomainError(ERROR_CODES.MUTATION_CONTRADICTION), host);
+
+    expect(captured.headers['retry-after']).toBeUndefined();
   });
 });
