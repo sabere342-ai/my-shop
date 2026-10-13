@@ -19,18 +19,18 @@ void main() {
   });
 
   test('delay is capped at max', () {
-    final BackoffPolicy capped = BackoffPolicy(
-      baseDelay: const Duration(seconds: 10),
-      maxDelay: const Duration(seconds: 30),
+    const BackoffPolicy capped = BackoffPolicy(
+      baseDelay: Duration(seconds: 10),
+      maxDelay: Duration(seconds: 30),
     );
     expect(capped.baseDelayFor(3), const Duration(seconds: 30));
     expect(capped.baseDelayFor(10), const Duration(seconds: 30));
   });
 
   test('if base >= max, return max', () {
-    final BackoffPolicy policy = BackoffPolicy(
-      baseDelay: const Duration(seconds: 60),
-      maxDelay: const Duration(seconds: 30),
+    const BackoffPolicy policy = BackoffPolicy(
+      baseDelay: Duration(seconds: 60),
+      maxDelay: Duration(seconds: 30),
     );
     expect(policy.baseDelayFor(1), const Duration(seconds: 30));
   });
@@ -46,21 +46,21 @@ void main() {
   });
 
   test('Retry-After must be positive; negative is ignored', () {
-    final BackoffPolicy policy = BackoffPolicy(jitterFraction: 0);
+    const BackoffPolicy policy = BackoffPolicy(jitterFraction: 0);
     final Duration delay = policy.delayFor(1, retryAfter: const Duration(seconds: -5));
     expect(delay, policy.baseDelayFor(1));
   });
 
   test('jitterFraction 0 yields deterministic exponential delay', () {
-    final BackoffPolicy noJitter = BackoffPolicy(jitterFraction: 0);
+    const BackoffPolicy noJitter = BackoffPolicy(jitterFraction: 0);
     expect(noJitter.delayFor(1), const Duration(seconds: 1));
     expect(noJitter.delayFor(2), const Duration(seconds: 2));
     expect(noJitter.delayFor(3), const Duration(seconds: 4));
   });
 
   test('jitter is additive and bounded', () {
-    final BackoffPolicy policy = BackoffPolicy(
-      baseDelay: const Duration(seconds: 4),
+    const BackoffPolicy policy = BackoffPolicy(
+      baseDelay: Duration(seconds: 4),
       jitterFraction: 0.5,
     );
     // baseFor(1)=4s, jitter up to 2s → [4s, 6s].
@@ -71,7 +71,7 @@ void main() {
 
   test('isDue returns false before the window and true at or after', () {
     final DateTime last = DateTime.utc(2026, 1, 1, 12, 0, 0);
-    final BackoffPolicy policy = BackoffPolicy(jitterFraction: 0);
+    const BackoffPolicy policy = BackoffPolicy(jitterFraction: 0);
     expect(policy.isDue(attempt: 1, lastAttemptAt: last, now: last), isFalse);
     expect(
       policy.isDue(attempt: 1, lastAttemptAt: last, now: last.add(const Duration(seconds: 1))),
@@ -96,10 +96,9 @@ void main() {
   });
 
   test('isDue honours Retry-After', () {
-    final DateTime now = DateTime.utc(2026, 1, 1, 12, 0, 0);
     final DateTime last = DateTime.utc(2026, 1, 1, 12, 0, 0);
-    final BackoffPolicy policy = BackoffPolicy(jitterFraction: 0);
-    final Duration retryAfter = const Duration(seconds: 10);
+    const BackoffPolicy policy = BackoffPolicy(jitterFraction: 0);
+    const Duration retryAfter = Duration(seconds: 10);
     expect(
       policy.isDue(attempt: 1, lastAttemptAt: last, now: last.add(const Duration(seconds: 9)), retryAfter: retryAfter),
       isFalse,

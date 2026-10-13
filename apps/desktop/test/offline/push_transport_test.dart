@@ -4,12 +4,12 @@ import 'package:my_shop_desktop/core/offline/sync/push_transport.dart';
 void main() {
   group('PushBatchRequest JSON', () {
     test('serializes the required fields and mutations', () {
-      final PushBatchRequest request = PushBatchRequest(
+      const PushBatchRequest request = PushBatchRequest(
         deviceId: 'd001',
         syncBatchId: 's001',
         localSchemaVersion: 2,
         mutations: <PushMutationWire>[
-          const PushMutationWire(
+          PushMutationWire(
             mutationId: 'm001',
             organizationId: 'o001',
             deviceId: 'd001',
