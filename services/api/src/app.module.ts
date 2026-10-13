@@ -68,12 +68,7 @@ export class AppModule {
       // controller. The push module (M1b-S5) sits on top of it and is the first
       // sync route: `POST /api/v1/sync/push`, guarded and fail-closed until M2
       // supplies real identity (§38.10.1, §38.16).
-      imports: [
-        HealthModule,
-        DatabaseModule.forRoot(config),
-        LedgerModule.forRoot(config),
-        PushModule.forRoot(config),
-      ],
+      imports: [HealthModule, DatabaseModule.forRoot(config), LedgerModule.forRoot(config), PushModule.forRoot(config)],
       providers: coreProviders(config),
       exports: [APP_CONFIG, APP_LOGGER],
     };
