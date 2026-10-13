@@ -14,25 +14,25 @@ and untouched
 
 ## 1. Predecessor state, verified not assumed
 
-| Check | Value | Result |
-|---|---|---|
-| Repository root | `C:/dev/my-shop` | pass |
-| Direct remote | `https://github.com/sabere342-ai/my-shop.git` | pass |
-| Entry classification | `CASE_A_CONTINUATION_READY` | pass — clean worktree, empty stash, no active git operations |
-| Current branch / HEAD at entry | `codex/my-shop-m1-s4-ci-pipeline` @ `3fcff8c1e0ce4f47c9d5b9d65d12ab574406359f` | pass — equals canonical M1-S4 token commit |
-| Remote M1-S4 ref | `3fcff8c1e0ce4f47c9d5b9d65d12ab574406359f` | pass — unchanged after `git fetch --prune` |
-| Predecessor parentage | `3fcff8c` → `906d0e8` (M1-S4) → `3a95f44` (M1-S3) → `dcca491` (M1-S2) → `bcc853d` (M1-S1) | pass — stacked ancestry intact |
-| Local `main` / `origin/main` | `53f6aaa9aded2ec2218cec3f8987675a824b70db` | pass — identical, unchanged, ancestor of the stack |
-| Other remote refs at entry | M0-P1 `701255f`, M0-P2 `0d25bd3`, M1-S1 `bcc853d`, M1-S2 `dcca491`, M1-S3 `3a95f44` | pass — all match recorded values |
-| Stale remote-tracking ref | `origin/negdemo/m1-s4-checks` removed by `fetch --prune` | note — the M1-S4 negative-demo branch was already deleted from the remote at S4 closeout; prune only dropped the local tracking ref, no branch or commit was touched |
-| Worktree at start | clean (`git status --porcelain=v1 -uall` empty) | pass |
-| Stash | empty | pass |
-| Worktrees | main worktree + two M0 record worktrees under `%TEMP%` (predecessor slices, untouched) | pass |
-| Repository visibility | `public`, default branch `main` (owner-authorized in M1-S4, D-15) | pass — unchanged by this slice |
-| M1-S4 remote CI | runs `37504014039` (push) and `37504020164` (pull_request), head `3fcff8c`, `completed / success` | pass |
-| PR #4 | open, base `codex/my-shop-m1-s3-prisma-bootstrap`, head `codex/my-shop-m1-s4-ci-pipeline`, `mergeable=true`, `mergeable_state=clean`, not merged | pass — read only, never modified |
-| Branch protection on `main` | required checks = the 7 job names, `strict=false`, `enforce_admins=true`, 1 approval + code owners, force push refused, deletion refused, conversation resolution required | pass — verified by API before any mutation |
-| `gh` CLI | not installed | inherited limitation (M1-S4); the documented fallback (host's stored git credential, used only for API evidence) is used; no tooling is installed |
+| Check                          | Value                                                                                                                                                                      | Result                                                                                                                                                               |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Repository root                | `C:/dev/my-shop`                                                                                                                                                           | pass                                                                                                                                                                 |
+| Direct remote                  | `https://github.com/sabere342-ai/my-shop.git`                                                                                                                              | pass                                                                                                                                                                 |
+| Entry classification           | `CASE_A_CONTINUATION_READY`                                                                                                                                                | pass — clean worktree, empty stash, no active git operations                                                                                                         |
+| Current branch / HEAD at entry | `codex/my-shop-m1-s4-ci-pipeline` @ `3fcff8c1e0ce4f47c9d5b9d65d12ab574406359f`                                                                                             | pass — equals canonical M1-S4 token commit                                                                                                                           |
+| Remote M1-S4 ref               | `3fcff8c1e0ce4f47c9d5b9d65d12ab574406359f`                                                                                                                                 | pass — unchanged after `git fetch --prune`                                                                                                                           |
+| Predecessor parentage          | `3fcff8c` → `906d0e8` (M1-S4) → `3a95f44` (M1-S3) → `dcca491` (M1-S2) → `bcc853d` (M1-S1)                                                                                  | pass — stacked ancestry intact                                                                                                                                       |
+| Local `main` / `origin/main`   | `53f6aaa9aded2ec2218cec3f8987675a824b70db`                                                                                                                                 | pass — identical, unchanged, ancestor of the stack                                                                                                                   |
+| Other remote refs at entry     | M0-P1 `701255f`, M0-P2 `0d25bd3`, M1-S1 `bcc853d`, M1-S2 `dcca491`, M1-S3 `3a95f44`                                                                                        | pass — all match recorded values                                                                                                                                     |
+| Stale remote-tracking ref      | `origin/negdemo/m1-s4-checks` removed by `fetch --prune`                                                                                                                   | note — the M1-S4 negative-demo branch was already deleted from the remote at S4 closeout; prune only dropped the local tracking ref, no branch or commit was touched |
+| Worktree at start              | clean (`git status --porcelain=v1 -uall` empty)                                                                                                                            | pass                                                                                                                                                                 |
+| Stash                          | empty                                                                                                                                                                      | pass                                                                                                                                                                 |
+| Worktrees                      | main worktree + two M0 record worktrees under `%TEMP%` (predecessor slices, untouched)                                                                                     | pass                                                                                                                                                                 |
+| Repository visibility          | `public`, default branch `main` (owner-authorized in M1-S4, D-15)                                                                                                          | pass — unchanged by this slice                                                                                                                                       |
+| M1-S4 remote CI                | runs `37504014039` (push) and `37504020164` (pull_request), head `3fcff8c`, `completed / success`                                                                          | pass                                                                                                                                                                 |
+| PR #4                          | open, base `codex/my-shop-m1-s3-prisma-bootstrap`, head `codex/my-shop-m1-s4-ci-pipeline`, `mergeable=true`, `mergeable_state=clean`, not merged                           | pass — read only, never modified                                                                                                                                     |
+| Branch protection on `main`    | required checks = the 7 job names, `strict=false`, `enforce_admins=true`, 1 approval + code owners, force push refused, deletion refused, conversation resolution required | pass — verified by API before any mutation                                                                                                                           |
+| `gh` CLI                       | not installed                                                                                                                                                              | inherited limitation (M1-S4); the documented fallback (host's stored git credential, used only for API evidence) is used; no tooling is installed                    |
 
 **Predecessor discipline.** This slice branches from `3fcff8c` (M1-S4), **not** from `main` and
 **not** from M1-S3. `main` carries only the M0-era state; starting there would discard the whole
@@ -48,38 +48,38 @@ historical PRs remain open and untouched.
 
 ### 2.1 `scope`
 
-| # | Outcome |
-|---|---|
+| #   | Outcome                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | S-1 | Flutter dependency wiring mandated by the plan: `flutter_riverpod`, `riverpod_annotation` (§6.4, §6.5), `go_router` (§6.6), `flutter_localizations` + `intl` (§6.8), with `riverpod_generator` + `build_runner` as dev dependencies — `build_runner` is the only client code generator (§6.7), and `apps/desktop/pubspec.lock` records the resolved graph. No npm manifest or lockfile change. **Amended before implementation, under explicit owner authorization, from the declared `2.x` set to the current major line** — `flutter_riverpod`/`riverpod` 3.4.3, `riverpod_annotation` 4.0.7, `riverpod_generator` 4.0.9, `build_runner` 2.16.1, plus `dependency_overrides: analyzer: 14.4.0`. Rationale and evidence: §3 D-1, §4 R-1. `MY_SHOP_MASTER_PLAN.md` is unchanged (AC-10) |
-| S-2 | ARB localization (§6.8): `l10n.yaml`, `lib/l10n/app_ar.arb` (default catalog, `ar`) and `lib/l10n/app_en.arb` (fallback), `flutter: generate: true`, the generated `AppLocalizations` **committed** (§6.7), and `MaterialApp` wired with `locale: Locale('ar')`, `supportedLocales`, and the localization delegates — directionality derives from the locale, with no manual `Directionality` wrapper |
-| S-3 | App bootstrap (§6.2 `app/`): `lib/main.dart` → `ProviderScope` → `MyShopApp` with `MaterialApp.router`; theme wiring composed from `core/ui` tokens only — no `Colors.*`, `Color(0x…)` or `fontSize:` outside `lib/core/ui` (§6.9) |
-| S-4 | Routing (§6.6): `lib/app/router/` with `go_router`, named routes and path constants, a **redirect guard** that resolves authentication state and organization context before the first screen renders, session state held in a Riverpod provider (§6.4, §6.5 — no service locator, no static registration), and a catch-all not-found route. Direct `Navigator.push` is not used |
-| S-5 | Design-system tokens (§6.9): colour **roles** (surface, onSurface, primary, success, warning, danger, disabled), a type scale (display, title, body, label, caption), an 8-point spacing scale and a radius scale, all defined in `lib/core/ui/`, plus the `ThemeData` composed from them |
-| S-6 | Design-system components (§6.9): `AppButton`, `AppTextField`, `AppMoneyField`, `AppDialog`, `AppSheet`, `AppDataTable`, `AppEmptyState`, `AppErrorState`, `AppConfirmDialog`, `AppSnackbar`, `AppSectionHeader`, `AppPermissionGate` — all twelve, with no hardcoded user-visible string inside any of them (§6.8) |
-| S-7 | RTL golden tests (§36.3 golden row, §40.4 key acceptance): one golden comparison per §6.9 component rendered in **Arabic RTL**, golden files committed under `apps/desktop/test/` |
-| S-8 | Behaviour tests: app bootstrap; directionality and strings derived from `Locale('ar')`; router navigation plus the catch-all route; redirect-guard unit tests covering **every** branch with synthetic sessions; the predecessor placeholder widget tests replaced |
-| S-9 | Documentation: README current-state rows for M1-S4/M1-S5, this slice record |
+| S-2 | ARB localization (§6.8): `l10n.yaml`, `lib/l10n/app_ar.arb` (default catalog, `ar`) and `lib/l10n/app_en.arb` (fallback), `flutter: generate: true`, the generated `AppLocalizations` **committed** (§6.7), and `MaterialApp` wired with `locale: Locale('ar')`, `supportedLocales`, and the localization delegates — directionality derives from the locale, with no manual `Directionality` wrapper                                                                                                                                                                                                                                                                                                                                                                                   |
+| S-3 | App bootstrap (§6.2 `app/`): `lib/main.dart` → `ProviderScope` → `MyShopApp` with `MaterialApp.router`; theme wiring composed from `core/ui` tokens only — no `Colors.*`, `Color(0x…)` or `fontSize:` outside `lib/core/ui` (§6.9)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| S-4 | Routing (§6.6): `lib/app/router/` with `go_router`, named routes and path constants, a **redirect guard** that resolves authentication state and organization context before the first screen renders, session state held in a Riverpod provider (§6.4, §6.5 — no service locator, no static registration), and a catch-all not-found route. Direct `Navigator.push` is not used                                                                                                                                                                                                                                                                                                                                                                                                        |
+| S-5 | Design-system tokens (§6.9): colour **roles** (surface, onSurface, primary, success, warning, danger, disabled), a type scale (display, title, body, label, caption), an 8-point spacing scale and a radius scale, all defined in `lib/core/ui/`, plus the `ThemeData` composed from them                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| S-6 | Design-system components (§6.9): `AppButton`, `AppTextField`, `AppMoneyField`, `AppDialog`, `AppSheet`, `AppDataTable`, `AppEmptyState`, `AppErrorState`, `AppConfirmDialog`, `AppSnackbar`, `AppSectionHeader`, `AppPermissionGate` — all twelve, with no hardcoded user-visible string inside any of them (§6.8)                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| S-7 | RTL golden tests (§36.3 golden row, §40.4 key acceptance): one golden comparison per §6.9 component rendered in **Arabic RTL**, golden files committed under `apps/desktop/test/`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| S-8 | Behaviour tests: app bootstrap; directionality and strings derived from `Locale('ar')`; router navigation plus the catch-all route; redirect-guard unit tests covering **every** branch with synthetic sessions; the predecessor placeholder widget tests replaced                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| S-9 | Documentation: README current-state rows for M1-S4/M1-S5, this slice record                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 ### 2.2 `non_scope`
 
 Named explicitly, per §40.1.
 
-| Not touched | Reason |
-|---|---|
-| Any business screen, business feature folder content, or use case; `lib/features/` stays empty | §40.4 M1-S5 non-scope: "Any business screen"; §2.4 anti-scope rule |
-| Authentication UI, session store, secure token storage, grace-window UX | M2-S7 (§40.6) |
-| Permission catalog, role presets, effective-permission resolution | M2-S3 (§40.6); `AppPermissionGate` takes a caller-supplied boolean only and holds no permission logic |
-| `core/money` `Money` value type, minor-unit arithmetic, formatting rules | Not in the §40.4 M1-S5 row; `AppMoneyField` is presentational (string in, string out) and defers to `core/money` when that slice declares it |
-| `freezed` / `json_serializable` model code generation | §6.7 binds them to "immutable domain and DTO types"; no domain or DTO type exists while every business screen is non-scope. `build_runner` is present and exercised by `riverpod_generator`, so the "only code generator" rule already holds |
-| `core/api` REST client, generated contracts, drift gate | M1-S6 (§40.4) |
-| Drift local schema, `local_meta`, outbox, sync transport, T-O offline matrix | M1b (§40.5); stages 19–22 stay declared-absent in the workflow |
-| Backend, Prisma schema, migrations, roles | M1-S3 owns them; no schema object exists for this slice |
-| `.github/workflows/**`, `tool/ci/**`, branch protection, required checks | M1-S4 owns the CI platform; the nine gates run here **unchanged** — this slice changes no gate |
-| npm dependency addition/upgrade; `package-lock.json` | Not needed; must stay byte-identical |
-| Any edit to `MY_SHOP_MASTER_PLAN.md` | §43.4 — no decision changed |
-| Merge to `main`, merging PR #4 or this slice's PR, auto-merge, force push, history rewrite, predecessor commits | Owner boundary; G-12, G-4 |
-| Repository visibility | Owner decision D-15 (M1-S4); unchanged |
-| Installing `gh` or any global tool | Host limitation handled by the documented fallback, not by mutating the machine |
+| Not touched                                                                                                     | Reason                                                                                                                                                                                                                                       |
+| --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Any business screen, business feature folder content, or use case; `lib/features/` stays empty                  | §40.4 M1-S5 non-scope: "Any business screen"; §2.4 anti-scope rule                                                                                                                                                                           |
+| Authentication UI, session store, secure token storage, grace-window UX                                         | M2-S7 (§40.6)                                                                                                                                                                                                                                |
+| Permission catalog, role presets, effective-permission resolution                                               | M2-S3 (§40.6); `AppPermissionGate` takes a caller-supplied boolean only and holds no permission logic                                                                                                                                        |
+| `core/money` `Money` value type, minor-unit arithmetic, formatting rules                                        | Not in the §40.4 M1-S5 row; `AppMoneyField` is presentational (string in, string out) and defers to `core/money` when that slice declares it                                                                                                 |
+| `freezed` / `json_serializable` model code generation                                                           | §6.7 binds them to "immutable domain and DTO types"; no domain or DTO type exists while every business screen is non-scope. `build_runner` is present and exercised by `riverpod_generator`, so the "only code generator" rule already holds |
+| `core/api` REST client, generated contracts, drift gate                                                         | M1-S6 (§40.4)                                                                                                                                                                                                                                |
+| Drift local schema, `local_meta`, outbox, sync transport, T-O offline matrix                                    | M1b (§40.5); stages 19–22 stay declared-absent in the workflow                                                                                                                                                                               |
+| Backend, Prisma schema, migrations, roles                                                                       | M1-S3 owns them; no schema object exists for this slice                                                                                                                                                                                      |
+| `.github/workflows/**`, `tool/ci/**`, branch protection, required checks                                        | M1-S4 owns the CI platform; the nine gates run here **unchanged** — this slice changes no gate                                                                                                                                               |
+| npm dependency addition/upgrade; `package-lock.json`                                                            | Not needed; must stay byte-identical                                                                                                                                                                                                         |
+| Any edit to `MY_SHOP_MASTER_PLAN.md`                                                                            | §43.4 — no decision changed                                                                                                                                                                                                                  |
+| Merge to `main`, merging PR #4 or this slice's PR, auto-merge, force push, history rewrite, predecessor commits | Owner boundary; G-12, G-4                                                                                                                                                                                                                    |
+| Repository visibility                                                                                           | Owner decision D-15 (M1-S4); unchanged                                                                                                                                                                                                       |
+| Installing `gh` or any global tool                                                                              | Host limitation handled by the documented fallback, not by mutating the machine                                                                                                                                                              |
 
 ### 2.3 `allowed_paths`
 
@@ -103,39 +103,39 @@ file is not touched at all. `package-lock.json`, `services/api/**`, `packages/**
 
 ### 2.4 `tests`
 
-| Level | Requirement |
-|---|---|
-| Gate positives | Every `tool/ci/*` gate passes against the committed tree (stages 1, 2, 11–15, 23–24, G-6) with the new Flutter sources present — stages 13 and 14 now scan real code, not a placeholder |
-| Golden | One `matchesGoldenFile` comparison per §6.9 component (12) rendered in Arabic RTL from committed golden files (§36.3 golden gate) |
-| Widget | App bootstrap in `Locale('ar')`: first frame renders, `TextDirection.rtl` derives from the locale, Arabic catalog strings are on screen, catch-all route renders the error state |
-| Unit | Redirect guard: every branch (`notProvisioned` → allow, `unauthenticated` → sign-in, `authenticated` without organization → organization setup, `authenticated` with organization → allow) |
-| Negative | A golden comparison is observed failing when a golden is altered, so the golden gate is proven non-vacuous; stages 13 and 14 are re-observed failing on a targeted violation inside the M1-S5 tree and restored |
-| Static analysis | `flutter analyze --fatal-infos` clean (stage 8) |
-| Lint / format / typecheck / backend unit + integration | `npm run verify:node` — unchanged, no backend file touched (stages 3–7, 16) |
-| Release builds | `flutter build windows --release` and `flutter build apk --release` locally (stage 18) |
-| Audit | `npm audit --audit-level=high` exits 0 (stage 17); the 20 moderate advisories pre-date M1-S4 |
-| Remote acceptance | The workflow runs green (all required jobs) on the exact M1-S5 head commit; PR stacked on M1-S4 stays open and unmerged |
+| Level                                                  | Requirement                                                                                                                                                                                                     |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Gate positives                                         | Every `tool/ci/*` gate passes against the committed tree (stages 1, 2, 11–15, 23–24, G-6) with the new Flutter sources present — stages 13 and 14 now scan real code, not a placeholder                         |
+| Golden                                                 | One `matchesGoldenFile` comparison per §6.9 component (12) rendered in Arabic RTL from committed golden files (§36.3 golden gate)                                                                               |
+| Widget                                                 | App bootstrap in `Locale('ar')`: first frame renders, `TextDirection.rtl` derives from the locale, Arabic catalog strings are on screen, catch-all route renders the error state                                |
+| Unit                                                   | Redirect guard: every branch (`notProvisioned` → allow, `unauthenticated` → sign-in, `authenticated` without organization → organization setup, `authenticated` with organization → allow)                      |
+| Negative                                               | A golden comparison is observed failing when a golden is altered, so the golden gate is proven non-vacuous; stages 13 and 14 are re-observed failing on a targeted violation inside the M1-S5 tree and restored |
+| Static analysis                                        | `flutter analyze --fatal-infos` clean (stage 8)                                                                                                                                                                 |
+| Lint / format / typecheck / backend unit + integration | `npm run verify:node` — unchanged, no backend file touched (stages 3–7, 16)                                                                                                                                     |
+| Release builds                                         | `flutter build windows --release` and `flutter build apk --release` locally (stage 18)                                                                                                                          |
+| Audit                                                  | `npm audit --audit-level=high` exits 0 (stage 17); the 20 moderate advisories pre-date M1-S4                                                                                                                    |
+| Remote acceptance                                      | The workflow runs green (all required jobs) on the exact M1-S5 head commit; PR stacked on M1-S4 stays open and unmerged                                                                                         |
 
 ### 2.5 `acceptance_criteria`
 
 Binary and checkable.
 
-| # | Criterion |
-|---|---|
-| AC-1 | §40.4 M1-S5 row delivered: `go_router`, Riverpod, `core/ui` design system, ARB localization, RTL golden tests — every §6.9 component exists under its specified name |
-| AC-2 | Key acceptance (§40.4): Arabic RTL renders — golden files show all twelve components in `ar` RTL, and a widget test proves directionality derives from `Locale('ar')` with zero `Directionality(` wrappers in `apps/desktop/lib` |
-| AC-3 | Key acceptance (§40.4): localization gate passes — `npm run gate:localization` exits 0 over the M1-S5 tree, with no hardcoded user-visible string in `lib` |
-| AC-4 | `flutter analyze --fatal-infos` exits 0 (stage 8); `flutter test` exits 0 including all golden comparisons (stages 9–10) |
-| AC-5 | All nine M1-S4 gate scripts exit 0 on the M1-S5 tree; no gate, workflow job, or required check was renamed, disabled, or softened |
-| AC-6 | Release builds pass locally: Windows and Android APK (stage 18) |
-| AC-7 | `npm audit --audit-level=high` exits 0 (stage 17); zero npm dependencies added |
-| AC-8 | `package-lock.json` byte-identical to the predecessor; `apps/desktop/pubspec.lock` changes are limited to the S-1 additions |
-| AC-9 | No file outside `allowed_paths` modified (G-5) |
-| AC-10 | `MY_SHOP_MASTER_PLAN.md` byte-identical to the M1-S4 predecessor (SHA-256 `E7B50B24B6D5A358FFC2965AED3A7EFAD03B32E34BE0A841A9148B22D7178688`) |
-| AC-11 | No migration created, modified, or deleted; historical migration bytes unchanged (G-6, G-7) |
-| AC-12 | No secret, credential, or `.env` in the diff; `.env.example` untouched and placeholder-only |
+| #     | Criterion                                                                                                                                                                                                                        |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AC-1  | §40.4 M1-S5 row delivered: `go_router`, Riverpod, `core/ui` design system, ARB localization, RTL golden tests — every §6.9 component exists under its specified name                                                             |
+| AC-2  | Key acceptance (§40.4): Arabic RTL renders — golden files show all twelve components in `ar` RTL, and a widget test proves directionality derives from `Locale('ar')` with zero `Directionality(` wrappers in `apps/desktop/lib` |
+| AC-3  | Key acceptance (§40.4): localization gate passes — `npm run gate:localization` exits 0 over the M1-S5 tree, with no hardcoded user-visible string in `lib`                                                                       |
+| AC-4  | `flutter analyze --fatal-infos` exits 0 (stage 8); `flutter test` exits 0 including all golden comparisons (stages 9–10)                                                                                                         |
+| AC-5  | All nine M1-S4 gate scripts exit 0 on the M1-S5 tree; no gate, workflow job, or required check was renamed, disabled, or softened                                                                                                |
+| AC-6  | Release builds pass locally: Windows and Android APK (stage 18)                                                                                                                                                                  |
+| AC-7  | `npm audit --audit-level=high` exits 0 (stage 17); zero npm dependencies added                                                                                                                                                   |
+| AC-8  | `package-lock.json` byte-identical to the predecessor; `apps/desktop/pubspec.lock` changes are limited to the S-1 additions                                                                                                      |
+| AC-9  | No file outside `allowed_paths` modified (G-5)                                                                                                                                                                                   |
+| AC-10 | `MY_SHOP_MASTER_PLAN.md` byte-identical to the M1-S4 predecessor (SHA-256 `E7B50B24B6D5A358FFC2965AED3A7EFAD03B32E34BE0A841A9148B22D7178688`)                                                                                    |
+| AC-11 | No migration created, modified, or deleted; historical migration bytes unchanged (G-6, G-7)                                                                                                                                      |
+| AC-12 | No secret, credential, or `.env` in the diff; `.env.example` untouched and placeholder-only                                                                                                                                      |
 | AC-13 | Remote CI green on the **exact** final M1-S5 SHA with all seven required checks; PR created with base `codex/my-shop-m1-s4-ci-pipeline`, head `codex/my-shop-m1-s5-app-skeleton`, open and unmerged; branch protection unchanged |
-| AC-14 | Remote lock: local HEAD equals `origin/codex/my-shop-m1-s5-app-skeleton`, ahead/behind `0/0`, worktree clean; M1-S4, M1-S3, M1-S2, M1-S1, and `origin/main` refs unchanged |
+| AC-14 | Remote lock: local HEAD equals `origin/codex/my-shop-m1-s5-app-skeleton`, ahead/behind `0/0`, worktree clean; M1-S4, M1-S3, M1-S2, M1-S1, and `origin/main` refs unchanged                                                       |
 
 ### 2.6 `migration_impact`
 
@@ -161,11 +161,11 @@ outside `lib/app/router/`, no backend or CI file changes, no database object exi
 
 ### 2.9 `publication_gate`
 
-| Field | Value |
-|---|---|
-| PR target | `codex/my-shop-m1-s4-ci-pipeline` (the stack head — stacked PR) |
-| Required checks | the 7 CI job names of the M1-S4 pipeline, unchanged |
-| Merge | **Owner only.** G-12 and G-4 apply. No automated merge exists, and this slice does not enable one |
+| Field           | Value                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------- |
+| PR target       | `codex/my-shop-m1-s4-ci-pipeline` (the stack head — stacked PR)                                   |
+| Required checks | the 7 CI job names of the M1-S4 pipeline, unchanged                                               |
+| Merge           | **Owner only.** G-12 and G-4 apply. No automated merge exists, and this slice does not enable one |
 
 ---
 
@@ -281,19 +281,19 @@ workflow; it changes no source, gate, or test. Local lock after the push: `HEAD`
 
 **Acceptance criteria.**
 
-| AC | Result |
-|---|---|
-| AC-1 | pass — go_router, Riverpod, `core/ui` tokens, ARB l10n, all twelve §6.9 components (R-3) |
-| AC-2 | pass — 12 Arabic RTL goldens; bootstrap test derives RTL from `Locale('ar')`; no manual `Directionality(` in `lib` (R-3, R-5) |
-| AC-3 | pass — `gate:localization` green over the M1-S5 tree (R-5) |
-| AC-4 | pass — analyze and `flutter test` exit 0 (R-2, R-3) |
-| AC-5 | pass — 9/9 gates green; no gate renamed, disabled, or softened (R-5, D-6) |
-| AC-6 | pass — Windows and Android release builds (R-9) |
-| AC-7 | pass — audit exits 0; zero npm deps added (R-8) |
-| AC-8 | pass — `package-lock.json` unchanged; `pubspec.lock` change limited to S-1 (R-7, D-1) |
-| AC-9 | pass — only `allowed_paths` touched (README, `apps/desktop/**`, this record) |
-| AC-10 | pass — `MY_SHOP_MASTER_PLAN.md` byte-identical, SHA-256 `E7B50B24…78688` (§2.5 AC-10; D-1) |
-| AC-11 | pass — no migration created/modified/deleted; gate green (R-5) |
-| AC-12 | pass — secret-scan green; `.env.example` untouched (R-5) |
-| AC-13 | pass — CI green on the M1-S5 implementation SHA and PR #5 open, `CLEAN`, unmerged (R-10) |
-| AC-14 | pass — local HEAD = origin, ahead/behind 0/0, clean; predecessor refs unchanged (R-10) |
+| AC    | Result                                                                                                                        |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------- |
+| AC-1  | pass — go_router, Riverpod, `core/ui` tokens, ARB l10n, all twelve §6.9 components (R-3)                                      |
+| AC-2  | pass — 12 Arabic RTL goldens; bootstrap test derives RTL from `Locale('ar')`; no manual `Directionality(` in `lib` (R-3, R-5) |
+| AC-3  | pass — `gate:localization` green over the M1-S5 tree (R-5)                                                                    |
+| AC-4  | pass — analyze and `flutter test` exit 0 (R-2, R-3)                                                                           |
+| AC-5  | pass — 9/9 gates green; no gate renamed, disabled, or softened (R-5, D-6)                                                     |
+| AC-6  | pass — Windows and Android release builds (R-9)                                                                               |
+| AC-7  | pass — audit exits 0; zero npm deps added (R-8)                                                                               |
+| AC-8  | pass — `package-lock.json` unchanged; `pubspec.lock` change limited to S-1 (R-7, D-1)                                         |
+| AC-9  | pass — only `allowed_paths` touched (README, `apps/desktop/**`, this record)                                                  |
+| AC-10 | pass — `MY_SHOP_MASTER_PLAN.md` byte-identical, SHA-256 `E7B50B24…78688` (§2.5 AC-10; D-1)                                    |
+| AC-11 | pass — no migration created/modified/deleted; gate green (R-5)                                                                |
+| AC-12 | pass — secret-scan green; `.env.example` untouched (R-5)                                                                      |
+| AC-13 | pass — CI green on the M1-S5 implementation SHA and PR #5 open, `CLEAN`, unmerged (R-10)                                      |
+| AC-14 | pass — local HEAD = origin, ahead/behind 0/0, clean; predecessor refs unchanged (R-10)                                        |

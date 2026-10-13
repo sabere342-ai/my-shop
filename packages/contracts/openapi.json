@@ -1,1 +1,396 @@
-{"openapi":"3.0.0","paths":{"/healthz":{"get":{"description":"Answers whether the process is alive. Unauthenticated and touches no dependency: a liveness probe that checks the database restarts a process during a database outage (Master Plan §37.4).","operationId":"HealthController_healthz","parameters":[],"responses":{"200":{"description":"The process is alive.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/LivenessReport"}}}},"500":{"description":"An unexpected error occurred; the global filter answers an RFC 7807 problem document (Master Plan §34.3).","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDocument"}}}}},"summary":"Liveness probe","tags":["Health"]}},"/readyz":{"get":{"description":"Answers whether this instance should receive traffic. Unauthenticated and runs every registered readiness check, naming the failing class only — never a dependency, host, or credential (Master Plan §13.1).","operationId":"HealthController_readyz","parameters":[],"responses":{"200":{"description":"Every registered readiness check passed; the instance should receive traffic.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ReadinessReport"}}}},"500":{"description":"An unexpected error occurred; the global filter answers an RFC 7807 problem document (Master Plan §34.3).","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDocument"}}}},"503":{"description":"At least one registered readiness check failed; the instance should not receive traffic.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ReadinessReport"}}}}},"summary":"Readiness probe","tags":["Health"]}},"/api/v1/sync/push":{"post":{"description":"Accepts 1–50 mutations, oldest device_local_sequence first, and answers one outcome per mutation (APPLIED, REPLAY, REJECTED, CONTRADICTION). A batch is not atomic: one permanently rejected mutation never blocks the others (Master Plan §38.10.1, §38.10.3). Tenant and device identity come from the authenticated credential, never the body (§38.16, §9.3).","operationId":"SyncPushController_push","parameters":[],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/PushBatchRequest"}}}},"responses":{"200":{"description":"One per-mutation outcome.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/PushBatchResponse"}}}},"400":{"description":"The batch is malformed: wrong shape, more than 50 mutations, a duplicate mutation_id, or a device_local_sequence that is not strictly ascending (§38.10.2).","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDocument"}}}},"401":{"description":"No valid credential; until M2 lands the production authenticator refuses every push (§38.16).","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDocument"}}}},"403":{"description":"The body asserted a device or organization other than the authenticated one (§38.16, §9.3).","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDocument"}}}},"426":{"description":"The client local_schema_version is below the supported minimum; the device must go read-only and upgrade (CLIENT_TOO_OLD, §38.7.2, F-15).","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDocument"}}}},"500":{"description":"An unexpected server fault; the whole batch should be retried (§38.10.4).","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDocument"}}}}},"summary":"Push a batch of offline mutations","tags":["SyncPush"]}}},"info":{"title":"My Shop API","description":"The My Shop point-of-sale and back-office API. The backend is the only authority for every business invariant (Master Plan §7.3).\n\nBusiness traffic lives under `/api/v1` and a breaking change requires `/api/v2` (Master Plan §34.1). v1 is supported until a stated end-of-life published with its release.\n\nEvery non-probe error is an RFC 7807 `application/problem+json` document carrying a stable machine-readable `code` (Master Plan §34.3).\n\n`/healthz` and `/readyz` are probes: unauthenticated, outside the versioned namespace, and declaring no permissions because they have none (Master Plan §37.4). Business endpoints declare their required permissions and tenant scoping here once authentication lands (M2).","version":"1","contact":{}},"tags":[],"servers":[],"components":{"schemas":{"ProblemFieldError":{"type":"object","properties":{"field":{"type":"string","description":"The request property that failed validation.","example":"http.port"},"messages":{"description":"Every validation message applicable to the field.","example":["http.port must be an integer"],"type":"array","items":{"type":"string"}}},"required":["field","messages"]},"ProblemDocument":{"type":"object","properties":{"type":{"type":"string","description":"RFC 7807 type. A stable URN identifying the problem class, one page per code.","example":"https://docs.my-shop/errors/INSUFFICIENT_STOCK"},"title":{"type":"string","description":"RFC 7807 title. Short, human-readable, code-derived.","example":"Insufficient stock"},"status":{"type":"integer","description":"RFC 7807 status. The HTTP status the code maps to.","example":409},"code":{"type":"string","description":"The stable machine-readable code the client branches on. Values are API surface: never change one.","enum":["VALIDATION_FAILED","MALFORMED_JSON","UNSUPPORTED_MEDIA_TYPE","UNAUTHENTICATED","TOKEN_EXPIRED","TOKEN_STALE","PERMISSION_DENIED","NOT_FOUND","ORGANIZATION_FORBIDDEN","INSUFFICIENT_STOCK","PRICE_OVERRIDE_FORBIDDEN","DISCOUNT_FORBIDDEN","DISCOUNT_LIMIT_EXCEEDED","DISCOUNT_APPROVAL_REQUIRED","REPLAY","MUTATION_CONTRADICTION","INVENTORY_CONFLICT","OFFLINE_GRACE_EXPIRED","DEVICE_REVOKED","CLIENT_TOO_OLD","UNSUPPORTED_MUTATION","RATE_LIMITED","INTERNAL_ERROR","SERVICE_UNAVAILABLE"]},"detail":{"type":"string","description":"RFC 7807 detail. A safe, user-presentable sentence; never an internal message.","example":"Not enough stock is available."},"instance":{"type":"string","description":"RFC 7807 instance. The request path.","example":"/api/v1/sales"},"traceId":{"type":"string","description":"Correlates the response with the server log line. The only internal detail a production error carries (Master Plan §13.1).","example":"01JB8Q2W7XK9V4M6N3P5R0T2YD"},"errors":{"description":"RFC 7807 extension: field-level validation detail. Absent for non-validation errors.","type":"array","items":{"$ref":"#/components/schemas/ProblemFieldError"}}},"required":["type","title","status","code","detail","instance","traceId"]},"LivenessReport":{"type":"object","properties":{"status":{"type":"string","description":"Always `ok` — this response exists only to prove the process is alive.","example":"ok","enum":["ok"]}},"required":["status"]},"ReadinessDetail":{"type":"object","properties":{"ok":{"type":"boolean","description":"Whether the check passed.","example":true},"reason":{"type":"string","description":"A short class of failure, never a diagnostic. Safe for an unauthenticated caller: a failing check reports only the failure class (Master Plan §13.1).","example":"unavailable"}},"required":["ok"]},"ReadinessReport":{"type":"object","properties":{"ready":{"type":"boolean","description":"Whether this instance should receive traffic: every registered check passed.","example":true},"checks":{"type":"object","description":"One entry per registered check, keyed by its registered name.","additionalProperties":{"$ref":"#/components/schemas/ReadinessDetail"}}},"required":["ready","checks"]},"MutationPayload":{"type":"object","properties":{"mutationId":{"type":"string","format":"uuid","$ref":"#/components/schemas/MutationId","description":"Client-generated UUIDv7 mutation identity (§38.8.1 `mutation_id`): time-ordered and collision-resistant. Unique with `organizationId` in the server ledger (§38.9.1), which makes every push safely repeatable (§38.9.3)."},"organizationId":{"type":"string","format":"uuid","description":"Tenant scope, taken from the device binding (§38.16), never from user input (§38.8.1 `organization_id`)."},"deviceId":{"type":"string","format":"uuid","description":"The installation that produced the mutation (§38.8.1 `device_id`)."},"actorUserId":{"type":"string","format":"uuid","description":"Who performed it — attribution (§38.8.1 `actor_user_id`, §23)."},"actorRoleSnapshot":{"type":"object","description":"Effective permissions at the time of the mutation, for offline authorization audit (§38.8.1 `actor_role_snapshot`, §38.17)."},"aggregateType":{"type":"string","description":"The kind of business object the mutation addresses (§38.8.1 `aggregate_type`). Known values: SALE, SALE_PAYMENT, RETURN, CUSTOMER_COLLECTION, INVENTORY_ADJUSTMENT — an open list (§38.8.1 ends with an ellipsis), so a new aggregate type is additive."},"aggregateId":{"type":"string","format":"uuid","description":"The local identity of the business object (§38.8.1 `aggregate_id`)."},"operationType":{"type":"string","description":"The operation performed: CREATE, VOID, RETURN, REVERSE (§38.8.1 `operation_type`).","enum":["CREATE","VOID","RETURN","REVERSE"]},"payload":{"type":"object","description":"The complete immutable business event (§38.8.1 `payload`, §38.24). Append-only after commit: a changed intent is a new mutation (§38.8.2), and the server never partially trusts a delta (§38.10.1)."},"payloadVersion":{"type":"integer","description":"Contract version of the payload (§38.8.1 `payload_version`)."},"deviceLocalSequence":{"type":"integer","description":"Gap-free monotonic integer allocated inside the local transaction: the total order within the device, independent of clock (§38.8.1 `device_local_sequence`, §38.10.2)."},"localCreatedAt":{"type":"string","format":"date-time","description":"Device wall clock plus a monotonic tiebreak (§38.8.1 `local_created_at`); distinct from the server’s `received_at` clock (§38.9.1)."},"deviceIdempotencyKey":{"type":"string","format":"uuid","description":"The `mutation_id` duplicated into the server payload so the server idempotency key is derivable offline (§38.8.1 `device_idempotency_key`)."}},"required":["mutationId","organizationId","deviceId","actorUserId","actorRoleSnapshot","aggregateType","aggregateId","operationType","payload","payloadVersion","deviceLocalSequence","localCreatedAt","deviceIdempotencyKey"]},"PushBatchRequest":{"type":"object","properties":{"deviceId":{"type":"string","format":"uuid","description":"The producing installation (§38.8.1 `device_id`), asserted by the client. The server verifies it against the authenticated device binding (§38.16) and refuses the request on a mismatch; it is never trusted as authority."},"syncBatchId":{"type":"string","format":"uuid","description":"Client-generated identity of this batch (§38.28.1 correlation): one id links the request, its per-mutation outcomes, and the server log line."},"localSchemaVersion":{"type":"integer","minimum":0,"description":"The local schema version this client speaks (§38.7.2). Below the server minimum the whole request is refused CLIENT_TOO_OLD and the device goes read-only with an upgrade prompt (F-15). The field accepts any non-negative integer so that an outdated client reaches that domain refusal rather than a generic shape error; the minimum that decides it is the server constant."},"mutations":{"description":"1–50 mutations, strictly ascending by `device_local_sequence` (§38.10.1/§38.10.2). The batch is not atomic: each mutation is applied or rejected independently (§38.10.3).","type":"array","items":{"$ref":"#/components/schemas/MutationPayload"}}},"required":["deviceId","syncBatchId","localSchemaVersion","mutations"]},"PushMutationOutcome":{"type":"object","properties":{"mutationId":{"type":"string","format":"uuid","description":"The mutation this outcome answers (§38.8.1 `mutation_id`)."},"status":{"type":"string","enum":["APPLIED","REPLAY","REJECTED","CONTRADICTION"],"description":"Per-mutation acknowledgement (§38.9.2): APPLIED (first sight, applied once), REPLAY (identical payload already stored, nothing applied), REJECTED (permanent business refusal, recorded with its code), CONTRADICTION (same mutation_id, different payload_hash — 409 MUTATION_CONTRADICTION, security event). One bad mutation never fails the batch (§38.10.3)."},"resultRef":{"type":"string","description":"The business object the mutation produced (§38.9.1 `result_ref`); APPLIED/REPLAY only."},"resultHash":{"type":"string","description":"Hash of the resulting state (§38.9.1 `result_hash`); APPLIED/REPLAY only."},"serverSequence":{"type":"string","description":"The per-organization acceptance order (§38.11.1 `server_sequence`), as a decimal string so a 64-bit value survives JSON without floating-point loss; APPLIED/REPLAY only."},"rejectionCode":{"type":"string","description":"The stable §34.3 code when the mutation was refused: a REJECTED business code, or MUTATION_CONTRADICTION. Absent on APPLIED/REPLAY."},"receivedAt":{"type":"string","format":"date-time","description":"The server receipt clock (§38.9.1 `received_at`), distinct from the client clock (§23.1)."}},"required":["mutationId","status","receivedAt"]},"PushBatchResponse":{"type":"object","properties":{"syncBatchId":{"type":"string","format":"uuid","description":"Echoes the request `syncBatchId` so a client can reconcile a batch (§38.28.1)."},"outcomes":{"description":"One outcome per request mutation, in request order (§38.10.1). Length always equals the number of mutations sent, including for a partial batch (§38.10.3).","type":"array","items":{"$ref":"#/components/schemas/PushMutationOutcome"}}},"required":["syncBatchId","outcomes"]},"MutationId":{"type":"string","format":"uuid","description":"Client-generated UUIDv7 mutation identity (§38.8.1 `mutation_id`): time-ordered and collision-resistant. Unique with `organizationId` in the server ledger (§38.9.1), which makes every push safely repeatable (§38.9.3)."},"SyncState":{"type":"string","enum":["LOCAL_ONLY","PENDING","SYNCING","SYNCED","RETRYABLE_ERROR","CONFLICT","PERMANENT_REJECTED"],"description":"Sync lifecycle of a local mutation (§38.13): LOCAL_ONLY (committed locally, not yet eligible to push), PENDING (eligible; the normal resting state of an offline sale), SYNCING (in flight), SYNCED (server acknowledged, terminal), RETRYABLE_ERROR (transient failure, scheduled retry with backoff), CONFLICT (server state differs, awaiting owner review), PERMANENT_REJECTED (server refused permanently, owner-visible, never silently dropped). There is no `isSynced` boolean (§38.13)."}}}}
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/healthz": {
+      "get": {
+        "description": "Answers whether the process is alive. Unauthenticated and touches no dependency: a liveness probe that checks the database restarts a process during a database outage (Master Plan §37.4).",
+        "operationId": "HealthController_healthz",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "The process is alive.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LivenessReport" } } }
+          },
+          "500": {
+            "description": "An unexpected error occurred; the global filter answers an RFC 7807 problem document (Master Plan §34.3).",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDocument" } } }
+          }
+        },
+        "summary": "Liveness probe",
+        "tags": ["Health"]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "description": "Answers whether this instance should receive traffic. Unauthenticated and runs every registered readiness check, naming the failing class only — never a dependency, host, or credential (Master Plan §13.1).",
+        "operationId": "HealthController_readyz",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Every registered readiness check passed; the instance should receive traffic.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReadinessReport" } } }
+          },
+          "500": {
+            "description": "An unexpected error occurred; the global filter answers an RFC 7807 problem document (Master Plan §34.3).",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDocument" } } }
+          },
+          "503": {
+            "description": "At least one registered readiness check failed; the instance should not receive traffic.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReadinessReport" } } }
+          }
+        },
+        "summary": "Readiness probe",
+        "tags": ["Health"]
+      }
+    },
+    "/api/v1/sync/push": {
+      "post": {
+        "description": "Accepts 1–50 mutations, oldest device_local_sequence first, and answers one outcome per mutation (APPLIED, REPLAY, REJECTED, CONTRADICTION). A batch is not atomic: one permanently rejected mutation never blocks the others (Master Plan §38.10.1, §38.10.3). Tenant and device identity come from the authenticated credential, never the body (§38.16, §9.3).",
+        "operationId": "SyncPushController_push",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PushBatchRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "One per-mutation outcome.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PushBatchResponse" } } }
+          },
+          "400": {
+            "description": "The batch is malformed: wrong shape, more than 50 mutations, a duplicate mutation_id, or a device_local_sequence that is not strictly ascending (§38.10.2).",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDocument" } } }
+          },
+          "401": {
+            "description": "No valid credential; until M2 lands the production authenticator refuses every push (§38.16).",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDocument" } } }
+          },
+          "403": {
+            "description": "The body asserted a device or organization other than the authenticated one (§38.16, §9.3).",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDocument" } } }
+          },
+          "426": {
+            "description": "The client local_schema_version is below the supported minimum; the device must go read-only and upgrade (CLIENT_TOO_OLD, §38.7.2, F-15).",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDocument" } } }
+          },
+          "500": {
+            "description": "An unexpected server fault; the whole batch should be retried (§38.10.4).",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/ProblemDocument" } } }
+          }
+        },
+        "summary": "Push a batch of offline mutations",
+        "tags": ["SyncPush"]
+      }
+    }
+  },
+  "info": {
+    "title": "My Shop API",
+    "description": "The My Shop point-of-sale and back-office API. The backend is the only authority for every business invariant (Master Plan §7.3).\n\nBusiness traffic lives under `/api/v1` and a breaking change requires `/api/v2` (Master Plan §34.1). v1 is supported until a stated end-of-life published with its release.\n\nEvery non-probe error is an RFC 7807 `application/problem+json` document carrying a stable machine-readable `code` (Master Plan §34.3).\n\n`/healthz` and `/readyz` are probes: unauthenticated, outside the versioned namespace, and declaring no permissions because they have none (Master Plan §37.4). Business endpoints declare their required permissions and tenant scoping here once authentication lands (M2).",
+    "version": "1",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "schemas": {
+      "ProblemFieldError": {
+        "type": "object",
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "The request property that failed validation.",
+            "example": "http.port"
+          },
+          "messages": {
+            "description": "Every validation message applicable to the field.",
+            "example": ["http.port must be an integer"],
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["field", "messages"]
+      },
+      "ProblemDocument": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "RFC 7807 type. A stable URN identifying the problem class, one page per code.",
+            "example": "https://docs.my-shop/errors/INSUFFICIENT_STOCK"
+          },
+          "title": {
+            "type": "string",
+            "description": "RFC 7807 title. Short, human-readable, code-derived.",
+            "example": "Insufficient stock"
+          },
+          "status": {
+            "type": "integer",
+            "description": "RFC 7807 status. The HTTP status the code maps to.",
+            "example": 409
+          },
+          "code": {
+            "type": "string",
+            "description": "The stable machine-readable code the client branches on. Values are API surface: never change one.",
+            "enum": [
+              "VALIDATION_FAILED",
+              "MALFORMED_JSON",
+              "UNSUPPORTED_MEDIA_TYPE",
+              "UNAUTHENTICATED",
+              "TOKEN_EXPIRED",
+              "TOKEN_STALE",
+              "PERMISSION_DENIED",
+              "NOT_FOUND",
+              "ORGANIZATION_FORBIDDEN",
+              "INSUFFICIENT_STOCK",
+              "PRICE_OVERRIDE_FORBIDDEN",
+              "DISCOUNT_FORBIDDEN",
+              "DISCOUNT_LIMIT_EXCEEDED",
+              "DISCOUNT_APPROVAL_REQUIRED",
+              "REPLAY",
+              "MUTATION_CONTRADICTION",
+              "INVENTORY_CONFLICT",
+              "OFFLINE_GRACE_EXPIRED",
+              "DEVICE_REVOKED",
+              "CLIENT_TOO_OLD",
+              "UNSUPPORTED_MUTATION",
+              "RATE_LIMITED",
+              "INTERNAL_ERROR",
+              "SERVICE_UNAVAILABLE"
+            ]
+          },
+          "detail": {
+            "type": "string",
+            "description": "RFC 7807 detail. A safe, user-presentable sentence; never an internal message.",
+            "example": "Not enough stock is available."
+          },
+          "instance": {
+            "type": "string",
+            "description": "RFC 7807 instance. The request path.",
+            "example": "/api/v1/sales"
+          },
+          "traceId": {
+            "type": "string",
+            "description": "Correlates the response with the server log line. The only internal detail a production error carries (Master Plan §13.1).",
+            "example": "01JB8Q2W7XK9V4M6N3P5R0T2YD"
+          },
+          "errors": {
+            "description": "RFC 7807 extension: field-level validation detail. Absent for non-validation errors.",
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ProblemFieldError" }
+          }
+        },
+        "required": ["type", "title", "status", "code", "detail", "instance", "traceId"]
+      },
+      "LivenessReport": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Always `ok` — this response exists only to prove the process is alive.",
+            "example": "ok",
+            "enum": ["ok"]
+          }
+        },
+        "required": ["status"]
+      },
+      "ReadinessDetail": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean", "description": "Whether the check passed.", "example": true },
+          "reason": {
+            "type": "string",
+            "description": "A short class of failure, never a diagnostic. Safe for an unauthenticated caller: a failing check reports only the failure class (Master Plan §13.1).",
+            "example": "unavailable"
+          }
+        },
+        "required": ["ok"]
+      },
+      "ReadinessReport": {
+        "type": "object",
+        "properties": {
+          "ready": {
+            "type": "boolean",
+            "description": "Whether this instance should receive traffic: every registered check passed.",
+            "example": true
+          },
+          "checks": {
+            "type": "object",
+            "description": "One entry per registered check, keyed by its registered name.",
+            "additionalProperties": { "$ref": "#/components/schemas/ReadinessDetail" }
+          }
+        },
+        "required": ["ready", "checks"]
+      },
+      "MutationPayload": {
+        "type": "object",
+        "properties": {
+          "mutationId": {
+            "type": "string",
+            "format": "uuid",
+            "$ref": "#/components/schemas/MutationId",
+            "description": "Client-generated UUIDv7 mutation identity (§38.8.1 `mutation_id`): time-ordered and collision-resistant. Unique with `organizationId` in the server ledger (§38.9.1), which makes every push safely repeatable (§38.9.3)."
+          },
+          "organizationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Tenant scope, taken from the device binding (§38.16), never from user input (§38.8.1 `organization_id`)."
+          },
+          "deviceId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The installation that produced the mutation (§38.8.1 `device_id`)."
+          },
+          "actorUserId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Who performed it — attribution (§38.8.1 `actor_user_id`, §23)."
+          },
+          "actorRoleSnapshot": {
+            "type": "object",
+            "description": "Effective permissions at the time of the mutation, for offline authorization audit (§38.8.1 `actor_role_snapshot`, §38.17)."
+          },
+          "aggregateType": {
+            "type": "string",
+            "description": "The kind of business object the mutation addresses (§38.8.1 `aggregate_type`). Known values: SALE, SALE_PAYMENT, RETURN, CUSTOMER_COLLECTION, INVENTORY_ADJUSTMENT — an open list (§38.8.1 ends with an ellipsis), so a new aggregate type is additive."
+          },
+          "aggregateId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The local identity of the business object (§38.8.1 `aggregate_id`)."
+          },
+          "operationType": {
+            "type": "string",
+            "description": "The operation performed: CREATE, VOID, RETURN, REVERSE (§38.8.1 `operation_type`).",
+            "enum": ["CREATE", "VOID", "RETURN", "REVERSE"]
+          },
+          "payload": {
+            "type": "object",
+            "description": "The complete immutable business event (§38.8.1 `payload`, §38.24). Append-only after commit: a changed intent is a new mutation (§38.8.2), and the server never partially trusts a delta (§38.10.1)."
+          },
+          "payloadVersion": {
+            "type": "integer",
+            "description": "Contract version of the payload (§38.8.1 `payload_version`)."
+          },
+          "deviceLocalSequence": {
+            "type": "integer",
+            "description": "Gap-free monotonic integer allocated inside the local transaction: the total order within the device, independent of clock (§38.8.1 `device_local_sequence`, §38.10.2)."
+          },
+          "localCreatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Device wall clock plus a monotonic tiebreak (§38.8.1 `local_created_at`); distinct from the server’s `received_at` clock (§38.9.1)."
+          },
+          "deviceIdempotencyKey": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The `mutation_id` duplicated into the server payload so the server idempotency key is derivable offline (§38.8.1 `device_idempotency_key`)."
+          }
+        },
+        "required": [
+          "mutationId",
+          "organizationId",
+          "deviceId",
+          "actorUserId",
+          "actorRoleSnapshot",
+          "aggregateType",
+          "aggregateId",
+          "operationType",
+          "payload",
+          "payloadVersion",
+          "deviceLocalSequence",
+          "localCreatedAt",
+          "deviceIdempotencyKey"
+        ]
+      },
+      "PushBatchRequest": {
+        "type": "object",
+        "properties": {
+          "deviceId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The producing installation (§38.8.1 `device_id`), asserted by the client. The server verifies it against the authenticated device binding (§38.16) and refuses the request on a mismatch; it is never trusted as authority."
+          },
+          "syncBatchId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Client-generated identity of this batch (§38.28.1 correlation): one id links the request, its per-mutation outcomes, and the server log line."
+          },
+          "localSchemaVersion": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The local schema version this client speaks (§38.7.2). Below the server minimum the whole request is refused CLIENT_TOO_OLD and the device goes read-only with an upgrade prompt (F-15). The field accepts any non-negative integer so that an outdated client reaches that domain refusal rather than a generic shape error; the minimum that decides it is the server constant."
+          },
+          "mutations": {
+            "description": "1–50 mutations, strictly ascending by `device_local_sequence` (§38.10.1/§38.10.2). The batch is not atomic: each mutation is applied or rejected independently (§38.10.3).",
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/MutationPayload" }
+          }
+        },
+        "required": ["deviceId", "syncBatchId", "localSchemaVersion", "mutations"]
+      },
+      "PushMutationOutcome": {
+        "type": "object",
+        "properties": {
+          "mutationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The mutation this outcome answers (§38.8.1 `mutation_id`)."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["APPLIED", "REPLAY", "REJECTED", "CONTRADICTION"],
+            "description": "Per-mutation acknowledgement (§38.9.2): APPLIED (first sight, applied once), REPLAY (identical payload already stored, nothing applied), REJECTED (permanent business refusal, recorded with its code), CONTRADICTION (same mutation_id, different payload_hash — 409 MUTATION_CONTRADICTION, security event). One bad mutation never fails the batch (§38.10.3)."
+          },
+          "resultRef": {
+            "type": "string",
+            "description": "The business object the mutation produced (§38.9.1 `result_ref`); APPLIED/REPLAY only."
+          },
+          "resultHash": {
+            "type": "string",
+            "description": "Hash of the resulting state (§38.9.1 `result_hash`); APPLIED/REPLAY only."
+          },
+          "serverSequence": {
+            "type": "string",
+            "description": "The per-organization acceptance order (§38.11.1 `server_sequence`), as a decimal string so a 64-bit value survives JSON without floating-point loss; APPLIED/REPLAY only."
+          },
+          "rejectionCode": {
+            "type": "string",
+            "description": "The stable §34.3 code when the mutation was refused: a REJECTED business code, or MUTATION_CONTRADICTION. Absent on APPLIED/REPLAY."
+          },
+          "receivedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The server receipt clock (§38.9.1 `received_at`), distinct from the client clock (§23.1)."
+          }
+        },
+        "required": ["mutationId", "status", "receivedAt"]
+      },
+      "PushBatchResponse": {
+        "type": "object",
+        "properties": {
+          "syncBatchId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Echoes the request `syncBatchId` so a client can reconcile a batch (§38.28.1)."
+          },
+          "outcomes": {
+            "description": "One outcome per request mutation, in request order (§38.10.1). Length always equals the number of mutations sent, including for a partial batch (§38.10.3).",
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PushMutationOutcome" }
+          }
+        },
+        "required": ["syncBatchId", "outcomes"]
+      },
+      "MutationId": {
+        "type": "string",
+        "format": "uuid",
+        "description": "Client-generated UUIDv7 mutation identity (§38.8.1 `mutation_id`): time-ordered and collision-resistant. Unique with `organizationId` in the server ledger (§38.9.1), which makes every push safely repeatable (§38.9.3)."
+      },
+      "SyncState": {
+        "type": "string",
+        "enum": ["LOCAL_ONLY", "PENDING", "SYNCING", "SYNCED", "RETRYABLE_ERROR", "CONFLICT", "PERMANENT_REJECTED"],
+        "description": "Sync lifecycle of a local mutation (§38.13): LOCAL_ONLY (committed locally, not yet eligible to push), PENDING (eligible; the normal resting state of an offline sale), SYNCING (in flight), SYNCED (server acknowledged, terminal), RETRYABLE_ERROR (transient failure, scheduled retry with backoff), CONFLICT (server state differs, awaiting owner review), PERMANENT_REJECTED (server refused permanently, owner-visible, never silently dropped). There is no `isSynced` boolean (§38.13)."
+      }
+    }
+  }
+}
