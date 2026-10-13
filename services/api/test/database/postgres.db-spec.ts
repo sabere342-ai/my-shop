@@ -761,7 +761,10 @@ describe('database acceptance (real PostgreSQL)', () => {
       const note = `applied-${randomUUID()}`;
       const mutation = pushMutation(1, note);
 
-      const response = await harness.http.post(PUSH_PATH).send(pushEnvelope([mutation])).expect(200);
+      const response = await harness.http
+        .post(PUSH_PATH)
+        .send(pushEnvelope([mutation]))
+        .expect(200);
       expect(response.body).toMatchObject({
         outcomes: [{ mutationId: mutation['mutationId'], status: 'APPLIED' }],
       });
@@ -878,13 +881,19 @@ describe('database acceptance (real PostgreSQL)', () => {
       const note = `contradiction-${randomUUID()}`;
       const mutation = pushMutation(1, note);
 
-      await harness.http.post(PUSH_PATH).send(pushEnvelope([mutation])).expect(200);
+      await harness.http
+        .post(PUSH_PATH)
+        .send(pushEnvelope([mutation]))
+        .expect(200);
 
       const changed = {
         ...mutation,
         payload: { probe: { note: `${note}-changed`, outcome: 'apply' } },
       };
-      const response = await harness.http.post(PUSH_PATH).send(pushEnvelope([changed])).expect(200);
+      const response = await harness.http
+        .post(PUSH_PATH)
+        .send(pushEnvelope([changed]))
+        .expect(200);
 
       expect((response.body['outcomes'] as unknown[])[0]).toMatchObject({
         status: 'CONTRADICTION',
@@ -898,7 +907,10 @@ describe('database acceptance (real PostgreSQL)', () => {
       const note = `explode-${randomUUID()}`;
       const mutation = pushMutation(1, note, 'explode');
 
-      const response = await harness.http.post(PUSH_PATH).send(pushEnvelope([mutation])).expect(500);
+      const response = await harness.http
+        .post(PUSH_PATH)
+        .send(pushEnvelope([mutation]))
+        .expect(500);
       expect(response.body).toMatchObject({ code: 'INTERNAL_ERROR' });
 
       expect(await probeCount(note)).toBe(0);

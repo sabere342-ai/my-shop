@@ -225,7 +225,8 @@ describe('OpenAPI document builder', () => {
     expect(Object.keys(push?.responses ?? {}).sort()).toEqual(['200', '400', '401', '403', '426', '500']);
 
     const requestBody = push?.requestBody;
-    const requestSchema = requestBody && 'content' in requestBody ? requestBody.content?.['application/json']?.schema : undefined;
+    const requestSchema =
+      requestBody && 'content' in requestBody ? requestBody.content?.['application/json']?.schema : undefined;
     expect(requestSchema).toEqual({ $ref: '#/components/schemas/PushBatchRequest' });
 
     const response200 = push?.responses['200'];
