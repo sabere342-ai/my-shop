@@ -22,6 +22,7 @@
  */
 
 import { ApiProperty, type SchemaObject } from '@nestjs/swagger';
+import { IsIn, IsInt, IsISO8601, IsNotEmpty, IsObject, IsString, IsUUID, Min } from 'class-validator';
 
 /**
  * §38.8.1 `operation_type`: the four operations the mutation ledger admits.
@@ -87,6 +88,7 @@ export class MutationPayload {
     $ref: '#/components/schemas/MutationId',
     description: MUTATION_ID_DESCRIPTION,
   })
+  @IsUUID()
   readonly mutationId!: string;
 
   /** §38.8.1 `organization_id` — tenant scope, from the device binding, never user input. */
@@ -95,6 +97,7 @@ export class MutationPayload {
     description:
       'Tenant scope, taken from the device binding (§38.16), never from user input ' + '(§38.8.1 `organization_id`).',
   })
+  @IsUUID()
   readonly organizationId!: string;
 
   /** §38.8.1 `device_id` — which installation produced the mutation. */
@@ -102,6 +105,7 @@ export class MutationPayload {
     format: 'uuid',
     description: 'The installation that produced the mutation (§38.8.1 `device_id`).',
   })
+  @IsUUID()
   readonly deviceId!: string;
 
   /** §38.8.1 `actor_user_id` — attribution (§23). */
@@ -109,6 +113,7 @@ export class MutationPayload {
     format: 'uuid',
     description: 'Who performed it — attribution (§38.8.1 `actor_user_id`, §23).',
   })
+  @IsUUID()
   readonly actorUserId!: string;
 
   /** §38.8.1 `actor_role_snapshot` — effective permissions at the time (§38.17). */
@@ -117,6 +122,7 @@ export class MutationPayload {
       'Effective permissions at the time of the mutation, for offline authorization audit ' +
       '(§38.8.1 `actor_role_snapshot`, §38.17).',
   })
+  @IsObject()
   readonly actorRoleSnapshot!: Record<string, unknown>;
 
   /**
@@ -130,6 +136,8 @@ export class MutationPayload {
       'Known values: SALE, SALE_PAYMENT, RETURN, CUSTOMER_COLLECTION, INVENTORY_ADJUSTMENT — ' +
       'an open list (§38.8.1 ends with an ellipsis), so a new aggregate type is additive.',
   })
+  @IsString()
+  @IsNotEmpty()
   readonly aggregateType!: string;
 
   /** §38.8.1 `aggregate_id` — the local identity of the business object. */
@@ -137,6 +145,7 @@ export class MutationPayload {
     format: 'uuid',
     description: 'The local identity of the business object (§38.8.1 `aggregate_id`).',
   })
+  @IsUUID()
   readonly aggregateId!: string;
 
   /** §38.8.1 `operation_type` — the closed set the ledger admits. */
@@ -144,6 +153,7 @@ export class MutationPayload {
     description: 'The operation performed: CREATE, VOID, RETURN, REVERSE (§38.8.1 `operation_type`).',
     enum: [...OPERATION_TYPES],
   })
+  @IsIn([...OPERATION_TYPES])
   readonly operationType!: OperationType;
 
   /** §38.8.1 `payload` — the complete immutable business event (§38.24). */
@@ -153,6 +163,7 @@ export class MutationPayload {
       'commit: a changed intent is a new mutation (§38.8.2), and the server never partially ' +
       'trusts a delta (§38.10.1).',
   })
+  @IsObject()
   readonly payload!: Record<string, unknown>;
 
   /** §38.8.1 `payload_version` — contract version of the payload. */
@@ -160,6 +171,8 @@ export class MutationPayload {
     type: 'integer',
     description: 'Contract version of the payload (§38.8.1 `payload_version`).',
   })
+  @IsInt()
+  @Min(1)
   readonly payloadVersion!: number;
 
   /** §38.8.1 `device_local_sequence` — the per-device total order (§38.10.2). */
@@ -169,6 +182,8 @@ export class MutationPayload {
       'Gap-free monotonic integer allocated inside the local transaction: the total order ' +
       'within the device, independent of clock (§38.8.1 `device_local_sequence`, §38.10.2).',
   })
+  @IsInt()
+  @Min(1)
   readonly deviceLocalSequence!: number;
 
   /** §38.8.1 `local_created_at` — device clock with a monotonic tiebreak. */
@@ -178,6 +193,7 @@ export class MutationPayload {
       'Device wall clock plus a monotonic tiebreak (§38.8.1 `local_created_at`); distinct ' +
       'from the server’s `received_at` clock (§38.9.1).',
   })
+  @IsISO8601()
   readonly localCreatedAt!: string;
 
   /** §38.8.1 `device_idempotency_key` — `mutation_id` duplicated for offline derivation. */
@@ -187,6 +203,7 @@ export class MutationPayload {
       'The `mutation_id` duplicated into the server payload so the server idempotency key ' +
       'is derivable offline (§38.8.1 `device_idempotency_key`).',
   })
+  @IsUUID()
   readonly deviceIdempotencyKey!: string;
 }
 

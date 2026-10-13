@@ -39,7 +39,12 @@ import {
   type MutationEffectResult,
   MutationLedgerService,
 } from '../../src/common/sync/ledger/mutation-ledger.service';
-import { createTestHarness, destroyTestHarness, type TestHarness } from '../harness';
+import { MIN_SUPPORTED_LOCAL_SCHEMA_VERSION } from '../../src/common/sync/push/push.contract';
+import { SYNC_MUTATION_APPLIER } from '../../src/common/sync/push/sync-mutation-applier';
+import { SYNC_AUTHENTICATOR, type SyncTrustedContext } from '../../src/common/sync/push/sync-auth';
+import { createOverriddenTestHarness, createTestHarness, destroyTestHarness, type TestHarness } from '../harness';
+import { FixedSyncAuthenticator } from '../sync/test-sync-authenticator';
+import { ScriptedMutationApplier, probeDirective } from '../sync/scripted-mutation-applier';
 
 /** The one database this suite may destroy; `scripts/db.mjs` enforces the same name. */
 const TEST_DATABASE = 'my_shop_test';
@@ -621,6 +626,309 @@ describe('database acceptance (real PostgreSQL)', () => {
         mutationRequest(orgB, randomUUID(), randomUUID(), 'b-first', probeEffect(counterB, orgB, 'b-first')),
       );
       expect(orgBBegin).toMatchObject({ serverSequence: BigInt(1) });
+    });
+  });
+
+  /**
+   * M1b-S5 acceptance — the push endpoint against **real PostgreSQL** (§36.1 T-2).
+   *
+   * §40.5's M1b-S5 key acceptance is the push boundary end to end: an authenticated
+   * batch takes routing, the global pipe and filter, `SyncPushService`, the S4 ledger,
+   * Prisma, and a real transaction, and answers one durable outcome per mutation.
+   * §36.1 T-2 forbids a mock or an in-memory substitute for exactly these assertions,
+   * so the only substitution is the two ports production binds fail-closed: the
+   * authenticator (§38.16) and the mutation applier (§38.27). Both overrides live in
+   * `test/`, so the production graph still refuses everything.
+   *
+   * One fixed organization and device are used throughout; each case isolates itself
+   * with a unique mutation note, so the probe-row count for that note is the effect
+   * count the case is about.
+   */
+  describe('push endpoint (M1b-S5)', () => {
+    const PUSH_ORG = randomUUID();
+    const PUSH_DEVICE = randomUUID();
+    const PUSH_CONTEXT: SyncTrustedContext = { organizationId: PUSH_ORG, deviceId: PUSH_DEVICE };
+    const PUSH_PATH = '/api/v1/sync/push';
+    let harness: TestHarness;
+
+    beforeAll(async () => {
+      // A migrator-owned table the scripted effects write to through the application
+      // role; the default-privilege grants make it usable without a hand-written GRANT.
+      await migrator.$executeRaw`
+        CREATE TABLE push_acceptance_probe (
+          id bigserial PRIMARY KEY,
+          org_tag uuid NOT NULL,
+          effect_note text NOT NULL
+        )
+      `;
+
+      const config = loadConfig({
+        NODE_ENV: 'test',
+        LOG_LEVEL: 'silent',
+        LOG_PRETTY: 'false',
+        DATABASE_URL: urls.application,
+      });
+
+      const applier = new ScriptedMutationApplier(async (mutation, context, tx) => {
+        const directive = probeDirective(mutation);
+        const note = directive.note ?? mutation.mutationId;
+        if (directive.outcome === 'reject') {
+          // §38.13: a permanent business refusal is recorded, not thrown past the ledger.
+          throw new MutationRejectedError(ERROR_CODES.INSUFFICIENT_STOCK);
+        }
+        if (directive.outcome === 'explode') {
+          // §38.10.4: an unexpected fault must roll the whole transaction back and
+          // propagate as 5xx so the client retries the batch.
+          throw new Error('push acceptance scripted explosion');
+        }
+        await tx.$executeRaw`
+          INSERT INTO push_acceptance_probe (org_tag, effect_note)
+          VALUES (${context.organizationId}::uuid, ${note})
+        `;
+        return {
+          entityType: 'PUSH_PROBE',
+          entityId: `push:${note}`,
+          resultRef: `push/${note}`,
+          resultHash: 'e'.repeat(64),
+        };
+      });
+
+      harness = await createOverriddenTestHarness(config, (builder) => {
+        builder.overrideProvider(SYNC_AUTHENTICATOR).useValue(new FixedSyncAuthenticator(PUSH_CONTEXT));
+        builder.overrideProvider(SYNC_MUTATION_APPLIER).useValue(applier);
+      });
+    }, 60_000);
+
+    afterAll(async () => {
+      if (harness !== undefined) {
+        await destroyTestHarness(harness);
+      }
+      await migrator.$executeRaw`DROP TABLE push_acceptance_probe`;
+    }, 60_000);
+
+    /** One §38.8.1 mutation whose effect the scripted applier reads from `payload.probe`. */
+    function pushMutation(
+      sequence: number,
+      note: string,
+      outcome: 'apply' | 'reject' | 'explode' = 'apply',
+    ): Record<string, unknown> {
+      const mutationId = randomUUID();
+      return {
+        mutationId,
+        organizationId: PUSH_ORG,
+        deviceId: PUSH_DEVICE,
+        actorUserId: randomUUID(),
+        actorRoleSnapshot: { permissions: ['sales.create'] },
+        aggregateType: 'PUSH_PROBE',
+        aggregateId: randomUUID(),
+        operationType: 'CREATE',
+        payload: { probe: { note, outcome } },
+        payloadVersion: 1,
+        deviceLocalSequence: sequence,
+        localCreatedAt: '2026-01-01T00:00:00.000Z',
+        deviceIdempotencyKey: mutationId,
+      };
+    }
+
+    function pushEnvelope(mutations: readonly Record<string, unknown>[]): Record<string, unknown> {
+      return {
+        deviceId: PUSH_DEVICE,
+        syncBatchId: randomUUID(),
+        localSchemaVersion: MIN_SUPPORTED_LOCAL_SCHEMA_VERSION,
+        mutations: [...mutations],
+      };
+    }
+
+    async function probeCount(note: string): Promise<number> {
+      const rows = await app.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM push_acceptance_probe
+        WHERE org_tag = ${PUSH_ORG}::uuid AND effect_note = ${note}
+      `;
+      return rows[0]?.n ?? 0;
+    }
+
+    async function ledgerRow(
+      mutationId: string,
+    ): Promise<{ status: string; rejection_code: string | null } | undefined> {
+      const [row] = await app.$queryRaw<{ status: string; rejection_code: string | null }[]>`
+        SELECT status, rejection_code FROM mutation_ledger
+        WHERE organization_id = ${PUSH_ORG}::uuid AND mutation_id = ${mutationId}::uuid
+      `;
+      return row;
+    }
+
+    it('answers APPLIED over HTTP and commits one effect, feed row, and cursor (§38.9)', async () => {
+      const note = `applied-${randomUUID()}`;
+      const mutation = pushMutation(1, note);
+
+      const response = await harness.http
+        .post(PUSH_PATH)
+        .send(pushEnvelope([mutation]))
+        .expect(200);
+      expect(response.body).toMatchObject({
+        outcomes: [{ mutationId: mutation['mutationId'], status: 'APPLIED' }],
+      });
+
+      const outcome = (response.body['outcomes'] as { serverSequence: string }[])[0];
+      expect(outcome?.serverSequence).toMatch(/^\d+$/);
+      expect(await probeCount(note)).toBe(1);
+      expect(await ledgerRow(mutation['mutationId'] as string)).toMatchObject({ status: 'APPLIED' });
+
+      // §38.11.1: the change feed carries the effect at the returned server sequence.
+      const feed = await app.$queryRaw<{ entity_type: string }[]>`
+        SELECT entity_type FROM change_log
+        WHERE organization_id = ${PUSH_ORG}::uuid AND server_sequence = ${BigInt(outcome?.serverSequence ?? '0')}
+      `;
+      expect(feed).toEqual([{ entity_type: 'PUSH_PROBE' }]);
+
+      // §40.5: the device cursor records the accepted sequence, never behind it.
+      const cursor = await app.$queryRaw<{ seq: string }[]>`
+        SELECT last_pushed_server_sequence::text AS seq FROM device_sync_cursors
+        WHERE organization_id = ${PUSH_ORG}::uuid AND device_id = ${PUSH_DEVICE}::uuid
+      `;
+      expect(Number(cursor[0]?.seq)).toBeGreaterThanOrEqual(Number(outcome?.serverSequence));
+    });
+
+    it('T-O3: ten identical pushes produce one effect and nine REPLAY answers (§38.9.2)', async () => {
+      const note = `replay-${randomUUID()}`;
+      const batch = pushEnvelope([pushMutation(1, note)]);
+
+      const statuses: string[] = [];
+      for (let i = 0; i < 10; i += 1) {
+        const response = await harness.http.post(PUSH_PATH).send(batch).expect(200);
+        statuses.push((response.body['outcomes'] as { status: string }[])[0]?.status ?? '');
+      }
+
+      expect(statuses[0]).toBe('APPLIED');
+      expect(statuses.slice(1)).toEqual(Array(9).fill('REPLAY'));
+      expect(await probeCount(note)).toBe(1);
+    });
+
+    it('T-O4: an applied mutation whose response was lost is answered REPLAY on retry, with one effect', async () => {
+      const note = `lost-response-${randomUUID()}`;
+      const batch = pushEnvelope([pushMutation(1, note)]);
+
+      // First delivery applies; the client never sees this 200.
+      const first = await harness.http.post(PUSH_PATH).send(batch).expect(200);
+      expect((first.body['outcomes'] as { status: string }[])[0]?.status).toBe('APPLIED');
+
+      // The client retries the identical batch and must be reconciled, not duplicated.
+      const retry = await harness.http.post(PUSH_PATH).send(batch).expect(200);
+      expect((retry.body['outcomes'] as { status: string }[])[0]?.status).toBe('REPLAY');
+      expect(await probeCount(note)).toBe(1);
+    });
+
+    it('T-O5: two concurrent duplicate pushes of one mutation produce one effect (§38.9.3)', async () => {
+      const note = `race-${randomUUID()}`;
+      const batch = pushEnvelope([pushMutation(1, note)]);
+
+      const [a, b] = await Promise.all([
+        harness.http.post(PUSH_PATH).send(batch).expect(200),
+        harness.http.post(PUSH_PATH).send(batch).expect(200),
+      ]);
+      const statuses = [
+        (a.body['outcomes'] as { status: string }[])[0]?.status,
+        (b.body['outcomes'] as { status: string }[])[0]?.status,
+      ];
+
+      expect(statuses.filter((status) => status === 'APPLIED')).toHaveLength(1);
+      expect(statuses.filter((status) => status === 'REPLAY')).toHaveLength(1);
+      expect(await probeCount(note)).toBe(1);
+    });
+
+    it('T-O20: a permanent rejection is recorded, never run twice, and replays as REJECTED (§38.13)', async () => {
+      const note = `reject-${randomUUID()}`;
+      const mutation = pushMutation(1, note, 'reject');
+      const batch = pushEnvelope([mutation]);
+
+      const first = await harness.http.post(PUSH_PATH).send(batch).expect(200);
+      expect((first.body['outcomes'] as unknown[])[0]).toMatchObject({
+        status: 'REJECTED',
+        rejectionCode: ERROR_CODES.INSUFFICIENT_STOCK,
+      });
+      expect(await probeCount(note)).toBe(0);
+      expect(await ledgerRow(mutation['mutationId'] as string)).toEqual({
+        status: 'REJECTED',
+        rejection_code: ERROR_CODES.INSUFFICIENT_STOCK,
+      });
+
+      const replay = await harness.http.post(PUSH_PATH).send(batch).expect(200);
+      expect((replay.body['outcomes'] as unknown[])[0]).toMatchObject({
+        status: 'REJECTED',
+        rejectionCode: ERROR_CODES.INSUFFICIENT_STOCK,
+      });
+      expect(await probeCount(note)).toBe(0);
+    });
+
+    it('§38.10.3: a rejected mutation does not block the sale behind it in the same batch', async () => {
+      const rejectNote = `partial-reject-${randomUUID()}`;
+      const applyNote = `partial-apply-${randomUUID()}`;
+
+      const response = await harness.http
+        .post(PUSH_PATH)
+        .send(pushEnvelope([pushMutation(1, rejectNote, 'reject'), pushMutation(2, applyNote)]))
+        .expect(200);
+
+      expect((response.body['outcomes'] as { status: string }[]).map((outcome) => outcome.status)).toEqual([
+        'REJECTED',
+        'APPLIED',
+      ]);
+      expect(await probeCount(rejectNote)).toBe(0);
+      expect(await probeCount(applyNote)).toBe(1);
+    });
+
+    it('§38.9.2: a reused mutation_id with a different payload is CONTRADICTION, with no second effect', async () => {
+      const note = `contradiction-${randomUUID()}`;
+      const mutation = pushMutation(1, note);
+
+      await harness.http
+        .post(PUSH_PATH)
+        .send(pushEnvelope([mutation]))
+        .expect(200);
+
+      const changed = {
+        ...mutation,
+        payload: { probe: { note: `${note}-changed`, outcome: 'apply' } },
+      };
+      const response = await harness.http
+        .post(PUSH_PATH)
+        .send(pushEnvelope([changed]))
+        .expect(200);
+
+      expect((response.body['outcomes'] as unknown[])[0]).toMatchObject({
+        status: 'CONTRADICTION',
+        rejectionCode: ERROR_CODES.MUTATION_CONTRADICTION,
+      });
+      expect(await probeCount(note)).toBe(1);
+      expect(await probeCount(`${note}-changed`)).toBe(0);
+    });
+
+    it('§38.10.4: an unexpected effect fault is a rolled-back 5xx for the whole batch, safely retryable', async () => {
+      const note = `explode-${randomUUID()}`;
+      const mutation = pushMutation(1, note, 'explode');
+
+      const response = await harness.http
+        .post(PUSH_PATH)
+        .send(pushEnvelope([mutation]))
+        .expect(500);
+      expect(response.body).toMatchObject({ code: 'INTERNAL_ERROR' });
+
+      expect(await probeCount(note)).toBe(0);
+      expect(await ledgerRow(mutation['mutationId'] as string)).toBeUndefined();
+    });
+
+    it('§38.7.2: an outdated client is refused the whole batch CLIENT_TOO_OLD, applying nothing', async () => {
+      const note = `too-old-${randomUUID()}`;
+      const mutation = pushMutation(1, note);
+
+      const response = await harness.http
+        .post(PUSH_PATH)
+        .send({ ...pushEnvelope([mutation]), localSchemaVersion: 0 })
+        .expect(426);
+
+      expect(response.body).toMatchObject({ code: 'CLIENT_TOO_OLD' });
+      expect(await probeCount(note)).toBe(0);
+      expect(await ledgerRow(mutation['mutationId'] as string)).toBeUndefined();
     });
   });
 });

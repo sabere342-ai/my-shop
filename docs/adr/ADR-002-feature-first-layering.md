@@ -28,13 +28,13 @@ features/sales/
 
 Dependency direction:
 
-| From | To | Allowed |
-|---|---|---|
-| `presentation` | `domain` | yes |
-| `data` | `domain` | yes |
-| `presentation` | `data` | only through an injected repository interface |
-| `domain` | `data` | **forbidden** |
-| `domain` | `flutter` | **forbidden** |
+| From           | To        | Allowed                                       |
+| -------------- | --------- | --------------------------------------------- |
+| `presentation` | `domain`  | yes                                           |
+| `data`         | `domain`  | yes                                           |
+| `presentation` | `data`    | only through an injected repository interface |
+| `domain`       | `data`    | **forbidden**                                 |
+| `domain`       | `flutter` | **forbidden**                                 |
 
 Enforced by a custom lint **and** by CI import-boundary stage (§37.2 stage 11), because
 a rule only one mechanism checks is a rule that eventually stops being checked.
@@ -61,7 +61,7 @@ exercised without a live SQLite file.
 
 ## Rejected alternatives
 
-| Option | Why rejected |
-|---|---|
+| Option                                                              | Why rejected                                                                                                                                                            |
+| ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Horizontal layers (`data/`, `domain/`, `presentation/` at the root) | Every feature's data layer can import every other feature's domain. A shop with twenty features gets a hundred ways to couple, and nothing in the structure resists it. |
-| Convention instead of enforcement | The legacy application had a nominal architecture and a 3,926-line god object. Documented conventions do not survive contact with a deadline. |
+| Convention instead of enforcement                                   | The legacy application had a nominal architecture and a 3,926-line god object. Documented conventions do not survive contact with a deadline.                           |

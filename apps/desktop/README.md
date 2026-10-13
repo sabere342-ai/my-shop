@@ -40,11 +40,11 @@ These directories appear as features land. They are not created empty: Master Pl
 
 ## Conventions that are enforced, not documented
 
-| Rule | Where it is enforced |
-|---|---|
-| `domain` never imports `data` or Flutter | CI stage 11 (§37.2) |
-| Zero hardcoded user-visible strings | CI stage 13 (§6.8) |
-| No raw colours or font sizes outside `core/ui` | CI stage 14 (§6.9) |
-| No banned accounting term in a sales-reachable route | CI stage 12 (§2.2) |
+| Rule                                                   | Where it is enforced |
+| ------------------------------------------------------ | -------------------- |
+| `domain` never imports `data` or Flutter               | CI stage 11 (§37.2)  |
+| Zero hardcoded user-visible strings                    | CI stage 13 (§6.8)   |
+| No raw colours or font sizes outside `core/ui`         | CI stage 14 (§6.9)   |
+| No banned accounting term in a sales-reachable route   | CI stage 12 (§2.2)   |
 | Directionality from the locale, never a manual wrapper | Lint + review (§6.8) |
-| `flutter analyze --fatal-infos` clean | CI stage 8 (§37.2) |
+| `flutter analyze --fatal-infos` clean                  | CI stage 8 (§37.2)   |

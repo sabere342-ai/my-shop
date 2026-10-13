@@ -147,6 +147,25 @@ class OutboxRepository {
     return query.get();
   }
 
+  /// Rows currently in one §38.13 state, ascending by
+  /// `device_local_sequence`.
+  ///
+  /// This is the push boundary's read path for the retry ladder
+  /// (`RETRYABLE_ERROR`) and for crash recovery (`SYNCING` rows left behind by
+  /// a process that died mid-attempt). Read-only by design: the caller still
+  /// moves every row through [transition], so a state change can never happen
+  /// without its timestamped audit event (§38.13).
+  Future<List<OutboxData>> rowsInState(SyncState state, {int limit = maxPushBatchSize}) {
+    if (limit < 1) {
+      throw ArgumentError.value(limit, 'limit', 'must be >= 1 (§38.13)');
+    }
+    final query = _db.select(_db.outbox)
+      ..where((t) => t.syncState.equals(state.wireName))
+      ..orderBy([(t) => OrderingTerm.asc(t.deviceLocalSequence)])
+      ..limit(limit);
+    return query.get();
+  }
+
   Future<OutboxData?> byId(String mutationId) {
     final query = _db.select(_db.outbox)..where((t) => t.mutationId.equals(mutationId));
     return query.getSingleOrNull();

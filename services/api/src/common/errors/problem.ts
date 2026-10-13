@@ -56,6 +56,21 @@ export const ERROR_CODES = {
   OFFLINE_GRACE_EXPIRED: 'OFFLINE_GRACE_EXPIRED',
   /** Master Plan section 38.30.2: a revoked device's queued mutations await owner decision. */
   DEVICE_REVOKED: 'DEVICE_REVOKED',
+  /**
+   * Master Plan section 38.7.2: the client's `local_schema_version` is below the
+   * minimum the server supports, so the device must go read-only with an upgrade
+   * prompt (F-15). Rejected as a whole request, not per mutation: the whole batch
+   * is untrustworthy when its producer is too old.
+   */
+  CLIENT_TOO_OLD: 'CLIENT_TOO_OLD',
+  /**
+   * Master Plan section 38.27 "unsupported client version" / deleted-entity class:
+   * the mutation names an `aggregate_type` no server-side apply path supports yet.
+   * A permanent, per-mutation rejection (recorded `REJECTED` in the ledger), never a
+   * whole-batch failure - one unsupported row must not block the sales behind it
+   * (section 38.10.3).
+   */
+  UNSUPPORTED_MUTATION: 'UNSUPPORTED_MUTATION',
 
   // --- Rate limiting (429) ---
   RATE_LIMITED: 'RATE_LIMITED',
@@ -97,6 +112,8 @@ const MESSAGE_BY_CODE: Readonly<Record<ErrorCode, string>> = {
   INVENTORY_CONFLICT: 'Stock on the server differs from the recorded quantity.',
   OFFLINE_GRACE_EXPIRED: 'The offline authorization window has expired.',
   DEVICE_REVOKED: 'This device has been revoked.',
+  CLIENT_TOO_OLD: 'This app version is too old. Update to continue.',
+  UNSUPPORTED_MUTATION: 'This operation is not supported by the server.',
 
   RATE_LIMITED: 'Too many requests. Try again shortly.',
 
@@ -131,6 +148,13 @@ const STATUS_BY_CODE: Readonly<Record<ErrorCode, number>> = {
   INVENTORY_CONFLICT: 409,
   OFFLINE_GRACE_EXPIRED: 403,
   DEVICE_REVOKED: 403,
+  // section 38.7.2: the whole request is refused because its producer is too old;
+  // 426 (Upgrade Required) is the exact transport meaning, and the client branches
+  // on the CLIENT_TOO_OLD code rather than on the status.
+  CLIENT_TOO_OLD: 426,
+  // section 38.27: an unsupported aggregate_type is a permanent business refusal,
+  // grouped with the other 409 domain rejections.
+  UNSUPPORTED_MUTATION: 409,
 
   RATE_LIMITED: 429,
 
@@ -284,6 +308,8 @@ const TITLE_BY_CODE: Readonly<Record<ErrorCode, string>> = {
   INVENTORY_CONFLICT: 'Inventory conflict',
   OFFLINE_GRACE_EXPIRED: 'Offline window expired',
   DEVICE_REVOKED: 'Device revoked',
+  CLIENT_TOO_OLD: 'App update required',
+  UNSUPPORTED_MUTATION: 'Unsupported operation',
 
   RATE_LIMITED: 'Rate limited',
 

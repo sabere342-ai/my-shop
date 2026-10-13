@@ -51,8 +51,8 @@ group.** Rules:
 
 ## Rejected alternatives
 
-| Option | Why rejected |
-|---|---|
-| BLoC / Cubit | Strong isolation, but the per-screen ceremony is disproportionate for a CRUD-and-poster product. Remains acceptable inside a single complex feature later. |
-| `Provider` / `ChangeNotifier` | Invites exactly the mutable-singleton and ad-hoc `isLoading` patterns the legacy application exhibited. |
-| Legacy `setState` plus 7 singletons | Master Plan §5.4. The defect that produced a 3,926-line god object. |
+| Option                              | Why rejected                                                                                                                                               |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| BLoC / Cubit                        | Strong isolation, but the per-screen ceremony is disproportionate for a CRUD-and-poster product. Remains acceptable inside a single complex feature later. |
+| `Provider` / `ChangeNotifier`       | Invites exactly the mutable-singleton and ad-hoc `isLoading` patterns the legacy application exhibited.                                                    |
+| Legacy `setState` plus 7 singletons | Master Plan §5.4. The defect that produced a 3,926-line god object.                                                                                        |

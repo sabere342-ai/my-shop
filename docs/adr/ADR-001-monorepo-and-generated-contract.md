@@ -52,8 +52,8 @@ client, so drift becomes a compile-time failure.
 
 ## Rejected alternatives
 
-| Option | Why rejected |
-|---|---|
-| Two separate repositories | Loses atomic refactors across the contract boundary. A contract change would be two commits, two reviews, and a window in which the two sides disagree. |
-| Flutter and backend in one language directory | No shared boundary discipline. NestJS decorators, Prisma, and Dart all in one tree invites cross-contamination and makes the layering rules unstateable. |
-| Hand-written types on both sides | This *is* the legacy failure mode. Master Plan §5.4 records that the absence of any price or cost history was the legacy application's most consequential defect; hand-maintained duplicate types are how that class of defect returns. |
+| Option                                        | Why rejected                                                                                                                                                                                                                            |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Two separate repositories                     | Loses atomic refactors across the contract boundary. A contract change would be two commits, two reviews, and a window in which the two sides disagree.                                                                                 |
+| Flutter and backend in one language directory | No shared boundary discipline. NestJS decorators, Prisma, and Dart all in one tree invites cross-contamination and makes the layering rules unstateable.                                                                                |
+| Hand-written types on both sides              | This _is_ the legacy failure mode. Master Plan §5.4 records that the absence of any price or cost history was the legacy application's most consequential defect; hand-maintained duplicate types are how that class of defect returns. |

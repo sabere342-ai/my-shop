@@ -202,10 +202,9 @@ function testSetup() {
 /** @returns {void} */
 function testDrop() {
   assertTestUrls();
-  runPrisma(
-    ['db', 'execute', '--url', needEnv('ADMIN_DATABASE_URL'), '--stdin'],
-    { input: `DROP DATABASE IF EXISTS ${TEST_DATABASE} WITH (FORCE);\n` },
-  );
+  runPrisma(['db', 'execute', '--url', needEnv('ADMIN_DATABASE_URL'), '--stdin'], {
+    input: `DROP DATABASE IF EXISTS ${TEST_DATABASE} WITH (FORCE);\n`,
+  });
 }
 
 const [, , command = 'deploy', ...rest] = process.argv;

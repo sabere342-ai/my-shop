@@ -10,7 +10,7 @@
 Master Plan §7.3 makes the backend **the only authority** for every business invariant:
 tenant scope, permission, pricing mode, discount ceiling, stock sufficiency, ledger
 balance, posting idempotency. The legacy application enforced authorization in its data
-layer, which was the right instinct, but because the *client* held the data, the client
+layer, which was the right instinct, but because the _client_ held the data, the client
 was the boundary. In My Shop the client holds a token and a cache, so the server is
 unambiguously the boundary.
 
@@ -20,19 +20,19 @@ string-interpolated statement.
 
 ## Decision
 
-| Concern | Choice |
-|---|---|
-| Runtime | Node.js 22 LTS, pinned to 22.22.3 in `.tool-versions` |
-| Language | TypeScript `strict`, plus `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride` |
-| Framework | NestJS 11 |
-| ORM | Prisma 6 |
-| Database | PostgreSQL 18 |
-| Transport | REST over JSON, namespace `/api/v1` |
-| Auth | Short-lived JWT access token plus opaque rotating refresh token |
-| Validation | `class-validator` + `class-transformer`, one global pipe |
-| Errors | RFC 7807-shaped problem document |
-| Tests | Jest; integration against real PostgreSQL; Supertest for HTTP |
-| Lint / format | ESLint + Prettier, enforced in CI |
+| Concern       | Choice                                                                                                   |
+| ------------- | -------------------------------------------------------------------------------------------------------- |
+| Runtime       | Node.js 22 LTS, pinned to 22.22.3 in `.tool-versions`                                                    |
+| Language      | TypeScript `strict`, plus `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride` |
+| Framework     | NestJS 11                                                                                                |
+| ORM           | Prisma 6                                                                                                 |
+| Database      | PostgreSQL 18                                                                                            |
+| Transport     | REST over JSON, namespace `/api/v1`                                                                      |
+| Auth          | Short-lived JWT access token plus opaque rotating refresh token                                          |
+| Validation    | `class-validator` + `class-transformer`, one global pipe                                                 |
+| Errors        | RFC 7807-shaped problem document                                                                         |
+| Tests         | Jest; integration against real PostgreSQL; Supertest for HTTP                                            |
+| Lint / format | ESLint + Prettier, enforced in CI                                                                        |
 
 ## Rationale
 
@@ -64,8 +64,8 @@ string-interpolated statement.
 
 ## Rejected alternatives
 
-| Option | Why rejected |
-|---|---|
-| Prisma `Decimal` for money | A financial ledger needs a documented single rounding point; binary-adjacent decimal handling invites a rounding difference that surfaces as a trial-balance imbalance weeks later. |
-| ORM-per-microservice | Master Plan §7.2 requires module ownership with cross-module reads through the owning repository. Separate deployables would make one transaction across a sale, its stock movements, and its journal entry impossible. |
-| `type: "module"` ESM | Settled in M1-S2 once NestJS 11's decorator metadata behaviour is confirmed against the installed toolchain. Recorded here so the decision is not made by accident. |
+| Option                     | Why rejected                                                                                                                                                                                                            |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Prisma `Decimal` for money | A financial ledger needs a documented single rounding point; binary-adjacent decimal handling invites a rounding difference that surfaces as a trial-balance imbalance weeks later.                                     |
+| ORM-per-microservice       | Master Plan §7.2 requires module ownership with cross-module reads through the owning repository. Separate deployables would make one transaction across a sale, its stock movements, and its journal entry impossible. |
+| `type: "module"` ESM       | Settled in M1-S2 once NestJS 11's decorator metadata behaviour is confirmed against the installed toolchain. Recorded here so the decision is not made by accident.                                                     |

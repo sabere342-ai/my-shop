@@ -112,6 +112,15 @@ export interface ProblemFilterOptions {
   readonly logger: Logger;
 }
 
+/**
+ * §38.10.4: the `Retry-After` floor the server advertises on a `503`. A dependency
+ * failure means "come back later"; the client's own exponential backoff with jitter
+ * still applies, and a server-supplied value takes precedence over the client's guess
+ * when the response carries one. The number is a slice-decided default (the plan fixes
+ * the mechanism, not the seconds) and lives here as the single place it changes.
+ */
+export const RETRY_AFTER_SECONDS = 5;
+
 @Catch()
 export class ProblemDetailsFilter implements ExceptionFilter {
   private readonly logger: Logger;
@@ -151,11 +160,15 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       return;
     }
 
-    response
-      .status(problem.status)
-      .type('application/problem+json')
-      .setHeader(TRACE_HEADER, problem.traceId)
-      .json(problem);
+    response.status(problem.status).type('application/problem+json').setHeader(TRACE_HEADER, problem.traceId);
+
+    // §38.10.4: a 503 tells an offline device to try again later. `Retry-After` makes
+    // that concrete so a retry stampede does not form the moment the dependency recovers.
+    if (problem.status === Number(HttpStatus.SERVICE_UNAVAILABLE)) {
+      response.setHeader('Retry-After', String(RETRY_AFTER_SECONDS));
+    }
+
+    response.json(problem);
   }
 
   /**

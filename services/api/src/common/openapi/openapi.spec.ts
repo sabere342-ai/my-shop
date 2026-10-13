@@ -215,6 +215,50 @@ describe('OpenAPI document builder', () => {
     ]);
   });
 
+  it('documents the M1b-S5 push endpoint and its outcome schemas', async () => {
+    // §40.5 M1b-S5: the push route and its per-mutation outcome are part of the
+    // published contract, generated from the same decorators the handler uses.
+    const document = await buildDocument();
+    const push = document.paths['/api/v1/sync/push']?.post;
+
+    expect(push?.operationId).toBeDefined();
+    expect(Object.keys(push?.responses ?? {}).sort()).toEqual(['200', '400', '401', '403', '426', '500']);
+
+    const requestBody = push?.requestBody;
+    const requestSchema =
+      requestBody && 'content' in requestBody ? requestBody.content?.['application/json']?.schema : undefined;
+    expect(requestSchema).toEqual({ $ref: '#/components/schemas/PushBatchRequest' });
+
+    const response200 = push?.responses['200'];
+    if (response200 === undefined || '$ref' in response200) {
+      throw new Error('expected a concrete 200 response for /api/v1/sync/push');
+    }
+    expect(response200.content?.['application/json']?.schema).toEqual({
+      $ref: '#/components/schemas/PushBatchResponse',
+    });
+
+    const batchRequest = objectSchema('PushBatchRequest', document);
+    expect(batchRequest.required).toEqual(['deviceId', 'syncBatchId', 'localSchemaVersion', 'mutations']);
+    expect(prop(batchRequest, 'localSchemaVersion').type).toBe('integer');
+    const mutations = prop(batchRequest, 'mutations');
+    expect(mutations.type).toBe('array');
+    expect(mutations.items).toEqual({ $ref: '#/components/schemas/MutationPayload' });
+
+    const batchResponse = objectSchema('PushBatchResponse', document);
+    expect(batchResponse.required).toEqual(['syncBatchId', 'outcomes']);
+    const outcomes = prop(batchResponse, 'outcomes');
+    expect(outcomes.type).toBe('array');
+    expect(outcomes.items).toEqual({ $ref: '#/components/schemas/PushMutationOutcome' });
+
+    const outcome = objectSchema('PushMutationOutcome', document);
+    expect(outcome.required).toEqual(['mutationId', 'status', 'receivedAt']);
+    expect([...(prop(outcome, 'status').enum ?? [])]).toEqual(['APPLIED', 'REPLAY', 'REJECTED', 'CONTRADICTION']);
+    // §38.11.1: the 64-bit sequence is a decimal string on the wire.
+    expect(prop(outcome, 'serverSequence').type).toBe('string');
+    expect(prop(outcome, 'resultRef').type).toBe('string');
+    expect(prop(outcome, 'rejectionCode').type).toBe('string');
+  });
+
   it('is deterministic across independent builds', async () => {
     const [first, second] = await Promise.all([buildDocument(), buildDocument()]);
 

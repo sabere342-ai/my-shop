@@ -55,6 +55,8 @@ export interface ProblemDocument {
     | 'INVENTORY_CONFLICT'
     | 'OFFLINE_GRACE_EXPIRED'
     | 'DEVICE_REVOKED'
+    | 'CLIENT_TOO_OLD'
+    | 'UNSUPPORTED_MUTATION'
     | 'RATE_LIMITED'
     | 'INTERNAL_ERROR'
     | 'SERVICE_UNAVAILABLE';
@@ -68,6 +70,31 @@ export interface ProblemDocument {
 export interface ProblemFieldError {
   readonly field: string;
   readonly messages: readonly string[];
+}
+
+/** OpenAPI schema `PushBatchRequest` (Master Plan §7.1, ADR-001). */
+export interface PushBatchRequest {
+  readonly deviceId: string;
+  readonly syncBatchId: string;
+  readonly localSchemaVersion: number;
+  readonly mutations: readonly MutationPayload[];
+}
+
+/** OpenAPI schema `PushBatchResponse` (Master Plan §7.1, ADR-001). */
+export interface PushBatchResponse {
+  readonly syncBatchId: string;
+  readonly outcomes: readonly PushMutationOutcome[];
+}
+
+/** OpenAPI schema `PushMutationOutcome` (Master Plan §7.1, ADR-001). */
+export interface PushMutationOutcome {
+  readonly mutationId: string;
+  readonly status: 'APPLIED' | 'REPLAY' | 'REJECTED' | 'CONTRADICTION';
+  readonly resultRef?: string;
+  readonly resultHash?: string;
+  readonly serverSequence?: string;
+  readonly rejectionCode?: string;
+  readonly receivedAt: string;
 }
 
 /** OpenAPI schema `ReadinessDetail` (Master Plan §7.1, ADR-001). */

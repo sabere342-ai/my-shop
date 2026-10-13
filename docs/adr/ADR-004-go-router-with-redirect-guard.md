@@ -11,7 +11,7 @@ Two identity facts must be resolved **before the first screen renders**: is the 
 authenticated, and which organization is active. Master Plan §9.3 is emphatic that the
 active organization is **server-derived per request** and is never client-asserted —
 accepting an `organizationId` in a body or trusting an `X-Organization-Id` header is named
-as *the* canonical multi-tenant vulnerability.
+as _the_ canonical multi-tenant vulnerability.
 
 A navigation model that resolves those facts after the first frame is a model that renders
 the wrong organization's screen first, however briefly.
@@ -46,7 +46,7 @@ outside the router.
 
 ## Rejected alternatives
 
-| Option | Why rejected |
-|---|---|
-| `Navigator` with imperative pushes | The guard cannot run before the first `push`, so an unauthenticated deep link renders a frame before being rejected. |
+| Option                                                         | Why rejected                                                                                                                                                                            |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Navigator` with imperative pushes                             | The guard cannot run before the first `push`, so an unauthenticated deep link renders a frame before being rejected.                                                                    |
 | Router owned by a provider (`auto_route`, `go_router` codegen) | Not rejected on merit; rejected here for one reason: it makes the route table generated rather than declared, which hides it from review. Revisit if the table exceeds reviewable size. |

@@ -12,16 +12,16 @@ Where the code and that document disagree, the document wins and the code is the
 
 ## Current state
 
-| Phase | Slice | State |
-|---|---|---|
-| M0 | P1 — Foundation, discovery, master plan | complete, PR #1 open |
-| M0 | P2 — Offline-capable POS architecture amendment | complete, PR #2 open |
-| M1 | S1 — Monorepo skeleton and pinned toolchain | complete, branch pushed; no PR yet (`gh` unavailable) |
-| M1 | S2 — Backend skeleton | complete, branch pushed; no PR yet (`gh` unavailable) |
-| M1 | S3 — Prisma bootstrap | complete, branch pushed; no PR yet (`gh` unavailable) |
-| M1 | S4 — CI pipeline | complete, PR #4 open |
-| M1 | **S5 — App skeleton (design system, l10n, router, bootstrap)** | **complete, PR #5 open** |
-| M1 | **S6 — Shared contract generation and drift check** | **complete, PR #6 open** |
+| Phase | Slice                                                          | State                                                 |
+| ----- | -------------------------------------------------------------- | ----------------------------------------------------- |
+| M0    | P1 — Foundation, discovery, master plan                        | complete, PR #1 open                                  |
+| M0    | P2 — Offline-capable POS architecture amendment                | complete, PR #2 open                                  |
+| M1    | S1 — Monorepo skeleton and pinned toolchain                    | complete, branch pushed; no PR yet (`gh` unavailable) |
+| M1    | S2 — Backend skeleton                                          | complete, branch pushed; no PR yet (`gh` unavailable) |
+| M1    | S3 — Prisma bootstrap                                          | complete, branch pushed; no PR yet (`gh` unavailable) |
+| M1    | S4 — CI pipeline                                               | complete, PR #4 open                                  |
+| M1    | **S5 — App skeleton (design system, l10n, router, bootstrap)** | **complete, PR #5 open**                              |
+| M1    | **S6 — Shared contract generation and drift check**            | **complete, PR #6 open**                              |
 
 Nothing is deployed. Nothing is released. No PR has been merged — Master Plan gate G-12
 and CI gate G-4 require an explicit, separate owner authorization to merge, and there is
@@ -167,11 +167,11 @@ attached to: the check is the gate, not the ceremony. The same gates run locally
 
 ## Governance
 
-| Document | Purpose |
-|---|---|
-| [`docs/governance/MY_SHOP_MASTER_PLAN.md`](docs/governance/MY_SHOP_MASTER_PLAN.md) | The authority. 43 sections, roadmap in §40, acceptance gates in §43 |
-| [`docs/adr/README.md`](docs/adr/README.md) | Architecture decision records |
-| `docs/governance/MY_SHOP_*_SLICE_RECORD.md` | One record per slice: scope, non-scope, allow-list, tests, acceptance, rollback |
+| Document                                                                                                         | Purpose                                                                          |
+| ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [`docs/governance/MY_SHOP_MASTER_PLAN.md`](docs/governance/MY_SHOP_MASTER_PLAN.md)                               | The authority. 43 sections, roadmap in §40, acceptance gates in §43              |
+| [`docs/adr/README.md`](docs/adr/README.md)                                                                       | Architecture decision records                                                    |
+| `docs/governance/MY_SHOP_*_SLICE_RECORD.md`                                                                      | One record per slice: scope, non-scope, allow-list, tests, acceptance, rollback  |
 | [`docs/governance/MY_SHOP_M0_P1_FOUNDATION_DISCOVERY.md`](docs/governance/MY_SHOP_M0_P1_FOUNDATION_DISCOVERY.md) | Read-only legacy analysis. Evidence and reference, **not** a source to copy from |
 
 Each slice is separately authorized (§40.1). A slice declares its `predecessor`, `scope`,

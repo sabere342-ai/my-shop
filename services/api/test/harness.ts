@@ -20,9 +20,12 @@
 
 import type { Server } from 'node:http';
 import type { INestApplication } from '@nestjs/common';
+import { Test, type TestingModuleBuilder } from '@nestjs/testing';
 import request from 'supertest';
 import type TestAgent from 'supertest/lib/agent';
-import { createApplication } from '../src/bootstrap';
+import { AppModule } from '../src/app.module';
+import { createAppLogger } from '../src/app.providers';
+import { createApplication, configureApplication } from '../src/bootstrap';
 import { loadConfig, type AppConfigShape } from '../src/common/config/app.config';
 import { ReadinessRegistry } from '../src/common/health/readiness.registry';
 
@@ -68,4 +71,38 @@ export async function createTestHarness(config: AppConfigShape = TEST_CONFIG): P
 
 export async function destroyTestHarness(harness: TestHarness): Promise<void> {
   await harness.app.close();
+}
+
+/**
+ * Boots the real `AppModule.forRoot(config)` graph through `@nestjs/testing` so a test
+ * can substitute a port that production binds to a fail-closed default — the push
+ * authenticator and mutation applier (M1b-S5). Everything else is identical to
+ * `createTestHarness`: the same module graph, the same `configureApplication` middleware,
+ * and the same request path.
+ *
+ * The override callback receives the testing-module builder rather than a set of values
+ * so a suite provides its trusting implementation from `test/`; nothing that trusts a
+ * caller lives under `src/`.
+ */
+export async function createOverriddenTestHarness(
+  config: AppConfigShape,
+  override: (builder: TestingModuleBuilder) => void,
+): Promise<TestHarness> {
+  const builder = Test.createTestingModule({ imports: [AppModule.forRoot(config)] });
+  override(builder);
+  const moduleRef = await builder.compile();
+
+  const app = moduleRef.createNestApplication({ logger: false, bodyParser: false });
+  const logger = createAppLogger(config);
+  await configureApplication(app, logger);
+  await app.init();
+
+  const readiness = app.get(ReadinessRegistry);
+
+  return {
+    app,
+    http: request(app.getHttpServer() as Server),
+    config,
+    readiness,
+  };
 }
