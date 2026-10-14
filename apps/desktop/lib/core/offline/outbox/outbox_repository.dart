@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:drift/drift.dart';
 import 'package:my_shop_desktop/core/offline/db/app_database.dart';
+import 'package:my_shop_desktop/core/offline/grace/offline_auth_gate.dart';
 import 'package:my_shop_desktop/core/offline/outbox/operation_type.dart';
 import 'package:my_shop_desktop/core/offline/outbox/outbox_errors.dart';
 import 'package:my_shop_desktop/core/offline/outbox/remote_apply_scope.dart';
@@ -67,9 +68,19 @@ class OutboxEnqueueCommand {
 ///   (§38.10.2), and `local_created_at` carries a persisted monotonic
 ///   high-water guard (§38.8.1, §38.16.5 backward-jump rule).
 class OutboxRepository {
-  OutboxRepository(this._db);
+  OutboxRepository(this._db, {this.authGate});
 
   final AppDatabase _db;
+
+  /// The offline-auth admission gate (§40.5 M1b-S8), when one is wired.
+  ///
+  /// When present, [enqueue] asks it whether a new mutation is permitted
+  /// **before** it writes anything, so a device past its offline grace window
+  /// creates no business record and no outbox row (§38.16.2, T-O17). When
+  /// absent, the writer behaves exactly as it did before S8 — every read path
+  /// and [transition] are untouched either way, so committed sales keep
+  /// syncing while mutations are refused.
+  final OfflineAuthGate? authGate;
 
   /// `local_meta` keys this module owns.
   static const String organizationIdKey = 'organization_id';
@@ -88,10 +99,25 @@ class OutboxRepository {
   /// touching the database: a change that came *from* the server must never
   /// become a new mutation *to* the server. The check is first and
   /// unconditional, so the violation is a crash rather than a silent echo.
+  ///
+  /// **Offline-auth admission (§38.16.2, M1b-S8).** When an [OfflineAuthGate]
+  /// is wired, it is consulted before this method writes anything; a refused
+  /// mutation throws [OfflineMutationRefusedException] and leaves the database
+  /// unchanged. The suppression check stays first because it guards a
+  /// structural invariant, while the gate is a policy decision.
   Future<OutboxData> enqueue(OutboxEnqueueCommand command) {
     if (RemoteApplyScope.isActive) {
       throw const OutboxWriteDuringRemoteApplyException();
     }
+    final OfflineAuthGate? gate = authGate;
+    if (gate == null) {
+      return _enqueueWithinBinding(command);
+    }
+    return gate.requireMutationAllowed().then((_) => _enqueueWithinBinding(command));
+  }
+
+  /// The write half of [enqueue], after the two admission checks.
+  Future<OutboxData> _enqueueWithinBinding(OutboxEnqueueCommand command) {
     _validateCommand(command);
     return _db.transaction(() async {
       final binding = await _readBinding();
