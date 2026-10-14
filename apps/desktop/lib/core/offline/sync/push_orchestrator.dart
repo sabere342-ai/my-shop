@@ -67,6 +67,8 @@ class PushRunResult {
     this.requeued = 0,
     this.fault,
     this.retryAfter,
+    this.serverRetryAfter,
+    this.httpStatus,
   });
 
   /// `SYNCING` rows moved back to `PENDING` after an interrupted attempt.
@@ -105,6 +107,18 @@ class PushRunResult {
   /// sent it (§38.10.4).
   final Duration? retryAfter;
 
+  /// The server-directed delay, when the whole-request fault carried a
+  /// `Retry-After` header. `null` otherwise. This is the provenance the scheduler
+  /// persists as an absolute deadline so a restart cannot shorten the server's
+  /// directive (§40.5 C4). It is only set when the header parsed to a strictly
+  /// positive duration.
+  final Duration? serverRetryAfter;
+
+  /// The HTTP status of the whole-request response that produced [fault], when
+  /// there was one. `null` for a per-mutation outcome pass (an implicit `200`)
+  /// and for a transport failure with no HTTP status (§38.10.4).
+  final int? httpStatus;
+
   /// True when the pass had nothing to recover, promote, or send.
   bool get idle =>
       recovered == 0 && promoted == 0 && attempted == 0 && fault == null;
@@ -113,7 +127,8 @@ class PushRunResult {
   String toString() => 'PushRunResult(recovered: $recovered, promoted: $promoted, '
       'attempted: $attempted, applied: $applied, replayed: $replayed, '
       'rejected: $rejected, contradicted: $contradicted, retryable: $retryable, '
-      'requeued: $requeued, fault: ${fault?.name}, retryAfter: ${retryAfter?.inSeconds}s)';
+      'requeued: $requeued, fault: ${fault?.name}, retryAfter: ${retryAfter?.inSeconds}s, '
+      'serverRetryAfter: ${serverRetryAfter?.inSeconds}s, httpStatus: $httpStatus)';
 }
 
 /// Drives the durable outbox through one push pass at a time (§38.10).
@@ -313,6 +328,9 @@ class PushOrchestrator {
       rejected: rejected,
       contradicted: contradicted,
       retryable: retryable,
+      // A per-mutation outcome pass is an implicit `200`: the transport works,
+      // there is no whole-request fault, and no server-directed delay applies.
+      httpStatus: 200,
     );
   }
 
@@ -339,6 +357,11 @@ class PushOrchestrator {
             retryAfter: error.retryAfter,
             random: random,
           ),
+          // Provenance: the raw server directive (when strictly positive) is
+          // published next to the effective wait so the scheduler can persist
+          // the exact deadline instead of a jittered ladder value (§40.5 C4).
+          serverRetryAfter: _positiveDuration(error.retryAfter),
+          httpStatus: error.statusCode,
         );
 
       case PushFailureKind.unauthorized:
@@ -352,6 +375,7 @@ class PushOrchestrator {
           retryable: syncing.length,
           fault: PushRunFault.authenticationRequired,
           retryAfter: backoff.delayFor(_attemptOf(syncing), random: random),
+          httpStatus: error.statusCode,
         );
 
       case PushFailureKind.clientTooOld:
@@ -363,6 +387,7 @@ class PushOrchestrator {
           attempted: syncing.length,
           requeued: syncing.length,
           fault: PushRunFault.clientTooOld,
+          httpStatus: error.statusCode,
         );
 
       case PushFailureKind.serverUnsupported:
@@ -375,6 +400,7 @@ class PushOrchestrator {
           attempted: syncing.length,
           requeued: syncing.length,
           fault: PushRunFault.serverUnsupported,
+          httpStatus: error.statusCode,
         );
 
       case PushFailureKind.badRequest:
@@ -388,6 +414,7 @@ class PushOrchestrator {
           attempted: syncing.length,
           rejected: syncing.length,
           fault: PushRunFault.permanentBatchRejection,
+          httpStatus: error.statusCode,
         );
     }
   }
@@ -423,6 +450,16 @@ class PushOrchestrator {
         localCreatedAt: row.localCreatedAt.toUtc().toIso8601String(),
         deviceIdempotencyKey: row.deviceIdempotencyKey,
       );
+}
+
+/// Returns [value] only when it is a strictly positive duration.
+///
+/// A `Retry-After` of zero or a negative value is not a directive — the past
+/// cannot be "waited for" — so it is treated as absent rather than persisting a
+/// deadline the scheduler would immediately satisfy (§40.5 C4).
+Duration? _positiveDuration(Duration? value) {
+  if (value == null) return null;
+  return value > Duration.zero ? value : null;
 }
 
 String _failureCode(PushFailureKind kind) => switch (kind) {

@@ -9,13 +9,15 @@ import 'package:flutter_test/flutter_test.dart';
 // advances a stored cursor — is proven against real PostgreSQL in the backend
 // database suite. The concrete authenticated HTTP transport and the client-side
 // resume orchestration remain a seam for the connectivity slice that owns them;
-// §40.5 assigns M1b-S8 to offline auth grace (not transport), so S7 applies a
-// change it is given and does not fetch one.
+// §40.5 assigns M1b-S8 to offline auth grace (not transport), and **M1b-S9**
+// to the connectivity monitor and backoff scheduler. The client transport and
+// resume orchestration are owned by the connectivity/scheduler slice (S9) and
+// remain deferred here (§40.5).
 
 void main() {
   test(
     'DEFERRED_BY_PLAN: T-O6 pull resumes after reconnect without gaps',
     () {},
-    skip: 'DEFERRED_BY_PLAN: the connectivity slice owns client transport and resume (§40.5)',
+    skip: 'DEFERRED_BY_PLAN: the connectivity/scheduler slice owns client transport and resume (§40.5)',
   );
 }
