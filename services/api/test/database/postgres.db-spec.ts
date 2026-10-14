@@ -42,6 +42,8 @@ import {
 import { MIN_SUPPORTED_LOCAL_SCHEMA_VERSION } from '../../src/common/sync/push/push.contract';
 import { SYNC_MUTATION_APPLIER } from '../../src/common/sync/push/sync-mutation-applier';
 import { SYNC_AUTHENTICATOR, type SyncTrustedContext } from '../../src/common/sync/push/sync-auth';
+import { SYNC_AUTHENTICATOR as PULL_SYNC_AUTHENTICATOR } from '../../src/common/sync/pull/sync-auth';
+import { MAX_PULL_PAGE_SIZE } from '../../src/common/sync/pull/pull.contract';
 import { createOverriddenTestHarness, createTestHarness, destroyTestHarness, type TestHarness } from '../harness';
 import { FixedSyncAuthenticator } from '../sync/test-sync-authenticator';
 import { ScriptedMutationApplier, probeDirective } from '../sync/scripted-mutation-applier';
@@ -929,6 +931,242 @@ describe('database acceptance (real PostgreSQL)', () => {
       expect(response.body).toMatchObject({ code: 'CLIENT_TOO_OLD' });
       expect(await probeCount(note)).toBe(0);
       expect(await ledgerRow(mutation['mutationId'] as string)).toBeUndefined();
+    });
+  });
+
+  /**
+   * M1b-S6 acceptance — the pull endpoint against **real PostgreSQL** (§36.1 T-2).
+   *
+   * §40.5's M1b-S6 key acceptance is the change feed end to end: an authenticated
+   * read takes routing, the global pipe and filter, `SyncPullService`, the S4
+   * ledger, Prisma, and real SQL, and answers one page of change descriptors that
+   * the client resumes from. §36.1 T-2 forbids a mock or an in-memory substitute
+   * for exactly these assertions, so the only substitution is the port production
+   * binds fail-closed: the authenticator (§38.16). It lives in `test/`, so the
+   * production graph still refuses every pull.
+   *
+   * Rows are seeded directly into `change_log` (the push block already proves the
+   * ledger writes that feed in the same transaction as a business change), because
+   * the read's hard cases need exact control of `server_sequence` and `changed_at`
+   * — a paging boundary and an aged-out row — which an integration write cannot
+   * pin. Every organization and device is fresh, so a case is isolated by its own
+   * tenant rather than by ordering.
+   */
+  describe('pull endpoint (M1b-S6)', () => {
+    const PULL_PATH = '/api/v1/sync/pull';
+
+    /**
+     * Boots the real application graph for one authenticated tenant, binds the
+     * test authenticator to it, and keeps it open until this block's `afterAll`.
+     */
+    const openHarnesses: TestHarness[] = [];
+    async function bootOrgHarness(organizationId: string, deviceId = randomUUID()): Promise<TestHarness> {
+      const config = loadConfig({
+        NODE_ENV: 'test',
+        LOG_LEVEL: 'silent',
+        LOG_PRETTY: 'false',
+        DATABASE_URL: urls.application,
+      });
+      const context: SyncTrustedContext = { organizationId, deviceId };
+      const harness = await createOverriddenTestHarness(config, (builder) => {
+        builder.overrideProvider(PULL_SYNC_AUTHENTICATOR).useValue(new FixedSyncAuthenticator(context));
+      });
+      openHarnesses.push(harness);
+      return harness;
+    }
+
+    /**
+     * Seeds one `change_log` row through the application role, isolating the read.
+     * `changedAt` defaults to now; an explicit value ages a row out for retention.
+     */
+    async function seedChange(
+      organizationId: string,
+      sequence: bigint,
+      options: {
+        readonly mutationId?: string;
+        readonly entityType?: string;
+        readonly entityId?: string;
+        readonly changedAt?: Date;
+      } = {},
+    ): Promise<void> {
+      const entityType = options.entityType ?? 'PULL_PROBE';
+      const entityId = options.entityId ?? `pull-${String(sequence)}`;
+      const changedAt = options.changedAt ?? new Date();
+      if (options.mutationId === undefined) {
+        await app.$executeRaw`
+          INSERT INTO change_log (organization_id, server_sequence, mutation_id, entity_type, entity_id, changed_at)
+          VALUES (${organizationId}::uuid, ${sequence}, NULL, ${entityType}, ${entityId}, ${changedAt})
+        `;
+      } else {
+        await app.$executeRaw`
+          INSERT INTO change_log (organization_id, server_sequence, mutation_id, entity_type, entity_id, changed_at)
+          VALUES (${organizationId}::uuid, ${sequence}, ${options.mutationId}::uuid, ${entityType}, ${entityId}, ${changedAt})
+        `;
+      }
+    }
+
+    const OWN_ECHO_MUTATION_ID = randomUUID();
+
+    afterAll(async () => {
+      await Promise.all(openHarnesses.map((harness) => destroyTestHarness(harness)));
+    }, 60_000);
+
+    describe('cursor paging, ordering, and resume (T-O6)', () => {
+      const ORG = randomUUID();
+      let harness: TestHarness;
+
+      beforeAll(async () => {
+        harness = await bootOrgHarness(ORG);
+        // Five changes at sequences 1..5; the first is a device mutation so the feed
+        // has an own-echo case to carry.
+        for (let sequence = 1n; sequence <= 5n; sequence += 1n) {
+          await seedChange(ORG, sequence, {
+            entityId: `e${String(sequence)}`,
+            ...(sequence === 1n ? { mutationId: OWN_ECHO_MUTATION_ID } : {}),
+          });
+        }
+      });
+
+      function sequencesOf(response: { body: Record<string, unknown> }): string[] {
+        return (response.body['changes'] as { serverSequence: string }[]).map((change) => change.serverSequence);
+      }
+
+      it('pages ascending on server_sequence, bounded by limit, with a truthful hasMore', async () => {
+        const first = await harness.http.get(PULL_PATH).query({ after: '0', limit: 2 }).expect(200);
+        expect(sequencesOf(first)).toEqual(['1', '2']);
+        expect(first.body).toMatchObject({ nextAfter: '2', hasMore: true, rebaselineRequired: false });
+
+        const second = await harness.http.get(PULL_PATH).query({ after: '2', limit: 2 }).expect(200);
+        expect(sequencesOf(second)).toEqual(['3', '4']);
+        expect(second.body).toMatchObject({ nextAfter: '4', hasMore: true });
+
+        const third = await harness.http.get(PULL_PATH).query({ after: '4', limit: 2 }).expect(200);
+        expect(sequencesOf(third)).toEqual(['5']);
+        expect(third.body).toMatchObject({ nextAfter: '5', hasMore: false });
+      });
+
+      it('accepts the hard maximum page size and returns every change (§38.11.2)', async () => {
+        const response = await harness.http.get(PULL_PATH).query({ after: '0', limit: MAX_PULL_PAGE_SIZE }).expect(200);
+        expect(sequencesOf(response)).toEqual(['1', '2', '3', '4', '5']);
+        expect(response.body).toMatchObject({ hasMore: false, nextAfter: '5' });
+      });
+
+      it('returns an empty page and the request cursor when fully caught up', async () => {
+        const response = await harness.http.get(PULL_PATH).query({ after: '5', limit: 2 }).expect(200);
+        expect(response.body).toEqual({ changes: [], nextAfter: '5', hasMore: false, rebaselineRequired: false });
+      });
+
+      it('carries the originating mutation_id so a device can reconcile its own echo (§38.11.2)', async () => {
+        const response = await harness.http.get(PULL_PATH).query({ after: '0', limit: 5 }).expect(200);
+        const changes = response.body['changes'] as { serverSequence: string; mutationId?: string }[];
+
+        expect(changes[0]).toMatchObject({ serverSequence: '1', mutationId: OWN_ECHO_MUTATION_ID });
+        // A server-originated change has no mutation id at all, not a null field.
+        expect(changes[1]).not.toHaveProperty('mutationId');
+      });
+
+      it('T-O6: a disconnect that never stored the cursor re-fetches the same page, and draining loses nothing', async () => {
+        // The client pulls a page and "disconnects" before applying it, so it never
+        // stores `nextAfter`. Re-pulling from the same cursor must return the same
+        // page: the server never advances the cursor on a read (§38.11.2).
+        const first = await harness.http.get(PULL_PATH).query({ after: '0', limit: 2 }).expect(200);
+        const retried = await harness.http.get(PULL_PATH).query({ after: '0', limit: 2 }).expect(200);
+        expect(retried.body).toEqual(first.body);
+
+        // Resuming from the client-held cursor drains every change exactly once.
+        const collected: string[] = [];
+        let after = '0';
+        for (;;) {
+          const response = await harness.http.get(PULL_PATH).query({ after, limit: 2 }).expect(200);
+          collected.push(...sequencesOf(response));
+          if (response.body['hasMore'] !== true) break;
+          after = response.body['nextAfter'] as string;
+        }
+        expect(collected).toEqual(['1', '2', '3', '4', '5']);
+      });
+    });
+
+    describe('the read never advances a stored cursor (T-O6 server half)', () => {
+      it('leaves device_sync_cursors byte-identical across a successful pull', async () => {
+        const org = randomUUID();
+        const device = randomUUID();
+        const sentinelUpdatedAt = new Date('2020-01-01T00:00:00.000Z');
+        const harness = await bootOrgHarness(org, device);
+
+        await seedChange(org, 1n, { entityId: 'cursor-probe' });
+        // A cursor row that must not move: §38.11.2 makes the client store the cursor
+        // only after the page is applied locally, so the server cannot observe that
+        // success and must not write on a read.
+        await app.$executeRaw`
+        INSERT INTO device_sync_cursors
+          (organization_id, device_id, last_pushed_server_sequence, last_pull_server_sequence, updated_at)
+        VALUES (${org}::uuid, ${device}::uuid, NULL, 7, ${sentinelUpdatedAt})
+      `;
+
+        await harness.http.get(PULL_PATH).query({ after: '0' }).expect(200);
+
+        const rows = await app.$queryRaw<{ seq: string; updated_at: Date }[]>`
+        SELECT last_pull_server_sequence::text AS seq, updated_at FROM device_sync_cursors
+        WHERE organization_id = ${org}::uuid AND device_id = ${device}::uuid
+      `;
+        expect(rows).toEqual([{ seq: '7', updated_at: sentinelUpdatedAt }]);
+      });
+    });
+
+    describe('tenant isolation (§38.16, §9.3)', () => {
+      it("never returns another organization's changes, even when it shares a sequence", async () => {
+        const org = randomUUID();
+        const foreign = randomUUID();
+        const harness = await bootOrgHarness(org);
+
+        await seedChange(org, 1n, { entityId: 'mine-1' });
+        await seedChange(org, 2n, { entityId: 'mine-2' });
+        // A different tenant at the same sequences the feed would return.
+        await seedChange(foreign, 1n, { entityId: 'theirs-1' });
+        await seedChange(foreign, 2n, { entityId: 'theirs-2' });
+
+        const response = await harness.http.get(PULL_PATH).query({ after: '0' }).expect(200);
+        const changes = response.body['changes'] as { entityId: string }[];
+
+        expect(changes.map((change) => change.entityId)).toEqual(['mine-1', 'mine-2']);
+      });
+    });
+
+    describe('retention and re-baseline (§38.11.1, O-21)', () => {
+      it('returns an empty page from the beginning for an organization with no changes', async () => {
+        const harness = await bootOrgHarness(randomUUID());
+        const response = await harness.http.get(PULL_PATH).query({ after: '0' }).expect(200);
+
+        expect(response.body).toEqual({ changes: [], nextAfter: '0', hasMore: false, rebaselineRequired: false });
+      });
+
+      it('requires a full re-baseline for a cursor older than the window, never a partial feed', async () => {
+        const org = randomUUID();
+        const harness = await bootOrgHarness(org);
+
+        // One change 91 days old (outside the default 90-day window), two recent.
+        const agedOutAt = new Date(Date.now() - 91 * 24 * 60 * 60 * 1000);
+        await seedChange(org, 1n, { entityId: 'aged-out', changedAt: agedOutAt });
+        await seedChange(org, 2n, { entityId: 'recent-2' });
+        await seedChange(org, 3n, { entityId: 'recent-3' });
+
+        // A cursor at 0 needs sequence 1, which is gone: the answer is an empty page
+        // with the floor, not sequence 2/3 as if they were the whole feed.
+        const rebaseline = await harness.http.get(PULL_PATH).query({ after: '0' }).expect(200);
+        expect(rebaseline.body).toEqual({
+          changes: [],
+          nextAfter: '0',
+          hasMore: false,
+          rebaselineRequired: true,
+          retentionFloor: '2',
+        });
+
+        // A cursor that has reached the floor is inside the window and pages normally.
+        const resumed = await harness.http.get(PULL_PATH).query({ after: '1' }).expect(200);
+        const changes = resumed.body['changes'] as { entityId: string }[];
+        expect(changes.map((change) => change.entityId)).toEqual(['recent-2', 'recent-3']);
+        expect(resumed.body).toMatchObject({ rebaselineRequired: false, nextAfter: '3', hasMore: false });
+      });
     });
   });
 });

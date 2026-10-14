@@ -321,3 +321,240 @@ describe('MutationLedgerService', () => {
     expect(tx.tx.changeLog.create).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * The change-feed read (§38.11.1, §38.11.2).
+ *
+ * `pullChanges` is the one ledger method that reads rather than writes, and it is
+ * the whole server half of M1b-S6. Its correctness is the cursor semantics — a
+ * strict lower bound, ascending, one row beyond the page to make `hasMore` a fact
+ * — plus the two properties that keep the read honest: it re-baselines rather
+ * than serving a partial feed from a stale cursor, and it never advances a stored
+ * cursor. The real SQL behaviour is proven against PostgreSQL in
+ * `test/database/postgres.db-spec.ts`; this suite pins the classification and the
+ * cursor arithmetic as pure logic.
+ */
+describe('MutationLedgerService change feed (M1b-S6)', () => {
+  const ORGANIZATION_ID = '11111111-1111-4111-8111-111111111111';
+
+  interface FeedRow {
+    readonly serverSequence: bigint;
+    readonly entityType: string;
+    readonly entityId: string;
+    readonly mutationId: string | null;
+    readonly changedAt: Date;
+  }
+
+  function feedRow(sequence: bigint, mutationId: string | null = null): FeedRow {
+    return {
+      serverSequence: sequence,
+      entityType: 'SALE',
+      entityId: `sale-${String(sequence)}`,
+      mutationId,
+      changedAt: new Date('2026-01-02T03:04:05.000Z'),
+    };
+  }
+
+  /**
+   * A host that answers the two reads the feed performs: the retention-floor
+   * `$queryRaw`, and an interactive `changeLog.findMany` that faithfully filters,
+   * orders, and takes — so the page mapping above it is exercised, not stubbed.
+   * The write surface is present but must stay untouched (T-O6).
+   */
+  function feedHost(
+    rows: readonly FeedRow[],
+    agedOutMax: bigint | null,
+  ): {
+    host: PrismaHost;
+    findMany: jest.Mock;
+    queryRaw: jest.Mock;
+    cursorWrite: jest.Mock;
+  } {
+    const findMany = jest.fn(
+      (args: {
+        where: { organizationId: string; serverSequence: { gt: bigint } };
+        orderBy: { serverSequence: 'asc' };
+        take: number;
+      }) => {
+        const after = args.where.serverSequence.gt;
+        const page = [...rows]
+          .filter((row) => row.serverSequence > after)
+          .sort((left, right) => (left.serverSequence < right.serverSequence ? -1 : 1))
+          .slice(0, args.take);
+        return Promise.resolve(page);
+      },
+    );
+    const queryRaw = jest.fn(() => Promise.resolve([{ max_aged_out: agedOutMax }]));
+    const cursorWrite = jest.fn(() => Promise.resolve(1));
+    const host = {
+      prisma: {
+        changeLog: { findMany },
+        $queryRaw: queryRaw,
+        $executeRaw: cursorWrite,
+        deviceSyncCursor: { upsert: cursorWrite },
+      },
+    } as unknown as PrismaHost;
+    return { host, findMany, queryRaw, cursorWrite };
+  }
+
+  it('returns an empty page from the beginning when nothing is retained', async () => {
+    const { host } = feedHost([], null);
+    const service = new MutationLedgerService(host);
+
+    const page = await service.pullChanges({
+      organizationId: ORGANIZATION_ID,
+      after: 0n,
+      limit: 200,
+      retentionDays: 90,
+    });
+
+    expect(page).toEqual({
+      changes: [],
+      nextAfter: 0n,
+      hasMore: false,
+      rebaselineRequired: false,
+      retentionFloor: null,
+    });
+  });
+
+  it('returns changes strictly after the cursor, ascending, with the last as nextAfter', async () => {
+    const { host, findMany } = feedHost([feedRow(1n), feedRow(2n), feedRow(3n)], null);
+    const service = new MutationLedgerService(host);
+
+    const page = await service.pullChanges({
+      organizationId: ORGANIZATION_ID,
+      after: 1n,
+      limit: 200,
+      retentionDays: 90,
+    });
+
+    expect(page.changes.map((change) => change.serverSequence)).toEqual([2n, 3n]);
+    expect(page.nextAfter).toBe(3n);
+    expect(page.hasMore).toBe(false);
+    expect(page.rebaselineRequired).toBe(false);
+    // The exclusive lower bound and the tenant scope reach the query as facts.
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { organizationId: ORGANIZATION_ID, serverSequence: { gt: 1n } },
+        orderBy: { serverSequence: 'asc' },
+      }),
+    );
+  });
+
+  it('fetches one row beyond the page so hasMore is a fact and truncates the reply', async () => {
+    const rows = [feedRow(1n), feedRow(2n), feedRow(3n), feedRow(4n)];
+    const { host, findMany } = feedHost(rows, null);
+    const service = new MutationLedgerService(host);
+
+    const page = await service.pullChanges({
+      organizationId: ORGANIZATION_ID,
+      after: 0n,
+      limit: 2,
+      retentionDays: 90,
+    });
+
+    expect(page.changes.map((change) => change.serverSequence)).toEqual([1n, 2n]);
+    expect(page.hasMore).toBe(true);
+    expect(page.nextAfter).toBe(2n);
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 3 }));
+  });
+
+  it('carries the mutation id only when the change came from a device', async () => {
+    const deviceMutation = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const { host } = feedHost([feedRow(1n, deviceMutation), feedRow(2n, null)], null);
+    const service = new MutationLedgerService(host);
+
+    const page = await service.pullChanges({
+      organizationId: ORGANIZATION_ID,
+      after: 0n,
+      limit: 200,
+      retentionDays: 90,
+    });
+
+    expect(page.changes[0]?.mutationId).toBe(deviceMutation);
+    expect(page.changes[1]?.mutationId).toBeNull();
+  });
+
+  it('re-baselines instead of serving a partial feed when the cursor is older than the floor', async () => {
+    // 500 aged out ⇒ the first retained sequence is 501.
+    const { host, findMany } = feedHost([feedRow(501n)], 500n);
+    const service = new MutationLedgerService(host);
+
+    const page = await service.pullChanges({
+      organizationId: ORGANIZATION_ID,
+      after: 10n,
+      limit: 200,
+      retentionDays: 90,
+    });
+
+    expect(page).toEqual({
+      changes: [],
+      nextAfter: 10n,
+      hasMore: false,
+      rebaselineRequired: true,
+      retentionFloor: 501n,
+    });
+    // A stale cursor is never served a partial feed: the page query must not run.
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it('does not re-baseline once the cursor reaches the floor', async () => {
+    const { host } = feedHost([feedRow(502n)], 500n);
+    const service = new MutationLedgerService(host);
+
+    const page = await service.pullChanges({
+      organizationId: ORGANIZATION_ID,
+      after: 501n,
+      limit: 200,
+      retentionDays: 90,
+    });
+
+    expect(page.rebaselineRequired).toBe(false);
+    expect(page.retentionFloor).toBe(501n);
+    expect(page.changes.map((change) => change.serverSequence)).toEqual([502n]);
+  });
+
+  it('treats a null aged-out maximum as "nothing has aged out"', async () => {
+    const { host, queryRaw } = feedHost([feedRow(1n)], null);
+    const service = new MutationLedgerService(host);
+
+    const page = await service.pullChanges({
+      organizationId: ORGANIZATION_ID,
+      after: 0n,
+      limit: 200,
+      retentionDays: 90,
+    });
+
+    expect(page.retentionFloor).toBeNull();
+    expect(queryRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('normalizes a decimal-string aged-out maximum to a bigint floor', async () => {
+    const { host } = feedHost([feedRow(1n)], null);
+    // node-postgres may deliver int8 as a decimal string; the floor must still be
+    // a bigint, so the boundary comparison is exact rather than floating-point.
+    (host.prisma.$queryRaw as jest.Mock).mockResolvedValue([{ max_aged_out: '9007199254740992' }]);
+    const service = new MutationLedgerService(host);
+
+    const page = await service.pullChanges({
+      organizationId: ORGANIZATION_ID,
+      after: 0n,
+      limit: 200,
+      retentionDays: 90,
+    });
+
+    expect(page.retentionFloor).toBe(9007199254740993n);
+    expect(page.rebaselineRequired).toBe(true);
+  });
+
+  it("never advances a stored cursor — the read is the client's resume point (T-O6)", async () => {
+    const { host, cursorWrite } = feedHost([feedRow(1n), feedRow(2n)], null);
+    const service = new MutationLedgerService(host);
+
+    await service.pullChanges({ organizationId: ORGANIZATION_ID, after: 0n, limit: 200, retentionDays: 90 });
+
+    // §38.11.2: the client stores the cursor only after the page is applied
+    // locally, so the server cannot advance it on a read.
+    expect(cursorWrite).not.toHaveBeenCalled();
+  });
+});

@@ -72,6 +72,24 @@ export interface ProblemFieldError {
   readonly messages: readonly string[];
 }
 
+/** OpenAPI schema `PullChange` (Master Plan §7.1, ADR-001). */
+export interface PullChange {
+  readonly serverSequence: string;
+  readonly entityType: string;
+  readonly entityId: string;
+  readonly mutationId?: string;
+  readonly changedAt: string;
+}
+
+/** OpenAPI schema `PullPageResponse` (Master Plan §7.1, ADR-001). */
+export interface PullPageResponse {
+  readonly changes: readonly PullChange[];
+  readonly nextAfter: string;
+  readonly hasMore: boolean;
+  readonly rebaselineRequired: boolean;
+  readonly retentionFloor?: string;
+}
+
 /** OpenAPI schema `PushBatchRequest` (Master Plan §7.1, ADR-001). */
 export interface PushBatchRequest {
   readonly deviceId: string;
