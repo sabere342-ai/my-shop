@@ -90,6 +90,50 @@ export interface MutationRejectedOutcome {
 
 export type MutationOutcome = MutationAppliedOutcome | MutationRejectedOutcome;
 
+/**
+ * A request to read one page of the §38.11.1 change feed.
+ *
+ * `after` is an exclusive lower bound on `server_sequence` (a cursor, never an
+ * offset); `limit` is the bounded page size (§38.11.2); `retentionDays` is the
+ * window beyond which a cursor must re-baseline rather than page.
+ */
+export interface PullChangesRequest {
+  /** Tenant scope, from the device binding (§38.16), never user input. */
+  readonly organizationId: string;
+  /** Exclusive cursor: return changes with `server_sequence` strictly greater. */
+  readonly after: bigint;
+  /** Bounded page size (§38.11.2). */
+  readonly limit: number;
+  /** §38.11.1 / O-21 retention window in days. */
+  readonly retentionDays: number;
+}
+
+/** One change-feed descriptor (§38.11.1). `mutationId` is null for a server change. */
+export interface PullChange {
+  readonly serverSequence: bigint;
+  readonly entityType: string;
+  readonly entityId: string;
+  readonly mutationId: string | null;
+  readonly changedAt: Date;
+}
+
+/**
+ * One page of the change feed (§38.11.2).
+ *
+ * `nextAfter` is the cursor for the following request — the last served
+ * sequence, or the request `after` unchanged when the page is empty.
+ * `rebaselineRequired` is true when the cursor is older than the retention
+ * window, in which case the page is deliberately empty and `retentionFloor` is
+ * the first sequence still inside the window (§38.11.1).
+ */
+export interface PullPage {
+  readonly changes: readonly PullChange[];
+  readonly nextAfter: bigint;
+  readonly hasMore: boolean;
+  readonly rebaselineRequired: boolean;
+  readonly retentionFloor: bigint | null;
+}
+
 /** A mutation_ledger row as read back through Prisma. */
 type LedgerRow = NonNullable<Awaited<ReturnType<PrismaClient['mutationLedger']['findUnique']>>>;
 
@@ -196,6 +240,82 @@ export class MutationLedgerService {
         receivedAt,
       };
     });
+  }
+
+  /**
+   * Reads one page of the §38.11.1 change feed (§38.11.2).
+   *
+   * Cursor-based on `server_sequence`: changes strictly after `after`, ascending,
+   * bounded by `limit`. A cursor older than the retention window is answered with
+   * an empty page and `rebaselineRequired` — never a partial feed that would
+   * silently drop the aged-out prefix (§38.11.1). This is a pure read: it never
+   * advances `device_sync_cursors`, because §38.11.2 makes the client store its
+   * cursor only after the page is applied locally, and the server cannot observe
+   * that success.
+   */
+  async pullChanges(request: PullChangesRequest): Promise<PullPage> {
+    const retentionFloor = await this.retentionFloor(request.organizationId, request.retentionDays);
+
+    // §38.11.1: "a client whose cursor is older than retention performs a full
+    // re-baseline rather than a partial pull". The client is current when the
+    // next sequence it needs (`after + 1`) is at or above the floor.
+    const rebaselineRequired = retentionFloor !== null && request.after + 1n < retentionFloor;
+    if (rebaselineRequired) {
+      return {
+        changes: [],
+        nextAfter: request.after,
+        hasMore: false,
+        rebaselineRequired: true,
+        retentionFloor,
+      };
+    }
+
+    // Fetch one row beyond the page so `hasMore` is a fact, not a guess. Ordered
+    // ascending so `server_sequence` is the page's order (§38.11.2 "the server
+    // sequence guards application order").
+    const rows = await this.host.prisma.changeLog.findMany({
+      where: {
+        organizationId: request.organizationId,
+        serverSequence: { gt: request.after },
+      },
+      orderBy: { serverSequence: 'asc' },
+      take: request.limit + 1,
+    });
+
+    const hasMore = rows.length > request.limit;
+    const page = hasMore ? rows.slice(0, request.limit) : rows;
+    const changes: PullChange[] = page.map((row) => ({
+      serverSequence: row.serverSequence,
+      entityType: row.entityType,
+      entityId: row.entityId,
+      mutationId: row.mutationId,
+      changedAt: row.changedAt,
+    }));
+    const last = changes[changes.length - 1];
+    const nextAfter = last === undefined ? request.after : last.serverSequence;
+
+    return { changes, nextAfter, hasMore, rebaselineRequired: false, retentionFloor };
+  }
+
+  /**
+   * §38.11.1 retention floor: one past the highest `server_sequence` older than
+   * the window, or `null` when nothing has aged out (every change is retained).
+   *
+   * The floor is computed from the feed's own clock rather than from a purge: at
+   * M1b-S6 no rows are physically deleted, so "what is retained" is the policy
+   * boundary the endpoint enforces. A purge job is a later operational slice;
+   * this definition does not change when one arrives.
+   */
+  private async retentionFloor(organizationId: string, retentionDays: number): Promise<bigint | null> {
+    const rows = await this.host.prisma.$queryRaw<{ max_aged_out: unknown }[]>`
+      SELECT max(server_sequence) AS max_aged_out
+      FROM change_log
+      WHERE organization_id = ${organizationId}::uuid
+        AND changed_at < now() - make_interval(days => ${retentionDays}::int)
+    `;
+    const value = rows[0]?.max_aged_out;
+    if (value === null || value === undefined) return null;
+    return toBigInt(value) + 1n;
   }
 
   /** §38.9.2: one stored row, two answers — replay or contradiction. */
