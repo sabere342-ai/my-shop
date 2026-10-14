@@ -7,6 +7,7 @@ void main() {
       const PushBatchRequest request = PushBatchRequest(
         deviceId: 'd001',
         syncBatchId: 's001',
+        traceId: 't001',
         localSchemaVersion: 2,
         mutations: <PushMutationWire>[
           PushMutationWire(
@@ -31,6 +32,12 @@ void main() {
       expect(json['deviceId'], 'd001');
       expect(json['syncBatchId'], 's001');
       expect(json['localSchemaVersion'], 2);
+      // §38.28.1 correlation metadata travels as the `x-trace-id` header, never
+      // a body field: the §38.10.1 wire contract and its OpenAPI document are
+      // unchanged, and the trace id is present on the request object.
+      expect(request.traceId, 't001');
+      expect(json.containsKey('traceId'), isFalse);
+      expect(PushBatchRequest.traceHeaderName, 'x-trace-id');
       final List<Object?> mutations = json['mutations'] as List<Object?>;
       expect(mutations.length, 1);
       final Map<String, Object?> m = mutations[0] as Map<String, Object?>;

@@ -1,7 +1,8 @@
 import { HttpException, HttpStatus } from '@nestjs/common';
 import type { ArgumentsHost } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { pino } from 'pino';
+import { Writable } from 'node:stream';
+import { pino, type Logger } from 'pino';
 import { DomainError } from './domain.error';
 import { ProblemDetailsFilter, RETRY_AFTER_SECONDS } from './problem.filter';
 import { ERROR_CODES } from './problem';
@@ -66,6 +67,22 @@ function filter(): ProblemDetailsFilter {
   // Level `silent` so the filter's own logging does not pollute test output; the
   // assertions are about the response body, not about log output.
   return new ProblemDetailsFilter({ logger: pino({ level: 'silent' }) });
+}
+
+/**
+ * A filter whose logger writes JSON lines into `lines`, so a test can assert
+ * exactly what reached the log — the half a response-body assertion cannot see.
+ */
+function capturingFilter(): { filter: ProblemDetailsFilter; lines: string[] } {
+  const lines: string[] = [];
+  const stream = new Writable({
+    write(chunk, _encoding, callback) {
+      lines.push(String(chunk));
+      callback();
+    },
+  });
+  const logger: Logger = pino({ level: 'error' }, stream);
+  return { filter: new ProblemDetailsFilter({ logger }), lines };
 }
 
 describe('ProblemDetailsFilter', () => {
@@ -225,5 +242,34 @@ describe('ProblemDetailsFilter', () => {
     filter().catch(new DomainError(ERROR_CODES.MUTATION_CONTRADICTION), host);
 
     expect(captured.headers['retry-after']).toBeUndefined();
+  });
+
+  it('logs a 5xx by error class, never by message (§13.1, §38.28.3)', () => {
+    // The response body is textually clean, but the log is the other half: an
+    // unhandled error's message and stack are where a connection string or a
+    // token arrives, so only the bounded class name may be logged.
+    const { host } = hostFor('/api/v1/sales');
+    const { filter: capturing, lines } = capturingFilter();
+    const leaky = new Error('connect ECONNREFUSED 10.0.0.5:5432 password=hunter2');
+
+    capturing.catch(leaky, host);
+
+    const output = lines.join('\n');
+    expect(output).toContain('request failed');
+    expect(output).toContain('"errorName":"Error"');
+    expect(output).not.toContain('ECONNREFUSED');
+    expect(output).not.toContain('10.0.0.5');
+    expect(output).not.toContain('hunter2');
+  });
+
+  it('logs an unrecognised non-Error throwable as UnknownError, never its content', () => {
+    const { host } = hostFor('/api/v1/sales');
+    const { filter: capturing, lines } = capturingFilter();
+
+    capturing.catch({ secret: 'do not serialise me' }, host);
+
+    const output = lines.join('\n');
+    expect(output).toContain('"errorName":"UnknownError"');
+    expect(output).not.toContain('do not serialise me');
   });
 });

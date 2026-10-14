@@ -27,6 +27,8 @@ import 'dart:io';
 import 'package:my_shop_desktop/core/offline/connectivity/connectivity_probe.dart';
 import 'package:my_shop_desktop/core/offline/connectivity/connectivity_state.dart';
 import 'package:my_shop_desktop/core/offline/sync/retry_after.dart';
+import 'package:my_shop_desktop/core/telemetry/error_class.dart';
+import 'package:my_shop_desktop/core/telemetry/structured_log.dart';
 
 const Duration _defaultTimeout = Duration(seconds: 5);
 const Duration _defaultProbeCap = Duration(minutes: 5);
@@ -174,12 +176,19 @@ class HttpHealthProbe implements ConnectivityProbe {
   final Duration probeCap;
   final HttpClient Function() _clientFactory;
   final DateTime Function() clock;
-  final void Function(String, dynamic)? logger;
+
+  /// Structured, redacted diagnostics (§38.28.3). Passive evidence only.
+  final TelemetryLogger? logger;
 
   @override
   Future<ProbeResult> probe() async {
-    final HttpClient client = _clientFactory();
+    // The client is created *inside* the try: a factory that throws is an
+    // unexpected probe error, not an escaping exception, so it must map to
+    // `unreachable` and be classified like any other. The client is nullable so
+    // the `finally` can close a partially-created one without a second throw.
+    HttpClient? client;
     try {
+      client = _clientFactory();
       return await _run(client).timeout(
         timeout,
         onTimeout: () => const ProbeResult.unreachable(
@@ -187,13 +196,19 @@ class HttpHealthProbe implements ConnectivityProbe {
         ),
       );
     } on Object catch (error) {
-      logger?.call('http-health-probe.error', error.toString());
+      logger?.log(
+        SyncLogEvents.healthProbeError,
+        fields: <String, Object?>{
+          LoggableKeys.component: 'http_health_probe',
+          LoggableKeys.errorClass: errorClassOf(error),
+        },
+      );
       return ProbeResult.unreachable(
         failureKind: classifyProbeError(error),
         httpStatus: null,
       );
     } finally {
-      client.close(force: true);
+      client?.close(force: true);
     }
   }
 

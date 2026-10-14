@@ -13,6 +13,7 @@
 import 'reflect-metadata';
 import { createApplication } from './bootstrap';
 import { ConfigurationError, loadConfig } from './common/config/app.config';
+import { errorNameOf } from './common/logging/logger';
 
 async function main(): Promise<void> {
   let config;
@@ -50,7 +51,10 @@ async function main(): Promise<void> {
         process.exit(0);
       })
       .catch((error: unknown) => {
-        logger.error({ component: 'bootstrap', err: error }, 'shutdown failed');
+        // Only the error's class: a shutdown failure can carry a connection
+        // string in its message, and §13.1/§38.28.3 forbid that in any log. The
+        // class name is the bounded, useful half.
+        logger.error({ component: 'bootstrap', errorName: errorNameOf(error) }, 'shutdown failed');
         process.exit(1);
       });
   };
@@ -60,6 +64,10 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  process.stderr.write(`fatal: ${error instanceof Error ? error.message : String(error)}\n`);
+  // The process-fatal path is pre-structured-logger, so it writes to stderr as
+  // plain text. It writes the error's class, never its message: a failed
+  // bootstrap (a bad `DATABASE_URL`, a rejected credential) is exactly where a
+  // secret would otherwise reach CI output (§13.6, §38.28.3).
+  process.stderr.write(`fatal: ${errorNameOf(error)}\n`);
   process.exit(1);
 });

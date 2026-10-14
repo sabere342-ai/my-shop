@@ -30,6 +30,9 @@ import 'package:my_shop_desktop/core/offline/outbox/sync_state.dart';
 import 'package:my_shop_desktop/core/offline/sync/backoff_policy.dart';
 import 'package:my_shop_desktop/core/offline/sync/push_orchestrator.dart';
 import 'package:my_shop_desktop/core/offline/sync/scheduler_timer.dart';
+import 'package:my_shop_desktop/core/telemetry/error_class.dart';
+import 'package:my_shop_desktop/core/telemetry/metrics.dart';
+import 'package:my_shop_desktop/core/telemetry/structured_log.dart';
 
 /// Reason the scheduler is blocked from automatic retries (§40.5 C6).
 enum SyncBlockedReason { clientTooOld, serverUnsupported }
@@ -107,6 +110,7 @@ class SyncScheduler {
     this.clock = DateTime.now,
     this.random,
     this.logger,
+    this.metrics,
   }) : _backoff = backoff ?? orchestrator.backoff;
 
   final PushOrchestrator orchestrator;
@@ -118,7 +122,12 @@ class SyncScheduler {
   final RetryTimerFactory timerFactory;
   final DateTime Function() clock;
   final Random? random;
-  final void Function(String, dynamic)? logger;
+
+  /// Structured, redacted diagnostics (§38.28.3). Passive evidence only.
+  final TelemetryLogger? logger;
+
+  /// Metrics emission (§38.28.2). Passive evidence only.
+  final TelemetryMetrics? metrics;
 
   bool _started = false;
   bool _paused = false;
@@ -283,7 +292,13 @@ class SyncScheduler {
         random: random,
       );
       _setNextRun(clock().add(delay));
-      logger?.call('sync-scheduler.orchestrator-error', error.toString());
+      logger?.log(
+        SyncLogEvents.schedulerError,
+        fields: <String, Object?>{
+          LoggableKeys.component: 'sync_scheduler',
+          LoggableKeys.errorClass: errorClassOf(error),
+        },
+      );
       return;
     }
 
@@ -344,6 +359,19 @@ class SyncScheduler {
   Future<bool> _hasWork() async {
     final Map<SyncState, int> counts = await orchestrator.outbox
         .countsByState();
+    // §38.28.2: pending outbox depth by state. This is the one place the local
+    // queue is counted, so the gauge is emitted from the authoritative source
+    // rather than recomputed. A label is the state name, never a mutation id.
+    final TelemetryMetrics? metricSink = metrics;
+    if (metricSink != null) {
+      for (final SyncState state in SyncState.values) {
+        metricSink.gauge(
+          SyncMetricNames.outboxDepth,
+          counts[state] ?? 0,
+          labels: <String, Object?>{MetricLabels.state: state.wireName},
+        );
+      }
+    }
     int work = 0;
     for (final SyncState s in const [
       SyncState.localOnly,
