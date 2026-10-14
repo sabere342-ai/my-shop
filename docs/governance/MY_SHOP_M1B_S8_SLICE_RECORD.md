@@ -6,7 +6,7 @@
 **Predecessor:** `5a2f397abcaaccd729a34f87682ea1ee7488fbf9` — M1b-S7, branch `codex/my-shop-m1b-s7-loop-prevention` (PR #13, open, base `codex/my-shop-m1b-s6-pull-endpoint`)
 **Repair commit:** none required against the predecessor
 **Final SHA (implementation head):** `556abd29beb6d1115345d3f9b3d9558ff0f899a0`
-**Declaration status:** `PASS_MY_SHOP_M1B_S8_OFFLINE_AUTH_GRACE_REMOTE_LOCKED`
+**Declaration status:** `PASS_MY_SHOP_M1B_S8_REMOTE_LOCKED` (offline auth grace delivered and remote-locked)
 
 ---
 
@@ -275,5 +275,5 @@ The next slice is **M1b-S9** (connectivity monitor and backoff scheduler per §4
 
 ```
 M1b-S9 NOT AUTHORIZED
-PASS_MY_SHOP_M1B_S8_OFFLINE_AUTH_GRACE_REMOTE_LOCKED
+PASS_MY_SHOP_M1B_S8_REMOTE_LOCKED
 ```
