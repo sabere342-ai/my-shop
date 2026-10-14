@@ -5,8 +5,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:my_shop_desktop/core/offline/db/app_database.dart';
 import 'package:path/path.dart' as p;
 
+// T-O19, from the M1b-S3 slice, kept current with the local schema.
+//
+// The target version moves forward as later slices add tables; this file owns
+// the **v1 → current** upgrade path, while each slice that bumps the version
+// adds its own `from → to` test (M1b-S7's v2 → v3 lives in
+// `remote_apply_migration_test.dart`). Today the current version is v3
+// (M1b-S7 added the applied-sequence guard table), so a v1 file upgrades
+// v1 → v2 → v3 in one open.
 void main() {
-  group('T-O19: local schema migration v1 → v2 (§38.6)', () {
+  group('T-O19: local schema migration v1 → v3 (§38.6)', () {
     late Directory tempDir;
     late File dbFile;
 
@@ -55,21 +63,22 @@ void main() {
       final db = AppDatabase.forTesting(executor);
       addTearDown(() async => db.close());
 
-      expect(await userVersion(db), 2,
-          reason: 'opening a v1 file must run onUpgrade(1 → 2)');
+      expect(await userVersion(db), 3,
+          reason: 'opening a v1 file must run onUpgrade(1 → 3)');
 
       final metaRows = await db.select(db.localMeta).get();
       expect(
         {for (final row in metaRows) row.key: row.value},
         {
           'seed_key': 'v1-survivor',
-          'local_schema_version': '2',
+          'local_schema_version': '3',
         },
         reason: '§38.6.2: the version row is rewritten, all other rows survive',
       );
 
       expect(await db.select(db.outbox).get(), isEmpty);
       expect(await db.select(db.localAuditEvents).get(), isEmpty);
+      expect(await db.select(db.remoteAppliedChanges).get(), isEmpty);
 
       await db.customStatement(
         'INSERT INTO outbox (mutation_id, organization_id, device_id, '
@@ -85,15 +94,15 @@ void main() {
           reason: 'the migrated schema accepts new rows');
     });
 
-    test('a fresh v2 database stamps local_schema_version = 2', () async {
+    test('a fresh database stamps local_schema_version = 3', () async {
       final db = AppDatabase.forTesting(NativeDatabase(dbFile));
       addTearDown(() async => db.close());
 
-      expect(await userVersion(db), 2);
+      expect(await userVersion(db), 3);
       final version = await db.customSelect(
         "SELECT value FROM local_meta WHERE key = 'local_schema_version'",
       ).getSingle();
-      expect(version.read<String>('value'), '2');
+      expect(version.read<String>('value'), '3');
     });
 
     test('a second open does not re-run or duplicate the version stamp',
@@ -104,14 +113,14 @@ void main() {
 
       db = AppDatabase.forTesting(NativeDatabase(dbFile));
       addTearDown(() async => db.close());
-      expect(await userVersion(db), 2);
+      expect(await userVersion(db), 3);
 
       final stamps = await db.customSelect(
         "SELECT value FROM local_meta WHERE key = 'local_schema_version'",
       ).get();
       expect(stamps, hasLength(1),
           reason: 'insertOrReplace keeps exactly one version row');
-      expect(stamps.single.read<String>('value'), '2');
+      expect(stamps.single.read<String>('value'), '3');
     });
   });
 }

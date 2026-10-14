@@ -1722,6 +1722,354 @@ class LocalAuditEventsCompanion extends UpdateCompanion<LocalAuditEvent> {
   }
 }
 
+class $RemoteAppliedChangesTable extends RemoteAppliedChanges
+    with TableInfo<$RemoteAppliedChangesTable, RemoteAppliedChange> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $RemoteAppliedChangesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _entityTypeMeta = const VerificationMeta(
+    'entityType',
+  );
+  @override
+  late final GeneratedColumn<String> entityType = GeneratedColumn<String>(
+    'entity_type',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _entityIdMeta = const VerificationMeta(
+    'entityId',
+  );
+  @override
+  late final GeneratedColumn<String> entityId = GeneratedColumn<String>(
+    'entity_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _lastAppliedServerSequenceMeta =
+      const VerificationMeta('lastAppliedServerSequence');
+  @override
+  late final GeneratedColumn<String> lastAppliedServerSequence =
+      GeneratedColumn<String>(
+        'last_applied_server_sequence',
+        aliasedName,
+        false,
+        type: DriftSqlType.string,
+        requiredDuringInsert: true,
+      );
+  static const VerificationMeta _appliedAtMeta = const VerificationMeta(
+    'appliedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> appliedAt = GeneratedColumn<DateTime>(
+    'applied_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    entityType,
+    entityId,
+    lastAppliedServerSequence,
+    appliedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'remote_applied_changes';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<RemoteAppliedChange> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('entity_type')) {
+      context.handle(
+        _entityTypeMeta,
+        entityType.isAcceptableOrUnknown(data['entity_type']!, _entityTypeMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_entityTypeMeta);
+    }
+    if (data.containsKey('entity_id')) {
+      context.handle(
+        _entityIdMeta,
+        entityId.isAcceptableOrUnknown(data['entity_id']!, _entityIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_entityIdMeta);
+    }
+    if (data.containsKey('last_applied_server_sequence')) {
+      context.handle(
+        _lastAppliedServerSequenceMeta,
+        lastAppliedServerSequence.isAcceptableOrUnknown(
+          data['last_applied_server_sequence']!,
+          _lastAppliedServerSequenceMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_lastAppliedServerSequenceMeta);
+    }
+    if (data.containsKey('applied_at')) {
+      context.handle(
+        _appliedAtMeta,
+        appliedAt.isAcceptableOrUnknown(data['applied_at']!, _appliedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_appliedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {entityType, entityId};
+  @override
+  RemoteAppliedChange map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return RemoteAppliedChange(
+      entityType: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}entity_type'],
+      )!,
+      entityId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}entity_id'],
+      )!,
+      lastAppliedServerSequence: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}last_applied_server_sequence'],
+      )!,
+      appliedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}applied_at'],
+      )!,
+    );
+  }
+
+  @override
+  $RemoteAppliedChangesTable createAlias(String alias) {
+    return $RemoteAppliedChangesTable(attachedDatabase, alias);
+  }
+}
+
+class RemoteAppliedChange extends DataClass
+    implements Insertable<RemoteAppliedChange> {
+  /// §38.11.1 change descriptor `entity_type`, an open vocabulary.
+  final String entityType;
+
+  /// §38.11.1 change descriptor `entity_id`.
+  final String entityId;
+
+  /// The highest `server_sequence` applied to this entity, as a decimal string.
+  final String lastAppliedServerSequence;
+
+  /// When the device applied it. Diagnostic; the guard reads the sequence.
+  final DateTime appliedAt;
+  const RemoteAppliedChange({
+    required this.entityType,
+    required this.entityId,
+    required this.lastAppliedServerSequence,
+    required this.appliedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['entity_type'] = Variable<String>(entityType);
+    map['entity_id'] = Variable<String>(entityId);
+    map['last_applied_server_sequence'] = Variable<String>(
+      lastAppliedServerSequence,
+    );
+    map['applied_at'] = Variable<DateTime>(appliedAt);
+    return map;
+  }
+
+  RemoteAppliedChangesCompanion toCompanion(bool nullToAbsent) {
+    return RemoteAppliedChangesCompanion(
+      entityType: Value(entityType),
+      entityId: Value(entityId),
+      lastAppliedServerSequence: Value(lastAppliedServerSequence),
+      appliedAt: Value(appliedAt),
+    );
+  }
+
+  factory RemoteAppliedChange.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return RemoteAppliedChange(
+      entityType: serializer.fromJson<String>(json['entityType']),
+      entityId: serializer.fromJson<String>(json['entityId']),
+      lastAppliedServerSequence: serializer.fromJson<String>(
+        json['lastAppliedServerSequence'],
+      ),
+      appliedAt: serializer.fromJson<DateTime>(json['appliedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'entityType': serializer.toJson<String>(entityType),
+      'entityId': serializer.toJson<String>(entityId),
+      'lastAppliedServerSequence': serializer.toJson<String>(
+        lastAppliedServerSequence,
+      ),
+      'appliedAt': serializer.toJson<DateTime>(appliedAt),
+    };
+  }
+
+  RemoteAppliedChange copyWith({
+    String? entityType,
+    String? entityId,
+    String? lastAppliedServerSequence,
+    DateTime? appliedAt,
+  }) => RemoteAppliedChange(
+    entityType: entityType ?? this.entityType,
+    entityId: entityId ?? this.entityId,
+    lastAppliedServerSequence:
+        lastAppliedServerSequence ?? this.lastAppliedServerSequence,
+    appliedAt: appliedAt ?? this.appliedAt,
+  );
+  RemoteAppliedChange copyWithCompanion(RemoteAppliedChangesCompanion data) {
+    return RemoteAppliedChange(
+      entityType: data.entityType.present
+          ? data.entityType.value
+          : this.entityType,
+      entityId: data.entityId.present ? data.entityId.value : this.entityId,
+      lastAppliedServerSequence: data.lastAppliedServerSequence.present
+          ? data.lastAppliedServerSequence.value
+          : this.lastAppliedServerSequence,
+      appliedAt: data.appliedAt.present ? data.appliedAt.value : this.appliedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('RemoteAppliedChange(')
+          ..write('entityType: $entityType, ')
+          ..write('entityId: $entityId, ')
+          ..write('lastAppliedServerSequence: $lastAppliedServerSequence, ')
+          ..write('appliedAt: $appliedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(entityType, entityId, lastAppliedServerSequence, appliedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is RemoteAppliedChange &&
+          other.entityType == this.entityType &&
+          other.entityId == this.entityId &&
+          other.lastAppliedServerSequence == this.lastAppliedServerSequence &&
+          other.appliedAt == this.appliedAt);
+}
+
+class RemoteAppliedChangesCompanion
+    extends UpdateCompanion<RemoteAppliedChange> {
+  final Value<String> entityType;
+  final Value<String> entityId;
+  final Value<String> lastAppliedServerSequence;
+  final Value<DateTime> appliedAt;
+  final Value<int> rowid;
+  const RemoteAppliedChangesCompanion({
+    this.entityType = const Value.absent(),
+    this.entityId = const Value.absent(),
+    this.lastAppliedServerSequence = const Value.absent(),
+    this.appliedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  RemoteAppliedChangesCompanion.insert({
+    required String entityType,
+    required String entityId,
+    required String lastAppliedServerSequence,
+    required DateTime appliedAt,
+    this.rowid = const Value.absent(),
+  }) : entityType = Value(entityType),
+       entityId = Value(entityId),
+       lastAppliedServerSequence = Value(lastAppliedServerSequence),
+       appliedAt = Value(appliedAt);
+  static Insertable<RemoteAppliedChange> custom({
+    Expression<String>? entityType,
+    Expression<String>? entityId,
+    Expression<String>? lastAppliedServerSequence,
+    Expression<DateTime>? appliedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (entityType != null) 'entity_type': entityType,
+      if (entityId != null) 'entity_id': entityId,
+      if (lastAppliedServerSequence != null)
+        'last_applied_server_sequence': lastAppliedServerSequence,
+      if (appliedAt != null) 'applied_at': appliedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  RemoteAppliedChangesCompanion copyWith({
+    Value<String>? entityType,
+    Value<String>? entityId,
+    Value<String>? lastAppliedServerSequence,
+    Value<DateTime>? appliedAt,
+    Value<int>? rowid,
+  }) {
+    return RemoteAppliedChangesCompanion(
+      entityType: entityType ?? this.entityType,
+      entityId: entityId ?? this.entityId,
+      lastAppliedServerSequence:
+          lastAppliedServerSequence ?? this.lastAppliedServerSequence,
+      appliedAt: appliedAt ?? this.appliedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (entityType.present) {
+      map['entity_type'] = Variable<String>(entityType.value);
+    }
+    if (entityId.present) {
+      map['entity_id'] = Variable<String>(entityId.value);
+    }
+    if (lastAppliedServerSequence.present) {
+      map['last_applied_server_sequence'] = Variable<String>(
+        lastAppliedServerSequence.value,
+      );
+    }
+    if (appliedAt.present) {
+      map['applied_at'] = Variable<DateTime>(appliedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('RemoteAppliedChangesCompanion(')
+          ..write('entityType: $entityType, ')
+          ..write('entityId: $entityId, ')
+          ..write('lastAppliedServerSequence: $lastAppliedServerSequence, ')
+          ..write('appliedAt: $appliedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -1730,6 +2078,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $LocalAuditEventsTable localAuditEvents = $LocalAuditEventsTable(
     this,
   );
+  late final $RemoteAppliedChangesTable remoteAppliedChanges =
+      $RemoteAppliedChangesTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -1738,6 +2088,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     localMeta,
     outbox,
     localAuditEvents,
+    remoteAppliedChanges,
   ];
 }
 
@@ -2589,6 +2940,218 @@ typedef $$LocalAuditEventsTableProcessedTableManager =
       LocalAuditEvent,
       PrefetchHooks Function()
     >;
+typedef $$RemoteAppliedChangesTableCreateCompanionBuilder =
+    RemoteAppliedChangesCompanion Function({
+      required String entityType,
+      required String entityId,
+      required String lastAppliedServerSequence,
+      required DateTime appliedAt,
+      Value<int> rowid,
+    });
+typedef $$RemoteAppliedChangesTableUpdateCompanionBuilder =
+    RemoteAppliedChangesCompanion Function({
+      Value<String> entityType,
+      Value<String> entityId,
+      Value<String> lastAppliedServerSequence,
+      Value<DateTime> appliedAt,
+      Value<int> rowid,
+    });
+
+class $$RemoteAppliedChangesTableFilterComposer
+    extends Composer<_$AppDatabase, $RemoteAppliedChangesTable> {
+  $$RemoteAppliedChangesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get entityType => $composableBuilder(
+    column: $table.entityType,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get entityId => $composableBuilder(
+    column: $table.entityId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get lastAppliedServerSequence => $composableBuilder(
+    column: $table.lastAppliedServerSequence,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get appliedAt => $composableBuilder(
+    column: $table.appliedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$RemoteAppliedChangesTableOrderingComposer
+    extends Composer<_$AppDatabase, $RemoteAppliedChangesTable> {
+  $$RemoteAppliedChangesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get entityType => $composableBuilder(
+    column: $table.entityType,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get entityId => $composableBuilder(
+    column: $table.entityId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get lastAppliedServerSequence => $composableBuilder(
+    column: $table.lastAppliedServerSequence,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get appliedAt => $composableBuilder(
+    column: $table.appliedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$RemoteAppliedChangesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $RemoteAppliedChangesTable> {
+  $$RemoteAppliedChangesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get entityType => $composableBuilder(
+    column: $table.entityType,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get entityId =>
+      $composableBuilder(column: $table.entityId, builder: (column) => column);
+
+  GeneratedColumn<String> get lastAppliedServerSequence => $composableBuilder(
+    column: $table.lastAppliedServerSequence,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get appliedAt =>
+      $composableBuilder(column: $table.appliedAt, builder: (column) => column);
+}
+
+class $$RemoteAppliedChangesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $RemoteAppliedChangesTable,
+          RemoteAppliedChange,
+          $$RemoteAppliedChangesTableFilterComposer,
+          $$RemoteAppliedChangesTableOrderingComposer,
+          $$RemoteAppliedChangesTableAnnotationComposer,
+          $$RemoteAppliedChangesTableCreateCompanionBuilder,
+          $$RemoteAppliedChangesTableUpdateCompanionBuilder,
+          (
+            RemoteAppliedChange,
+            BaseReferences<
+              _$AppDatabase,
+              $RemoteAppliedChangesTable,
+              RemoteAppliedChange
+            >,
+          ),
+          RemoteAppliedChange,
+          PrefetchHooks Function()
+        > {
+  $$RemoteAppliedChangesTableTableManager(
+    _$AppDatabase db,
+    $RemoteAppliedChangesTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$RemoteAppliedChangesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$RemoteAppliedChangesTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$RemoteAppliedChangesTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> entityType = const Value.absent(),
+                Value<String> entityId = const Value.absent(),
+                Value<String> lastAppliedServerSequence = const Value.absent(),
+                Value<DateTime> appliedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => RemoteAppliedChangesCompanion(
+                entityType: entityType,
+                entityId: entityId,
+                lastAppliedServerSequence: lastAppliedServerSequence,
+                appliedAt: appliedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String entityType,
+                required String entityId,
+                required String lastAppliedServerSequence,
+                required DateTime appliedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => RemoteAppliedChangesCompanion.insert(
+                entityType: entityType,
+                entityId: entityId,
+                lastAppliedServerSequence: lastAppliedServerSequence,
+                appliedAt: appliedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$RemoteAppliedChangesTable, RemoteAppliedChange>(
+                    table,
+                  ),
+                  BaseReferences<
+                    _$AppDatabase,
+                    $RemoteAppliedChangesTable,
+                    RemoteAppliedChange
+                  >(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$RemoteAppliedChangesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $RemoteAppliedChangesTable,
+      RemoteAppliedChange,
+      $$RemoteAppliedChangesTableFilterComposer,
+      $$RemoteAppliedChangesTableOrderingComposer,
+      $$RemoteAppliedChangesTableAnnotationComposer,
+      $$RemoteAppliedChangesTableCreateCompanionBuilder,
+      $$RemoteAppliedChangesTableUpdateCompanionBuilder,
+      (
+        RemoteAppliedChange,
+        BaseReferences<
+          _$AppDatabase,
+          $RemoteAppliedChangesTable,
+          RemoteAppliedChange
+        >,
+      ),
+      RemoteAppliedChange,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -2599,4 +3162,6 @@ class $AppDatabaseManager {
       $$OutboxTableTableManager(_db, _db.outbox);
   $$LocalAuditEventsTableTableManager get localAuditEvents =>
       $$LocalAuditEventsTableTableManager(_db, _db.localAuditEvents);
+  $$RemoteAppliedChangesTableTableManager get remoteAppliedChanges =>
+      $$RemoteAppliedChangesTableTableManager(_db, _db.remoteAppliedChanges);
 }

@@ -111,7 +111,45 @@ class LocalAuditEvents extends Table {
   TextColumn get errorCode => text().nullable()();
 }
 
-@DriftDatabase(tables: [LocalMeta, Outbox, LocalAuditEvents])
+/// The applied-sequence guard state — Master Plan §38.12.1, §40.5 (M1b-S7).
+///
+/// One row per `(entity_type, entity_id)` a remote change has been applied to,
+/// holding the highest `server_sequence` applied so far. This is §38.12.1's
+/// "record's last-applied sequence": an incoming change whose sequence is not
+/// strictly newer is discarded, so a re-delivered or out-of-order page can
+/// never roll local state backwards (T-O7's "stale page — no rollback").
+///
+/// Two deliberate distinctions:
+///
+/// * **Not the pull resume cursor.** §38.11.2's `last_server_sequence` — the
+///   `after` value the client sends next — is a separate value with a separate
+///   owner (the transport/resume slices). This table is per-entity guard state
+///   and is written only through the single remote-apply door.
+/// * **Not a business table.** It carries no entity payload; the full-state
+///   retrieval §38.15 delegates to a later slice is not faked here.
+///
+/// `last_applied_server_sequence` is a decimal **string** because §38.11.1's
+/// sequence is a 64-bit value: storing it as a number would lose precision
+/// above 2^53, and the guard's comparisons must be exact at every value the
+/// counter can reach.
+class RemoteAppliedChanges extends Table {
+  /// §38.11.1 change descriptor `entity_type`, an open vocabulary.
+  TextColumn get entityType => text()();
+
+  /// §38.11.1 change descriptor `entity_id`.
+  TextColumn get entityId => text()();
+
+  /// The highest `server_sequence` applied to this entity, as a decimal string.
+  TextColumn get lastAppliedServerSequence => text()();
+
+  /// When the device applied it. Diagnostic; the guard reads the sequence.
+  DateTimeColumn get appliedAt => dateTime()();
+
+  @override
+  Set<Column> get primaryKey => {entityType, entityId};
+}
+
+@DriftDatabase(tables: [LocalMeta, Outbox, LocalAuditEvents, RemoteAppliedChanges])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
@@ -120,9 +158,10 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   /// Local schema version (§38.6.2). v1 created `local_meta` (M1b-S1); v2
-  /// adds the durable outbox and its audit log (M1b-S3).
+  /// adds the durable outbox and its audit log (M1b-S3); v3 adds the
+  /// applied-sequence guard state for remote applies (M1b-S7).
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration {
@@ -132,13 +171,16 @@ class AppDatabase extends _$AppDatabase {
         await recordLocalSchemaVersion(this, schemaVersion);
       },
       onUpgrade: (Migrator m, int from, int to) async {
-        // Forward-only and additive (§38.6.2): v2 exists only to add the two
-        // tables above. Every v1 row in `local_meta` is left untouched, so
-        // the backup-before-migration rule (§38.6.2) does not apply — this is
-        // a purely additive migration.
+        // Forward-only and additive (§38.6.2): each step only adds tables, and
+        // every existing row is left untouched, so the backup-before-migration
+        // rule (§38.6.2) does not apply to any of them.
         if (from < 2 && to >= 2) {
           await m.createTable(outbox);
           await m.createTable(localAuditEvents);
+          await recordLocalSchemaVersion(this, to);
+        }
+        if (from < 3 && to >= 3) {
+          await m.createTable(remoteAppliedChanges);
           await recordLocalSchemaVersion(this, to);
         }
       },
