@@ -244,6 +244,33 @@ void main() {
     expect((await repo.requireById(row.mutationId)).syncState, SyncState.synced.wireName);
   });
 
+  test('a throwing telemetry clock never changes a pass (passive evidence)', () async {
+    await seedDeviceBinding(db);
+    final OutboxData row = await repo.enqueue(testCommand());
+    final ScriptedPushTransport transport = ScriptedPushTransport(<Object>[
+      appliedFor(row.mutationId),
+    ]);
+    final RecordingTelemetrySink logs = RecordingTelemetrySink();
+    final RecordingMetricsSink metrics = RecordingMetricsSink();
+    final PushOrchestrator orchestrator = PushOrchestrator(
+      outbox: repo,
+      transport: transport,
+      localSchemaVersion: 2,
+      batchIdFactory: () => 'batch-1',
+      traceIdFactory: () => 'trace-1',
+      // The logger's clock is a failing stage; the pass must not observe it.
+      logger: TelemetryLogger(sink: logs, clock: () => throw StateError('clock failed')),
+      metrics: TelemetryMetrics(sink: metrics),
+    );
+
+    final PushRunResult result = await orchestrator.runOnce();
+
+    expect(result.applied, 1);
+    expect((await repo.requireById(row.mutationId)).syncState, SyncState.synced.wireName);
+    // The record is lost rather than the pass: no log escaped the broken clock.
+    expect(logs.records, isEmpty);
+  });
+
   test('the scheduler emits outbox depth by state, never by identity', () async {
     await seedDeviceBinding(db);
     await repo.enqueue(testCommand(aggregateId: '44444444-4444-4444-8444-444444444441'));

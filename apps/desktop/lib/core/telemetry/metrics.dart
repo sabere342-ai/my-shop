@@ -16,16 +16,25 @@
 ///   [SyncMetricNames] with no emitter, so the seam is visible rather than
 ///   silently missing.
 ///
-/// Two properties are structural, mirroring the structured log:
+/// Three properties are structural, mirroring the structured log:
 ///
 /// 1. **Low cardinality only.** [validateMetricLabels] admits only the label
 ///    keys in [allowedMetricLabelKeys]. A `mutation_id`, `device_id`,
 ///    `trace_id`, `sync_batch_id`, or customer id is not a label: putting an
 ///    unbounded identifier in a label is how a metrics backend's cardinality,
 ///    and its cost, explodes.
-/// 2. **Failure isolation.** A throwing sink is swallowed, so a metric can
-///    never fail the pass that produced it (telemetry is passive, §38.28).
+/// 2. **Per-key value policy.** A low-cardinality label *key* is not a
+///    guarantee about its *value*. [validatedMetricLabel] requires a closed
+///    vocabulary for `state`/`outcome`/`operation`/`failureKind` and a bounded
+///    token for `errorClass`/`errorCode`/`conflictClass`, using the same
+///    `telemetry_policy.dart` rules as the structured log, so an arbitrary
+///    string cannot be stored as a classification.
+/// 3. **Failure isolation.** Validation, construction, and the sink write are
+///    all guarded, so a metric can never fail the pass that produced it
+///    (telemetry is passive, §38.28).
 library;
+
+import 'package:my_shop_desktop/core/telemetry/telemetry_policy.dart';
 
 /// What a [MetricPoint] measures.
 enum MetricKind {
@@ -41,10 +50,6 @@ enum MetricKind {
 
 /// The longest metric label value [validateMetricLabels] will emit.
 const int maxMetricLabelLength = 64;
-
-/// A low-cardinality label value: no whitespace, no control characters, no
-/// quotes, bounded length.
-final RegExp _safeMetricLabel = RegExp(r'^[A-Za-z0-9._:-]{1,64}$');
 
 /// Label names a metric may carry.
 ///
@@ -123,6 +128,52 @@ abstract final class SyncMetricNames {
 
   /// Cost basis divergences (counter) — a §38.27 business class (M10-S6).
   static const String costBasisDivergences = 'sync.cost_basis_divergences';
+
+  /// Every metric name above, as one closed set.
+  ///
+  /// A new metric is added here in review; an unlisted name is refused by
+  /// [TelemetryMetrics] and by the JSON sinks.
+  static const Set<String> all = <String>{
+    outboxDepth,
+    pushDurationMs,
+    ackLatencyMs,
+    pushAttempts,
+    permanentRejections,
+    conflicts,
+    pushSuccessRatio,
+    pullDurationMs,
+    divergenceEvents,
+    costBasisDivergences,
+  };
+}
+
+/// True when [name] is one of the closed [SyncMetricNames] names.
+bool isKnownMetricName(String name) => SyncMetricNames.all.contains(name);
+
+/// Returns [value] only when it is a safe value for the label [key].
+///
+/// A label value is always a `String` (a classification), so a non-string is
+/// refused outright. The key then picks one rule from `telemetry_policy.dart`:
+/// the same closed vocabularies and bounded tokens the structured log uses, so
+/// the two channels cannot disagree about what a `state` or an `errorClass` is.
+Object? validatedMetricLabel(String key, Object? value) {
+  switch (key) {
+    case MetricLabels.state:
+      return closedVocabularyValue(value, syncStateNames);
+    case MetricLabels.outcome:
+      return closedVocabularyValue(value, mutationOutcomeNames);
+    case MetricLabels.operation:
+      return closedVocabularyValue(value, operationNames);
+    case MetricLabels.failureKind:
+      return closedVocabularyValue(value, reachabilityFailureKindNames);
+    case MetricLabels.errorClass:
+      return boundedTokenValue(value, classTokenPattern);
+    case MetricLabels.errorCode:
+    case MetricLabels.conflictClass:
+      return boundedTokenValue(value, upperCodePattern);
+    default:
+      return null;
+  }
 }
 
 /// Returns only allow-listed, low-cardinality labels from [candidate].
@@ -130,8 +181,8 @@ Map<String, Object?> validateMetricLabels(Map<String, Object?> candidate) {
   final Map<String, Object?> safe = <String, Object?>{};
   for (final String key in allowedMetricLabelKeys) {
     if (!candidate.containsKey(key)) continue;
-    final Object? value = candidate[key];
-    if (value is String && _safeMetricLabel.hasMatch(value)) safe[key] = value;
+    final Object? value = validatedMetricLabel(key, candidate[key]);
+    if (value != null) safe[key] = value;
   }
   return safe;
 }
@@ -188,10 +239,17 @@ class TelemetryMetrics {
     _emit(name, MetricKind.histogram, value, labels);
   }
 
+  /// Validates, builds, and writes one point, isolating every failure.
+  ///
+  /// A name outside [SyncMetricNames] is refused: a free-form metric name is a
+  /// second channel for an arbitrary string, so the vocabulary is closed. The
+  /// non-finite check, the label validation, the construction, and the write
+  /// are all inside the guard, so a defect anywhere loses a point rather than
+  /// escaping into the pass that produced it.
   void _emit(String name, MetricKind kind, num value, Map<String, Object?> labels) {
-    if (name.isEmpty) return;
-    if (value is double && (value.isNaN || value.isInfinite)) return;
     try {
+      if (!isKnownMetricName(name)) return;
+      if (value is double && (value.isNaN || value.isInfinite)) return;
       sink.write(
         MetricPoint(
           name: name,

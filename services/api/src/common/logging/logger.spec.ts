@@ -111,6 +111,46 @@ describe('logPayload', () => {
       expect(LOGGABLE_KEYS).not.toContain(key);
     }
   });
+
+  it('drops a nested object or array under an allow-listed key', () => {
+    // The root gap the value policy closes: an allow-listed key is not a
+    // guarantee about the value, and a nested shape serialises a whole payload.
+    const payload = logPayload({
+      path: { connection: 'postgresql://app:do-not-log-that@host' },
+      userAgent: ['do', 'not', 'log'],
+      method: 'POST',
+    });
+
+    expect(payload).toEqual({ method: 'POST' });
+    expect(JSON.stringify(payload)).not.toContain('do-not-log-that');
+  });
+
+  it('drops a value with a control character or a newline under an allow-listed key', () => {
+    // A control character forges a log-line boundary rather than being escaped.
+    expect(logPayload({ userAgent: 'line\nbreak' })).toEqual({});
+    expect(logPayload({ component: 'bell\u0007' })).toEqual({});
+  });
+
+  it('drops an over-long string under an allow-listed key', () => {
+    expect(logPayload({ userAgent: 'a'.repeat(200) })).toEqual({ userAgent: 'a'.repeat(200) });
+    expect(logPayload({ userAgent: 'a'.repeat(201) })).toEqual({});
+  });
+
+  it('requires the declared type for a numeric field', () => {
+    expect(logPayload({ statusCode: 201 })).toEqual({ statusCode: 201 });
+    expect(logPayload({ statusCode: '201' })).toEqual({});
+    expect(logPayload({ statusCode: -1 })).toEqual({});
+    expect(logPayload({ durationMs: 1.5 })).toEqual({ durationMs: 1.5 });
+    expect(logPayload({ durationMs: -1 })).toEqual({});
+    expect(logPayload({ durationMs: Number.POSITIVE_INFINITY })).toEqual({});
+  });
+
+  it('bounds errorCode to a contract code and errorName to a class name', () => {
+    expect(logPayload({ errorCode: 'MISSING_OUTCOME' })).toEqual({ errorCode: 'MISSING_OUTCOME' });
+    expect(logPayload({ errorCode: 'not a code' })).toEqual({});
+    expect(logPayload({ errorName: 'TypeError' })).toEqual({ errorName: 'TypeError' });
+    expect(logPayload({ errorName: 'has space' })).toEqual({});
+  });
 });
 
 describe('errorNameOf', () => {

@@ -262,4 +262,79 @@ void main() {
       );
     });
   });
+
+  group('a directly-built record is re-validated at the JSON boundary', () {
+    test('a hand-built record cannot leak a secret under any key', () {
+      // The public `TelemetryRecord` constructor is a bypass of the builder, so
+      // the sink must be a hard boundary: values are re-filtered and a value
+      // under a closed-vocabulary key is refused even here.
+      final ({TelemetrySink sink, List<String> lines}) harness = jsonLineTelemetrySink();
+      harness.sink.write(
+        TelemetryRecord(
+          event: SyncLogEvents.pushPass,
+          timestamp: DateTime.utc(2026),
+          fields: <String, Object?>{
+            LoggableKeys.deviceId: 'd1',
+            'password': secretCanary,
+            LoggableKeys.component: tokenCanary,
+            LoggableKeys.reason: connectionCanary,
+            LoggableKeys.errorCode: payloadCanary,
+          },
+        ),
+      );
+
+      expect(harness.lines.length, 1);
+      final String line = harness.lines.single;
+      for (final String canary in <String>[secretCanary, tokenCanary, connectionCanary, payloadCanary]) {
+        expect(line, isNot(contains(canary)));
+      }
+      final Map<String, Object?> decoded = jsonDecode(line) as Map<String, Object?>;
+      expect(decoded['fields'], <String, Object?>{LoggableKeys.deviceId: 'd1'});
+    });
+
+    test('a hand-built record with an unknown event is refused', () {
+      final ({TelemetrySink sink, List<String> lines}) harness = jsonLineTelemetrySink();
+      harness.sink.write(
+        TelemetryRecord(
+          event: 'sync.evil.event',
+          timestamp: DateTime.utc(2026),
+          fields: <String, Object?>{LoggableKeys.deviceId: 'd1'},
+        ),
+      );
+      expect(harness.lines, isEmpty);
+    });
+
+    test('a hand-built metric cannot leak a secret label', () {
+      final ({MetricsSink sink, List<String> lines}) harness = jsonLineMetricsSink();
+      harness.sink.write(
+        const MetricPoint(
+          name: SyncMetricNames.ackLatencyMs,
+          kind: MetricKind.histogram,
+          value: 1,
+          labels: <String, Object?>{
+            MetricLabels.outcome: 'APPLIED',
+            MetricLabels.errorCode: tokenCanary,
+            MetricLabels.state: connectionCanary,
+            'accessToken': secretCanary,
+          },
+        ),
+      );
+
+      expect(harness.lines.length, 1);
+      final String line = harness.lines.single;
+      for (final String canary in <String>[secretCanary, tokenCanary, connectionCanary]) {
+        expect(line, isNot(contains(canary)));
+      }
+      final Map<String, Object?> decoded = jsonDecode(line) as Map<String, Object?>;
+      expect(decoded['labels'], <String, Object?>{MetricLabels.outcome: 'APPLIED'});
+    });
+
+    test('a hand-built metric with an unknown name is refused', () {
+      final ({MetricsSink sink, List<String> lines}) harness = jsonLineMetricsSink();
+      harness.sink.write(
+        const MetricPoint(name: 'sync.evil.metric', kind: MetricKind.gauge, value: 1),
+      );
+      expect(harness.lines, isEmpty);
+    });
+  });
 }

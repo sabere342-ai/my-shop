@@ -44,6 +44,32 @@ void main() {
       );
       expect(validateMetricLabels(<String, Object?>{MetricLabels.state: 7}), isEmpty);
     });
+
+    test('drops an arbitrary string under a closed-vocabulary label', () {
+      // A label key is a bounded class, but the *value* must be a member of the
+      // class vocabulary — a secret under `state`/`outcome`/`operation` is refused.
+      expect(validateMetricLabels(<String, Object?>{MetricLabels.state: secretCanary}), isEmpty);
+      expect(validateMetricLabels(<String, Object?>{MetricLabels.outcome: secretCanary}), isEmpty);
+      expect(validateMetricLabels(<String, Object?>{MetricLabels.operation: secretCanary}), isEmpty);
+      expect(validateMetricLabels(<String, Object?>{MetricLabels.failureKind: secretCanary}), isEmpty);
+    });
+
+    test('bounds the two open classification labels', () {
+      expect(
+        validateMetricLabels(<String, Object?>{MetricLabels.errorClass: 'TRANSIENT'}),
+        <String, Object?>{MetricLabels.errorClass: 'TRANSIENT'},
+      );
+      expect(
+        validateMetricLabels(<String, Object?>{MetricLabels.errorCode: 'MISSING_OUTCOME'}),
+        <String, Object?>{MetricLabels.errorCode: 'MISSING_OUTCOME'},
+      );
+      expect(
+        validateMetricLabels(<String, Object?>{MetricLabels.conflictClass: 'IDEMPOTENCY_CONTRADICTION'}),
+        <String, Object?>{MetricLabels.conflictClass: 'IDEMPOTENCY_CONTRADICTION'},
+      );
+      expect(validateMetricLabels(<String, Object?>{MetricLabels.errorCode: 'bad code'}), isEmpty);
+      expect(validateMetricLabels(<String, Object?>{MetricLabels.conflictClass: 'lowercase'}), isEmpty);
+    });
   });
 
   group('TelemetryMetrics', () {
@@ -79,6 +105,13 @@ void main() {
       expect(() => metrics.counter(SyncMetricNames.permanentRejections, 1), returnsNormally);
       expect(() => metrics.observe(SyncMetricNames.ackLatencyMs, 1), returnsNormally);
     });
+
+    test('refuses a metric name outside the closed vocabulary', () {
+      final ({TelemetryMetrics metrics, RecordingMetricsSink sink}) harness = recordingMetrics();
+      harness.metrics.gauge('sync.evil.metric', 1);
+      harness.metrics.counter('not-a-metric', 1);
+      expect(harness.sink.points, isEmpty);
+    });
   });
 
   group('SyncMetricNames', () {
@@ -99,6 +132,25 @@ void main() {
       for (final String name in all) {
         expect(name, matches(r'^sync\.[a-z0-9_]+(\.[a-z0-9_]+)*$'));
       }
+    });
+
+    test('the closed set is exactly the emitted and deferred names', () {
+      expect(SyncMetricNames.all, <String>{
+        SyncMetricNames.outboxDepth,
+        SyncMetricNames.pushDurationMs,
+        SyncMetricNames.ackLatencyMs,
+        SyncMetricNames.pushAttempts,
+        SyncMetricNames.permanentRejections,
+        SyncMetricNames.conflicts,
+        SyncMetricNames.pushSuccessRatio,
+        SyncMetricNames.pullDurationMs,
+        SyncMetricNames.divergenceEvents,
+        SyncMetricNames.costBasisDivergences,
+      });
+      for (final String name in SyncMetricNames.all) {
+        expect(isKnownMetricName(name), isTrue);
+      }
+      expect(isKnownMetricName('sync.evil.metric'), isFalse);
     });
   });
 }

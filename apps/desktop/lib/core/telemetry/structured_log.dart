@@ -16,20 +16,31 @@
 ///    future call site that passes a whole payload fails closed rather than
 ///    leaking. Redacting a known secret is a list that is one field behind; an
 ///    allow-list is bounded by construction.
-/// 2. **Scalars only.** A value that is not a `String`, `num`, or `bool` is
+/// 2. **Per-key value policy.** An allow-listed *key* is not a guarantee about
+///    its *value*: a key named `reason` can still carry a credential if a call
+///    site passes one. [validatedLogField] classifies each key — an identifier
+///    is validated as a §38.28.1 id, a diagnostic must be a member of a closed
+///    vocabulary, and a count/status/duration/flag must carry its own Dart
+///    type — so an arbitrary string cannot be stored under a "classification".
+///    The policy itself lives in `telemetry_policy.dart`.
+/// 3. **Scalars only.** A value that is not a `String`, `num`, or `bool` is
 ///    dropped entirely. A `Map` or `List` — the shape a payload has — never
 ///    reaches a sink, so "logged by reference" is structural and not a
 ///    convention about how a call site formats its arguments.
-/// 3. **Bounded strings.** A string longer than [maxLogStringLength] or
+/// 4. **Bounded strings.** A string longer than [maxLogStringLength] or
 ///    carrying a control character is dropped: an unbounded string is how a
 ///    payload fragment or an injected newline reaches a log line.
-/// 4. **Failure isolation.** A sink that throws is swallowed. Telemetry is
-///    passive evidence (§38.28): it must never turn a committed sale or a
-///    completed sync pass into a failure, so a broken sink loses a record
-///    rather than the business write that produced it.
+/// 5. **Closed event vocabulary.** [TelemetryLogger.log] refuses an event name
+///    that is not one of [SyncLogEvents]. A free-form event is a second channel
+///    for a message; the set is closed so a name is added in review.
+/// 6. **Failure isolation.** A sink, or the clock, that throws is swallowed.
+///    Telemetry is passive evidence (§38.28): it must never turn a committed
+///    sale or a completed sync pass into a failure, so a broken sink loses a
+///    record rather than the business write that produced it.
 library;
 
 import 'package:my_shop_desktop/core/telemetry/correlation.dart';
+import 'package:my_shop_desktop/core/telemetry/telemetry_policy.dart';
 
 /// The longest scalar string [allowlistLogFields] will emit.
 ///
@@ -140,17 +151,84 @@ Object? loggableScalar(Object? value) {
   return null;
 }
 
-/// Copies only allow-listed, bounded scalars from [candidate].
+/// Returns [value] only when it is a safe value for the allow-listed [key].
+///
+/// The generic scalar gate ([loggableScalar]) runs first, so a `Map`, an
+/// over-long string, or a non-finite `double` is refused before the key is
+/// considered. The key then picks exactly one rule from `telemetry_policy.dart`:
+///
+/// * a §38.28.1 identifier must satisfy [isSafeCorrelationId];
+/// * a diagnostic (`component`, `reason`, `state`, `outcome`, `fault`,
+///   `operation`, `failureKind`) must be a member of its closed vocabulary, so
+///   an exception message can never be recorded as a "reason";
+/// * `errorClass` and `errorCode` are bounded tokens (they are populated only
+///   by [errorClassOf] and by contract codes);
+/// * a count or a status must be a non-negative `int`, and a duration must be a
+///   finite non-negative `num`.
+///
+/// A key the policy does not name is refused, so a future key added to
+/// [allowedLogKeys] without a value rule fails closed.
+Object? validatedLogField(String key, Object? value) {
+  final Object? scalar = loggableScalar(value);
+  if (scalar == null) return null;
+  switch (key) {
+    case LoggableKeys.traceId:
+    case LoggableKeys.mutationId:
+    case LoggableKeys.deviceId:
+    case LoggableKeys.syncBatchId:
+    case LoggableKeys.organizationId:
+    case LoggableKeys.userId:
+      return isSafeCorrelationId(scalar) ? scalar : null;
+    case LoggableKeys.component:
+      return closedVocabularyValue(scalar, logComponentNames);
+    case LoggableKeys.reason:
+      return closedVocabularyValue(scalar, logReasonNames);
+    case LoggableKeys.state:
+      return closedVocabularyValue(scalar, syncStateNames);
+    case LoggableKeys.outcome:
+      return closedVocabularyValue(scalar, mutationOutcomeNames);
+    case LoggableKeys.fault:
+      return closedVocabularyValue(scalar, pushRunFaultNames);
+    case LoggableKeys.operation:
+      return closedVocabularyValue(scalar, operationNames);
+    case LoggableKeys.failureKind:
+      return closedVocabularyValue(scalar, reachabilityFailureKindNames);
+    case LoggableKeys.errorClass:
+    case LoggableKeys.kind:
+      return boundedTokenValue(scalar, classTokenPattern);
+    case LoggableKeys.errorCode:
+      return boundedTokenValue(scalar, upperCodePattern);
+    case LoggableKeys.statusCode:
+    case LoggableKeys.attemptCount:
+      return nonNegativeIntValue(scalar);
+    case LoggableKeys.durationMs:
+      return finiteNonNegativeNumberValue(scalar);
+    case LoggableKeys.recovered:
+    case LoggableKeys.promoted:
+    case LoggableKeys.attempted:
+    case LoggableKeys.applied:
+    case LoggableKeys.replayed:
+    case LoggableKeys.rejected:
+    case LoggableKeys.contradicted:
+    case LoggableKeys.retryable:
+    case LoggableKeys.requeued:
+      return nonNegativeIntValue(scalar);
+    default:
+      return null;
+  }
+}
+
+/// Copies only allow-listed keys whose value satisfies [validatedLogField].
 ///
 /// @param candidate Untrusted shape. May hold a payload, a session, anything.
 /// @returns A fresh map holding only keys named in [allowedLogKeys] whose
-///   values survived [loggableScalar].
+///   values survived both the scalar gate and the per-key value policy.
 Map<String, Object?> allowlistLogFields(Map<String, Object?> candidate) {
   final Map<String, Object?> safe = <String, Object?>{};
   for (final String key in allowedLogKeys) {
     if (!candidate.containsKey(key)) continue;
-    final Object? scalar = loggableScalar(candidate[key]);
-    if (scalar != null) safe[key] = scalar;
+    final Object? value = validatedLogField(key, candidate[key]);
+    if (value != null) safe[key] = value;
   }
   return safe;
 }
@@ -201,16 +279,21 @@ class TelemetryLogger {
 
   /// Records [event] with [fields], redacted by construction.
   ///
-  /// Failure isolated: a throwing sink is swallowed with `return;` so telemetry
-  /// can never break the business or sync path that produced the record.
+  /// An event name outside [SyncLogEvents] is refused: a free-form event is a
+  /// second channel for a message, so the vocabulary is closed.
+  ///
+  /// Failure isolated end to end: the clock read, the field validation, the
+  /// record construction, and the sink write are all inside one guard, so a
+  /// throwing clock, a defect in the policy, or a broken sink loses a record
+  /// rather than escaping into the business or sync path that produced it.
   void log(String event, {Map<String, Object?> fields = const <String, Object?>{}}) {
-    if (event.isEmpty) return;
-    final TelemetryRecord record = TelemetryRecord(
-      event: event,
-      timestamp: _clock(),
-      fields: allowlistLogFields(fields),
-    );
     try {
+      if (!isKnownLogEvent(event)) return;
+      final TelemetryRecord record = TelemetryRecord(
+        event: event,
+        timestamp: _clock(),
+        fields: allowlistLogFields(fields),
+      );
       sink.write(record);
     } on Object {
       return;
@@ -249,4 +332,23 @@ abstract final class SyncLogEvents {
 
   /// A §38.16.5 forward clock jump — a recorded local security event.
   static const String clockTamper = 'sync.security.clock_tamper';
+
+  /// Every event name above, as one closed set.
+  ///
+  /// A new event is added here in review; an unlisted name is refused by
+  /// [TelemetryLogger.log] and by the JSON sinks.
+  static const Set<String> all = <String>{
+    pushPass,
+    pushBatchFailure,
+    pushMutationRejected,
+    pushMutationContradiction,
+    pushTransportUnexpected,
+    schedulerError,
+    connectivityProbeUnexpected,
+    healthProbeError,
+    clockTamper,
+  };
 }
+
+/// True when [event] is one of the closed [SyncLogEvents] names.
+bool isKnownLogEvent(String event) => SyncLogEvents.all.contains(event);
