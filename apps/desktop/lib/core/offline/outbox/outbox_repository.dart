@@ -4,6 +4,7 @@ import 'package:drift/drift.dart';
 import 'package:my_shop_desktop/core/offline/db/app_database.dart';
 import 'package:my_shop_desktop/core/offline/outbox/operation_type.dart';
 import 'package:my_shop_desktop/core/offline/outbox/outbox_errors.dart';
+import 'package:my_shop_desktop/core/offline/outbox/remote_apply_scope.dart';
 import 'package:my_shop_desktop/core/offline/outbox/sync_state.dart';
 import 'package:my_shop_desktop/core/offline/outbox/uuid_v7.dart';
 
@@ -81,7 +82,16 @@ class OutboxRepository {
 
   /// Commits a mutation to the outbox and promotes it `LOCAL_ONLY → PENDING`
   /// (§38.13) inside a single transaction.
+  ///
+  /// **Remote-apply suppression (§38.12.1).** If a remote-origin apply is in
+  /// progress, this throws [OutboxWriteDuringRemoteApplyException] before
+  /// touching the database: a change that came *from* the server must never
+  /// become a new mutation *to* the server. The check is first and
+  /// unconditional, so the violation is a crash rather than a silent echo.
   Future<OutboxData> enqueue(OutboxEnqueueCommand command) {
+    if (RemoteApplyScope.isActive) {
+      throw const OutboxWriteDuringRemoteApplyException();
+    }
     _validateCommand(command);
     return _db.transaction(() async {
       final binding = await _readBinding();
