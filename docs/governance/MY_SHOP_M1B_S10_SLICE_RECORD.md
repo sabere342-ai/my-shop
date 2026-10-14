@@ -5,8 +5,9 @@
 **Branch:** `codex/my-shop-m1b-s10-offline-observability`
 **Predecessor:** `bbedef5b3bf8b8b12647f731552175c1fd82feb0` — M1b-S9 (record tip), branch `codex/my-shop-m1b-s9-connectivity-backoff` (PR #15, open, base `codex/my-shop-m1b-s8-offline-auth-grace`)
 **Repair commit:** none required against the predecessor
-**Final SHA (implementation head):** `dfb8f71e77f8b13f39acd55b1edafccdd94b1886`
-**Declaration status:** `PASS_MY_SHOP_M1B_S10_REMOTE_LOCKED` (offline observability plumbing delivered and remote-locked)
+**Hardening commit:** `9828d4ae267c9614f525fc233b978d6799d87eea` — value-policy, serialise-bypass, and clock-isolation findings closed at the root (this record's §6). Record-only predecessor head was `dfb8f71e77f8b13f39acd55b1edafccdd94b1886`.
+**Final SHA (implementation head):** `9828d4ae267c9614f525fc233b978d6799d87eea`
+**Declaration status:** `PASS_MY_SHOP_M1B_S10_SECURITY_HARDENED_REMOTE_LOCKED` (offline observability plumbing delivered, security-hardened, and remote-locked)
 
 ---
 
@@ -19,7 +20,7 @@
 | Repository root    | `C:/dev/my-shop`                                                                                              | pass                                          |
 | Branch at entry    | `codex/my-shop-m1b-s9-connectivity-backoff` @ `bbedef5`                                                       | pass - equals the accepted M1b-S9 record tip   |
 | Branch created     | `codex/my-shop-m1b-s10-offline-observability` from `bbedef5`                                                  | pass                                          |
-| Ancestry           | `dfb8f71` (S10) -> `423a75e` (S10 impl) -> `bbedef5` (S9 record) -> `c7efbee` (S9) -> `1fb5db7` (S8 record) -> … -> `main` | pass - stacked ancestry intact (`merge-base --is-ancestor` true) |
+| Ancestry           | `9828d4a` (S10 hardening) -> `136c225` (S10 record) -> `dfb8f71` (S10) -> `423a75e` (S10 impl) -> `bbedef5` (S9 record) -> `c7efbee` (S9) -> `1fb5db7` (S8 record) -> … -> `main` | pass - stacked ancestry intact (`merge-base --is-ancestor` true) |
 | `origin/main`      | `53f6aaa`, unchanged by this slice                                                                            | pass                                          |
 | Worktree at entry  | clean, no commits on the new branch                                                                           | pass - started clean, not restarted           |
 | Predecessor record | `MY_SHOP_M1B_S9_SLICE_RECORD.md` present, declares M1b-S10 not authorized by S9                                | read; its §6 boundary is superseded here      |
@@ -60,6 +61,9 @@ Per Master Plan §40.5 row **M1b-S10 — offline observability plumbing**: `muta
 | S-11 | `offline_grace_service.dart`: an optional `TelemetryLogger? telemetry`; a forward clock jump (§38.16.5) emits `sync.security.clock_tamper` with a component and reason only — no clock value, no record, no payload |
 | S-12 | Server hardening: a shared `errorNameOf` in `common/logging/logger.ts` (the constructor name only, never the message); `ProblemDetailsFilter` (both `logOutcome` and the filter-failure catch) and `main.ts` (both the shutdown `.catch` and the process-fatal stderr path) stop serialising `err` and log the class instead |
 | S-13 | No server contract, Prisma schema, migration-of-record, local-schema, CI-workflow, or root-toolchain change. The new client code lives under `lib/core/telemetry/`, **outside** `lib/core/offline/`, so the stage-24 offline gate is not engaged and no new exemption is requested (§3.5) |
+| S-14 | **Hardening (F-1, value policy).** New `telemetry_policy.dart` is the single central value policy: a per-key classifier (`validatedLogField`, `validatedMetricLabel`) gates every loggable field and metric label — identifiers by `isSafeCorrelationId`, classifications (`component`/`reason`/`state`/`outcome`/`fault`/`operation`/`failureKind`) by a closed vocabulary, counts/status by a non-negative `int`, durations by a finite non-negative `num`. `errorClass`/`errorCode`/`kind` stay bounded tokens written only by `errorClassOf`/contract codes. An unclassified key is refused, so a new key fails closed (§6) |
+| S-15 | **Hardening (F-2, bypass).** Both JSON sinks re-apply the value policy to a record's fields/labels (idempotent for an already-safe record) and refuse an event or metric name outside the closed `SyncLogEvents`/`SyncMetricNames` set, so a `TelemetryRecord`/`MetricPoint` built by a path that skipped the builder cannot reach a JSON line with an unsafe value (§6) |
+| S-16 | **Hardening (F-3, clock isolation).** The whole `TelemetryLogger.log` body (clock read, validation, record construction, sink write) and the whole `TelemetryMetrics._emit` body are inside one `try { … } on Object { return; }`, so a throwing clock loses a record rather than escaping into the business or sync path that produced it (§6) |
 
 ### 2.2 `non_scope`
 
@@ -82,6 +86,7 @@ apps/desktop/lib/core/telemetry/error_class.dart
 apps/desktop/lib/core/telemetry/json_sinks.dart
 apps/desktop/lib/core/telemetry/metrics.dart
 apps/desktop/lib/core/telemetry/structured_log.dart
+apps/desktop/lib/core/telemetry/telemetry_policy.dart
 apps/desktop/lib/core/offline/connectivity/connectivity_monitor.dart
 apps/desktop/lib/core/offline/connectivity/http_health_probe.dart
 apps/desktop/lib/core/offline/grace/offline_grace_service.dart
@@ -96,6 +101,8 @@ apps/desktop/test/telemetry/json_sinks_test.dart
 apps/desktop/test/telemetry/metrics_test.dart
 apps/desktop/test/telemetry/secret_leak_adversarial_test.dart
 apps/desktop/test/telemetry/structured_log_test.dart
+apps/desktop/test/telemetry/telemetry_failure_isolation_test.dart
+apps/desktop/test/telemetry/telemetry_policy_test.dart
 apps/desktop/test/telemetry/telemetry_test_harness.dart
 services/api/src/common/errors/problem.filter.spec.ts
 services/api/src/common/errors/problem.filter.ts
@@ -105,24 +112,27 @@ services/api/src/main.ts
 docs/governance/MY_SHOP_M1B_S10_SLICE_RECORD.md
 ```
 
-This slice's implementation commits touch exactly the first twenty-five paths (five new `lib/core/telemetry/` files, six modified `lib/core/offline/` files, ten test files — eight new plus two modified — and four modified server files); the record commit adds the twenty-sixth. No other path is modified.
+This slice's original implementation commits touch twenty-five paths (five new `lib/core/telemetry/` files, six modified `lib/core/offline/` files, ten test files — eight new plus two modified — and four modified server files); the record commit adds the twenty-sixth. The security-hardening commit of §6 edits twelve files — nine already in this list (`structured_log.dart`, `metrics.dart`, `json_sinks.dart`, `sync_observability_test.dart`, `metrics_test.dart`, `structured_log_test.dart`, `secret_leak_adversarial_test.dart`, `logger.ts`, `logger.spec.ts`) and exactly three new to it (`telemetry_policy.dart`, `telemetry_failure_isolation_test.dart`, `telemetry_policy_test.dart`). No path outside this list is modified by either commit.
 
 ### 2.4 `tests`
 
 | Level                        | Requirement                                                                                                                                                                                                                                          |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Gate positives               | All `gates` (secret-scan, markdown, import-boundary, vocabulary, localization, design-system, immutability, offline stages 23–24, migration-immutability), `format:check`, `lint`, `typecheck`, `contracts:check`, and `npm audit --audit-level=high` green on this host; `flutter analyze --fatal-infos` "No issues found!"; `flutter test` **336 passed, 1 skipped** |
+| Gate positives               | All `gates` (secret-scan, markdown, import-boundary, vocabulary, localization, design-system, immutability, offline stages 23–24, migration-immutability), `format:check`, `lint`, `typecheck`, `contracts:check`, and `npm audit --audit-level=high` green on this host; `flutter analyze --fatal-infos` "No issues found!"; `flutter test` **364 passed, 1 skipped** |
 | Correlation (§38.28.1)       | A UUIDv7 trace id is time-ordered and deterministic with injected time/entropy; a safe id is accepted, a non-string/over-long/illegal-character/empty id is refused; an unsafe inbound id is replaced, a safe one adopted; `toLogFields` omits absent and unsafe ids; `withMutation` narrows without losing the pass ids |
 | Error class (§38.28.3)       | A normal class yields its name; `null` yields `null`; a non-plain-identifier runtime type (a generic, a collection, a closure) yields `Object`; the name is bounded; and an object whose own `toString()` throws is classified without invoking it, so a message/stack/cause is never read |
 | Structured log (§38.28.3)    | `loggableScalar` keeps bounded `String`/`num`/`bool` and drops a `Map`, a `List`, a `DateTime`, a function, `null`, an over-long string, a control-character/newline string, and a `NaN`/infinite `double`; `allowlistLogFields` copies only allow-listed keys, drops a non-scalar under an allow-listed key, drops a `null`, and emits in the declared key order; `TelemetryLogger` redacts, uses the injected clock, isolates a throwing sink, and ignores an empty event; the allow-list itself holds no credential-shaped key |
 | Metrics (§38.28.2)           | `validateMetricLabels` keeps an allow-listed low-cardinality value and rejects an identity-shaped or non-string value; `TelemetryMetrics` emits a gauge/counter/histogram, drops an empty name and a `NaN`/infinite value, and isolates a throwing sink; the emitted and deferred metric names are distinct |
 | JSON sinks (§38.28.3)        | A record and a metric each serialise to one valid JSON object on one line, with the redacted fields/labels only                                                                                                                             |
+| Value policy (F-1, §38.28.3) | `validatedLogField` accepts a field only when its value satisfies its key's class — an unsafe id dropped, a non-member classification dropped, a string in a numeric field dropped; `validatedMetricLabel` mirrors it; an unclassified key is refused, so a new allow-listed key fails closed; `closedVocabularyValue`/`boundedTokenValue`/`nonNegativeIntValue`/`finiteNonNegativeNumberValue` are unit-tested and the vocabularies are asserted to be closed, bounded sets |
+| Serialise bypass (F-2)       | A `TelemetryRecord`/`MetricPoint` built **directly** (bypassing `TelemetryLogger`/`TelemetryMetrics`) is re-filtered at the JSON sink; an unsafe value under an allow-listed key and a non-finite metric value are dropped, and an event/metric name outside the closed set emits no line |
+| Clock isolation (F-3)        | A throwing clock, a throwing sink, and a throwing serialiser each separate: `TelemetryLogger.log` and `TelemetryMetrics._emit` swallow every stage; and, driven through the real orchestrator, a throwing logger clock changes no pass result (a mutation still reaches `SYNCED`) |
 | Secret-leak adversarial      | Driven through the **real** seams: the orchestrator's unexpected-transport throw, the connectivity-monitor probe throw, the HTTP-probe factory throw, and the grace-service clock jump; and through the JSON sinks and a throwing writer. A credential-shaped key, a payload-shaped value under an allow-listed key, a credential-shaped scalar, and an injected newline are each dropped; a canary never appears in a serialised record or metric; a throwing destination never escapes the logger or the metrics emitter |
 | Orchestrator/scheduler       | One pass shares `device_id`/`sync_batch_id`/`trace_id` across the wire and the log; an applied pass observes duration, acknowledgement latency and success ratio; a rejection and a contradiction are logged by mutation reference (payload and role snapshot never leak); a transient batch failure is classified and its diagnostic never logged; an unexpected transport throw is logged by class; the scheduler emits outbox depth by state with no identity label; and a broken sink changes nothing about a pass |
 | Offline regression           | With every sink throwing, a committed mutation still reaches `SYNCED`; the outbox pass result is unchanged - observability is passive (§38.28)                                                                                              |
 | Server (log redaction)       | `errorNameOf` returns a class and never a message, reports a non-`Error`/empty/unsafe/long name as `UnknownError`; the problem filter's 5xx path logs `"errorName":"Error"` and never the message, host, or password; a non-`Error` throwable logs `UnknownError` and never its content |
 | Deferral (T-O6, §36.1 T-2)   | The one skipped test remains `DEFERRED_BY_PLAN` and is annotated, never silently dropped                                                                                      |
-| Remote CI                    | All seven required checks green on the implementation head `dfb8f71` on **both** `push` and `pull_request` events (§3.6)                                                        |
+| Remote CI                    | All seven required checks green on the hardened head `9828d4a` on **both** `push` and `pull_request` events (§3.6)                                                           |
 
 ### 2.5 `acceptance_criteria`
 
@@ -141,9 +151,12 @@ This slice's implementation commits touch exactly the first twenty-five paths (f
 | AC-11 | No local schema change; the local version stays v3 (§38.6.2)                                                   | §3.5         |
 | AC-12 | No server-contract change; `contracts:check` green; `trace_id` travels as a header, not a body field           | §3.5         |
 | AC-13 | All gates and local suites pass; `flutter analyze --fatal-infos` clean                                         | §3.1         |
-| AC-14 | PR #16 stacked on the M1b-S9 branch, open, not merged; all seven checks green on `dfb8f71` for both events     | §3.6, §3.7   |
+| AC-14 | PR #16 stacked on the M1b-S9 branch, open, not merged; all seven checks green on `9828d4a` for both events     | §3.6, §3.7   |
 | AC-15 | No destructive Git operation; `main` and S1–S9 untouched                                                       | §4.3 G-4/G-5 |
 | AC-16 | The pull/resume deferral is annotated, not dropped (T-O6)                                                     | §3.1, D-11   |
+| AC-17 | A secret value cannot hide under an allow-listed key: every loggable field and metric label is validated against a per-key value policy, and a classification must be a closed-vocabulary member (F-1) | §6.2, §6.4 |
+| AC-18 | A `TelemetryRecord`/`MetricPoint` built outside the builder cannot reach a JSON line with an unsafe value or an unknown event/metric name — the sink re-validates as the hard boundary (F-2) | §6.3, §6.4 |
+| AC-19 | A throwing telemetry clock loses a record and never escapes into the business or sync path — every stage of `log`/`_emit` is isolated (F-3) | §6.4 |
 
 ---
 
@@ -151,7 +164,7 @@ This slice's implementation commits touch exactly the first twenty-five paths (f
 
 ### 3.1 Local chain
 
-`npm run gates` — secret-scan, markdown, import-boundary, vocabulary, localization, design-system, immutability, **offline (stages 23–24)**, migration-immutability — **all green (exit 0)**. `npm run toolchain:verify` — **PASS** (node `22.22.3`, npm `10.9.8`, flutter `3.47.5`, dart `3.13.4` match the pin). `npm run format:check`, `npm run lint`, `npm run typecheck`, and `npm run contracts:check` ("contracts are in sync") — **all green**. `npm run flutter:analyze` (`flutter analyze --fatal-infos`) prints **"No issues found!"**. `npm run flutter:test` prints **"336 passed, 1 skipped"**. `npm audit --audit-level=high` exits 0. Server suites: `test:unit` **196 passed**, `test:integration` **38 passed**.
+`npm run gates` — secret-scan, markdown, import-boundary, vocabulary, localization, design-system, immutability, **offline (stages 23–24)**, migration-immutability — **all green (exit 0)**. `npm run toolchain:verify` — **PASS** (node `22.22.3`, npm `10.9.8`, flutter `3.47.5`, dart `3.13.4` match the pin). `npm run format:check`, `npm run lint`, `npm run typecheck`, and `npm run contracts:check` ("contracts are in sync") — **all green**. `npm run flutter:analyze` (`flutter analyze --fatal-infos`) prints **"No issues found!"**. `npm run flutter:test` prints **"364 passed, 1 skipped"** on the hardened head `9828d4a` (the original `dfb8f71` head printed **336 passed, 1 skipped**; the hardening adds 28 tests and removes none). `npm audit --audit-level=high` exits 0. Server suites: `test:unit` **201 passed**, `test:integration` **38 passed**; `@my-shop/contracts` **17 passed**, `@my-shop/testkit` **5 passed**.
 
 The stage-24 offline gate reports the offline module present with the existing written exemptions and **no new exemption** for this slice: the new telemetry module lives under `lib/core/telemetry/`, outside `lib/core/offline/`, so the gate never sees it; the six modified offline files add logging/metrics calls only and write no remote-origin data (§3.5). The single skipped test remains `DEFERRED_BY_PLAN: T-O6 pull resumes after reconnect without gaps`.
 
@@ -181,12 +194,14 @@ Five details carry the slice's weight:
 | `metrics_test.dart`                  | Label accept/reject (low-cardinality vs identity-shaped); gauge/counter/histogram; empty name and `NaN`/infinite dropped; throwing-sink isolation; emitted and deferred names distinct — all green                                              |
 | `json_sinks_test.dart`               | One record / one metric -> one valid JSON line carrying only the redacted fields/labels — all green                                                                                                                                          |
 | `secret_leak_adversarial_test.dart`  | Credential-shaped key, payload-shaped value, credential-shaped scalar and injected newline dropped; canaries driven through the orchestrator, the monitor, the HTTP probe and the grace service never appear in a serialised record/metric; a throwing writer does not escape the logger — all green |
-| `sync_observability_test.dart`       | Correlation shared across the wire and the log; duration/ack-latency/success-ratio observed; rejection and contradiction logged by reference (payload/role snapshot absent); transient failure classified with its diagnostic unlogged; unexpected throw logged by class; scheduler depth-by-state with no identity label; **broken sink changes no pass** — all green |
+| `sync_observability_test.dart`       | Correlation shared across the wire and the log; duration/ack-latency/success-ratio observed; rejection and contradiction logged by reference (payload/role snapshot absent); transient failure classified with its diagnostic unlogged; unexpected throw logged by class; scheduler depth-by-state with no identity label; **broken sink changes no pass**; **a throwing telemetry clock changes no pass** — all green |
+| `telemetry_policy_test.dart` (new)   | `closedVocabularyValue`/`boundedTokenValue`/`nonNegativeIntValue`/`finiteNonNegativeNumberValue` accept the in-class value and refuse the out-of-class one; the vocabularies are asserted closed and bounded — all green |
+| `telemetry_failure_isolation_test.dart` (new) | A throwing clock, a throwing clock **and** sink, and a throwing serialiser each leave `TelemetryLogger.log` with no record and no escape; a throwing sink and a throwing serialiser leave `TelemetryMetrics._emit` with no escape — all green |
 | `push_transport_test.dart`           | The body carries no `traceId`; the request carries it; `traceHeaderName == 'x-trace-id'` — green                                                                                                                                             |
 | `logger.spec.ts` (server)            | `errorNameOf` returns a class, never a message; a non-`Error`/empty/unsafe/long name -> `UnknownError` — green                                                                                                                                |
 | `problem.filter.spec.ts` (server)    | A 5xx logs `"errorName":"Error"` and not the message/host/password; a non-`Error` throwable logs `UnknownError` and not its content — green                                                                                                   |
-| Flutter                              | `flutter analyze --fatal-infos` "No issues found!"; `flutter test` **336 passed, 1 skipped** (`DEFERRED_BY_PLAN`, T-O6)                                                                                                                       |
-| Server                               | `test:unit` **196 passed**; `test:integration` **38 passed**; `test:database` deferred to CI (no live PostgreSQL on this host)                                                                                                                |
+| Flutter                              | `flutter analyze --fatal-infos` "No issues found!"; `flutter test` **364 passed, 1 skipped** (`DEFERRED_BY_PLAN`, T-O6) on the hardened head `9828d4a`                                                                                        |
+| Server                               | `test:unit` **201 passed**; `test:integration` **38 passed**; `test:database` deferred to CI (no live PostgreSQL on this host)                                                                                                                |
 | `dependency-audit`                   | `npm audit --audit-level=high` exit 0 (21 moderate, none high/critical)                                                                                                                                                                       |
 
 ### 3.5 Local schema and contract drift
@@ -199,18 +214,18 @@ S10 **does not change the server contract**: no `schema.prisma`, no OpenAPI, no 
 
 ### 3.6 Remote CI
 
-All runs on the implementation head `dfb8f71` (G-4 exact-SHA discipline; no earlier run is offered as a substitute).
+All runs on the hardened implementation head `9828d4a` (G-4 exact-SHA discipline; no earlier run is offered as a substitute).
 
 | Run         | Event        | SHA       | Result  | Jobs                                          |
 | ----------- | ------------ | --------- | ------- | --------------------------------------------- |
-| 38622748613 | push         | `dfb8f71` | success | all 7 required checks green                   |
-| 38622757850 | pull_request | `dfb8f71` | success | all 7 required checks green                   |
+| 38635547671 | push         | `9828d4a` | success | all 7 required checks green                   |
+| 38635554721 | pull_request | `9828d4a` | success | all 7 required checks green                   |
 
-The seven required checks: `fast-checks`, `backend-unit`, `backend-integration-database`, `contract-drift`, `dependency-audit`, `flutter-build-windows`, `flutter-build-android`. On **both** events all seven are green on `dfb8f71`, including `fast-checks` (which runs this slice's Dart on the pinned SDK: `flutter analyze --fatal-infos` and the **336-passing** `flutter test`), `backend-integration-database` (real PostgreSQL 18, exercising the changed server files), and `flutter-build-windows`/`flutter-build-android` (which compile the new `lib/core/telemetry` and modified `lib/core/offline` code into release artifacts).
+The seven required checks: `fast-checks`, `backend-unit`, `backend-integration-database`, `contract-drift`, `dependency-audit`, `flutter-build-windows`, `flutter-build-android`. On **both** events all seven are green on `9828d4a`, including `fast-checks` (which runs this slice's Dart on the pinned SDK: `flutter analyze --fatal-infos` and the **364-passing** `flutter test`), `backend-integration-database` (real PostgreSQL 18, exercising the changed server files), and `flutter-build-windows`/`flutter-build-android` (which compile the new `lib/core/telemetry` and modified `lib/core/offline` code into release artifacts).
 
-The earlier implementation commit `423a75e` (before the direct `errorClassOf` test was added) was also green on both events (`38620330959` push, `38620599797` pull_request). The final head `dfb8f71` is the run reported above.
+The original implementation head `dfb8f71` was also green on both events (`38622748613` push, `38622757850` pull_request), as was the earlier `423a75e` (before the direct `errorClassOf` test was added; `38620330959` push, `38620599797` pull_request). The hardened head `9828d4a` is the run reported above.
 
-The record commit that follows the implementation head is documentation-only; its head is verified green as well and reported with this slice.
+The record commit that follows the hardened implementation head is documentation-only; its head is verified green as well and reported with this slice.
 
 ### 3.7 PR
 
@@ -286,7 +301,7 @@ Three differences are named rather than silently crossed:
 | G-1  | no business table outside the plan's data domain map                   | PASS - no table created; S10 reads existing outbox state and adds no table (§3.5)                                                         |
 | G-2  | contract files updated from the declaration and drift-clean            | PASS - no contract change; `contracts:check` in sync; `trace_id` is a header (§3.5)                                                       |
 | G-3  | schema/migration unchanged (no server migration this slice)            | PASS - no `schema.prisma`/server migration edit; the local Drift schema is unchanged at v3 (ADR-036); `migration-immutability` green      |
-| G-4  | all CI stages pass; no history rewrite                                 | PASS - all 7 checks green on `dfb8f71` for both events (§3.6); ordinary commits, no force push, no rebase                                |
+| G-4  | all CI stages pass; no history rewrite                                 | PASS - all 7 checks green on the hardened head `9828d4a` for both events (§3.6); ordinary commits, no force push, no rebase                |
 | G-5  | no file outside `allowed_paths` modified                               | PASS - the slice diff is confined to §2.3                                                                                                  |
 | G-6  | `non_scope` verifiably untouched                                       | PASS - no console UI, no pull transport/resume, no business module, no plan/CI-workflow edit (§2.2)                                       |
 | G-7  | migration impact as declared; migrations immutable; drift non-vacuous  | PASS - **no** local migration this slice (§3.5); no server migration; `migration-immutability` green                                       |
@@ -301,21 +316,78 @@ Three differences are named rather than silently crossed:
 
 ## 5. Deviations
 
-- **The server `database` project could not run locally.** It provisions a real PostgreSQL instance and fails fast when its environment is absent (the project's own comment, §36.1 T-2). This host had no PostgreSQL service and no running Docker daemon, so `npm test` at the workspace root does not complete locally; `test:unit` (196) and `test:integration` (38) do. The project is green remotely on `dfb8f71` (`backend-integration-database`). S10 does not touch the database layer.
+- **The server `database` project could not run locally.** It provisions a real PostgreSQL instance and fails fast when its environment is absent (the project's own comment, §36.1 T-2). This host had no PostgreSQL service and no running Docker daemon, so `npm test` at the workspace root does not complete locally; `test:unit` (201 on the hardened head; 196 on `dfb8f71`) and `test:integration` (38) do. The project is green remotely on `9828d4a` (`backend-integration-database`), as it was on `dfb8f71`. S10 does not touch the database layer.
 - **Two formatting/lint fixes were required, inside the allowed paths.** Two server files needed Prettier; the new `capturingFilter()` helper in `problem.filter.spec.ts` needed `String(chunk)` instead of `chunk.toString()` to satisfy `@typescript-eslint/no-unsafe-argument`/`no-unsafe-call` (the Jest `Writable` chunk is `any`). Neither changes behaviour.
 - **The record's §40.5 labels are this slice's derived criteria.** The plan's §40.5 M1b-S10 row states the jobs and the inviolable but does not enumerate C1–C8; §3.9 defines them explicitly so the mapping is self-contained and testable.
 - **No repair commit, no history operation.** This branch was created by ordinary commits from `bbedef5`; nothing was force-pushed, reset, or rebased.
+- **The security-hardening commit is an ordinary commit, added after the slice was remote-locked.** `9828d4a` is a child of the record tip `136c225`; it was pushed with a normal `git push` (no force, no rebase, no history rewrite), and `main` and S1–S9 are untouched. It is documented in §6.
 
 ---
 
-## 6. Boundary
+## 6. Security hardening (post-lock)
 
-The next slice is **M1b-S11** per §40.5. It is **NOT AUTHORIZED** by this record. The Sync Console UI (M8b), the concrete authenticated pull transport, cursor resume, and business modules remain later concerns.
+After the slice was remote-locked, three findings were raised against the committed telemetry. Each is a *structural* gap in the original control, not a missing call-site check, and each is closed at the root. This commit is `9828d4ae267c9614f525fc233b978d6799d87eea`; the files it touches are listed in §2.3. It changes the **value** half of the redaction control and the **isolation** of the emit path only; it changes no key, no event name that was already emitted, no metric name, and no wire contract.
+
+### 6.1 Findings
+
+| #   | Finding                                                                                          | Root cause                                                                                                                                                                                              |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F-1 | A secret value could hide **inside an allow-listed scalar field**. The key `reason`, `errorCode`, `component`, or a metric label is allow-listed, so a call site (or a future one) passing a credential there would serialise it. | The original control classified *keys* and bounded *scalars*, but never classified the *value by key*. "The key is not credential-shaped" is silent about what is stored under it.                       |
+| F-2 | The structured-log redaction could be **bypassed** by constructing a `TelemetryRecord`/`MetricPoint` directly and handing it to a sink. Both types have public constructors; only `TelemetryLogger`/`TelemetryMetrics` applied the allow-list. A hand-built record (or a non-finite metric) reached a JSON line unvalidated, and an arbitrary event/metric name was accepted. | Redaction lived only in the builder, so anything that skipped the builder skipped the control. The sink owned serialisation only, not the boundary.                                                     |
+| F-3 | A **throwing telemetry clock escaped isolation**. `_clock()` and record construction were outside the `try`, so a clock failure propagated out of `TelemetryLogger.log` into the business/sync path that produced the record — turning passive evidence into an active failure. | `log` wrapped only `sink.write`; the clock and the construction were unguarded. The metrics emitter had the same shape (non-finite check outside the guard).                                           |
+
+### 6.2 F-1 — the per-key value policy
+
+New `apps/desktop/lib/core/telemetry/telemetry_policy.dart` is the one place the value rule lives, consumed by both the record builder and (F-2) the sinks. `validatedLogField(key, value)` is the client log rule and `validatedMetricLabel(key, value)` is its metric mirror:
+
+- a §38.28.1 **identifier** (`traceId`, `mutationId`, `deviceId`, `syncBatchId`, `organizationId`, `userId`) must satisfy `isSafeCorrelationId`, else it is dropped;
+- a **classification** (`component`, `reason`, `state`, `outcome`, `fault`, `operation`, `failureKind`) must be a member of its **closed vocabulary** (`logComponentNames`, `logReasonNames`, `syncStateNames`, `mutationOutcomeNames`, `pushRunFaultNames`, `operationNames`, `reachabilityFailureKindNames`), so an arbitrary exception message can never be recorded as a "reason";
+- a **count/status/flag** (`statusCode`, `attemptCount`, `recovered`, `promoted`, `attempted`, `applied`, `replayed`, `rejected`, `contradicted`, `retryable`, `requeued`) must be a non-negative `int`, and a **duration** (`durationMs`) a finite non-negative `num`, so a string cannot occupy a numeric field;
+- `errorClass`/`kind` and `errorCode` are the two genuinely open classifications (a Dart runtime class; a §34.3 refusal code). They are populated only by `errorClassOf` and by contract codes, and are bounded by `classTokenPattern`/`upperCodePattern` rather than a closed set. This residual limit is stated, not hidden.
+- a key the policy does not name is **refused**, so a future key added to `allowedLogKeys`/`allowedMetricLabelKeys` without a value rule fails closed.
+
+`loggableScalar` still runs first, so a `Map`/`List`/over-long/control-character/non-finite value is refused before the key is considered. `errorClassOf` is unchanged and remains the only writer of `errorClass`, so no exception message is ever read.
+
+### 6.3 F-2 — the sink is the hard boundary
+
+`JsonLineTelemetrySink.write` and `JsonLineMetricsSink.write` now refuse an event/metric name outside the closed `SyncLogEvents.all`/`SyncMetricNames.all` set (new `isKnownLogEvent`/`isKnownMetricName`), and **re-apply** the value policy to a record's fields and a point's labels before serialising. Re-filtering an already-safe record is idempotent, so the builder's guarantee is not weakened; a record or point built by **any** path — including a direct `TelemetryRecord(...)`/`MetricPoint(...)` — can no longer reach a JSON line carrying an unsafe value, a non-finite number, or an unknown name. The closed event/metric vocabularies are also enforced in the builder (`TelemetryLogger.log`, `TelemetryMetrics._emit`), so an unknown name emits nothing on either path.
+
+### 6.4 F-3 — the whole emit path is isolated
+
+The entire `TelemetryLogger.log` body — the clock read, the field validation, the record construction, and the sink write — is inside one `try { … } on Object { return; }`, and the entire `TelemetryMetrics._emit` body (name gate, non-finite check, label validation, construction, write) is likewise guarded. A throwing clock, a defect in the policy, or a broken sink now loses a record and never escapes into the business or sync path. The offline regression is proven end to end: with a logger whose `clock` throws, a committed mutation still applies and still reaches `SYNCED`.
+
+### 6.5 Server mirror
+
+The same F-1 value gap existed in `services/api/src/common/logging/logger.ts`, where `logPayload` copied allow-listed keys without classifying their values. `safeLogValue` now classifies each allow-listed key: a nested object or array is dropped (the shape a payload has), a free-text field (`path`, `userAgent`, `method`, `ip`, `component`, `reason`) is bounded to 200 characters with no control character, an identifier must match `SAFE_IDENTIFIER`, `errorCode` `SAFE_CODE`, `errorName` `SAFE_ERROR_NAME`, `statusCode` a non-negative integer, `durationMs` a finite non-negative number, `ready` a boolean, and an unclassified key is dropped. `errorNameOf` and its `SAFE_ERROR_NAME` are unchanged in behaviour (the constant was moved above `safeLogValue`). The Pino denylist remains as defence in depth and is still not the primary control.
+
+### 6.6 Evidence
+
+| Finding | Closed by                                                                                          | Test                                                                 |
+| ------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| F-1     | `telemetry_policy.dart`; `validatedLogField`/`validatedMetricLabel`; `allowlistLogFields`; `validateMetricLabels` | `telemetry_policy_test.dart`, `structured_log_test.dart`, `metrics_test.dart`, `secret_leak_adversarial_test.dart`, `logger.spec.ts` |
+| F-2     | `isKnownLogEvent`/`isKnownMetricName`; sink re-validation and refusal                              | `secret_leak_adversarial_test.dart` (direct-construction bypass), `json_sinks_test.dart`, `structured_log_test.dart`, `metrics_test.dart` |
+| F-3     | one guard around each whole emit body                                                              | `telemetry_failure_isolation_test.dart`; `sync_observability_test.dart` ("a throwing telemetry clock never changes a pass") |
+
+Local results on the hardened head: `flutter analyze --fatal-infos` clean; `flutter test` **364 passed, 1 skipped** (from 336; +28 tests); `test:unit` **201 passed** (from 196); `test:integration` **38**, contracts **17**, testkit **5**; `gates`, `format:check`, `lint`, `typecheck`, `contracts:check` all green. Remote CI (§3.6) is green on `9828d4a` for both `push` and `pull_request`.
+
+### 6.7 Residual limits
+
+- `errorClass`/`errorCode`/`kind` are bounded tokens, not closed sets. A short, purely-alphanumeric credential that happens to be a valid identifier could still be logged if a call site passed it *as an `errorCode`*. They are therefore written only by `errorClassOf` and by contract codes, and the residual is named here rather than papered over.
+- The server's `component`/`reason` are bounded strings rather than closed vocabularies (the server also logs a request `path`, which is necessarily open). The client closes them; the server bounds them.
+- Telemetry remains passive and is never a source of truth (§38.28); this hardening changes what a record may *contain* and that a broken clock cannot escape, not what a record *means*.
+
+---
+
+## 7. Boundary
+
+An earlier revision of this section named "the next slice is **M1b-S11** per §40.5". That reference was **wrong and is corrected here**: §40.5 (`MY_SHOP_MASTER_PLAN.md`, the M1b table) **ends at M1b-S10** (the last row, "Offline observability plumbing"), and §40.6 begins at **M2-S1**. The master plan defines **no M1b-S11**; the only occurrences of that token anywhere in the repository were the two in this record's own earlier §6/banner, now removed. There is therefore **no M1b-S11 to authorize or to schedule**.
+
+The next unit the master plan actually defines after M1b-S10 is **M2-S1** (§40.6 — "Organizations, memberships, operator bootstrap command"). It is **NOT AUTHORIZED** by this record and is **not** started here. The Sync Console UI (M8b), the concrete authenticated pull transport, cursor resume, and business modules remain later concerns.
 
 On the acceptance gate: **G-12 is NOT SATISFIED** — PR #16 is left open and no merge was performed. The merge is the owner's decision, not this slice's.
 
 ```
-M1b-S11 NOT AUTHORIZED
 NO PR MERGED — OWNER MERGE AUTHORIZATION REQUIRED
-PASS_MY_SHOP_M1B_S10_REMOTE_LOCKED
+PASS_MY_SHOP_M1B_S10_SECURITY_HARDENED_REMOTE_LOCKED
+BLOCKED_MY_SHOP_M1B_S11_NOT_DEFINED_IN_MASTER_PLAN
 ```
