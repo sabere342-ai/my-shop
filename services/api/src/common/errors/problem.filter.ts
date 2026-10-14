@@ -23,7 +23,7 @@ import { Catch, type ArgumentsHost, type ExceptionFilter, HttpException, HttpSta
 import type { Request, Response } from 'express';
 import type { Logger } from 'pino';
 import { isDomainError } from './domain.error';
-import { logPayload } from '../logging/logger';
+import { errorNameOf, logPayload } from '../logging/logger';
 import { TRACE_HEADER, resolveTraceId } from '../logging/trace-id';
 import { buildProblem, ERROR_CODES, type ErrorCode, type ProblemDocument } from './problem';
 
@@ -147,7 +147,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       // permits rather than letting the failure escape: an unstructured error response
       // loses problem+json, and an escaped exception loses the trace id the operator
       // needs to find the line that caused it.
-      this.logger.error({ component: 'ProblemDetailsFilter', err: defect }, 'error filter failed');
+      this.logger.error({ component: 'ProblemDetailsFilter', errorName: errorNameOf(defect) }, 'error filter failed');
       problem = buildProblem({ code: ERROR_CODES.INTERNAL_ERROR, instance, traceId });
     }
 
@@ -172,10 +172,13 @@ export class ProblemDetailsFilter implements ExceptionFilter {
   }
 
   /**
-   * 5xx is logged with the original error; 4xx is logged without a stack.
+   * 5xx is logged with the error's *class*; 4xx is logged with the code alone.
    *
-   * A client-caused 400 is not a server fault, and a stack per bad request is noise that
-   * trains operators to ignore the level that matters.
+   * §13.1 and §38.28.3 forbid an internal identifier or a secret in a log, and an
+   * unhandled error's message and stack are exactly where a connection string or
+   * a token arrives — so only the bounded class name is logged, never `err`. A
+   * client-caused 400 is not a server fault, and a stack per bad request is noise
+   * that trains operators to ignore the level that matters.
    */
   private logOutcome(problem: ProblemDocument, request: Request, exception: unknown): void {
     const fields = logPayload({
@@ -184,13 +187,11 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       path: request.path,
       statusCode: problem.status,
       errorCode: problem.code,
+      errorName: errorNameOf(exception),
     });
 
     if (problem.status >= 500) {
-      this.logger.error(
-        { ...fields, err: exception instanceof Error ? exception : new Error(String(exception)) },
-        'request failed',
-      );
+      this.logger.error(fields, 'request failed');
       return;
     }
     this.logger.warn(fields, 'request rejected');

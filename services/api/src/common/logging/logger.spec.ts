@@ -1,4 +1,4 @@
-import { LOGGABLE_KEYS, SENSITIVE_HEADERS, logPayload, redactHeaders, redactQuery } from './logger';
+import { LOGGABLE_KEYS, SENSITIVE_HEADERS, errorNameOf, logPayload, redactHeaders, redactQuery } from './logger';
 
 describe('redactHeaders', () => {
   it('replaces a credential header value while keeping its name', () => {
@@ -110,5 +110,39 @@ describe('logPayload', () => {
     for (const key of forbidden) {
       expect(LOGGABLE_KEYS).not.toContain(key);
     }
+  });
+});
+
+describe('errorNameOf', () => {
+  it('returns the constructor name of an Error', () => {
+    expect(errorNameOf(new TypeError('boom'))).toBe('TypeError');
+    expect(errorNameOf(new RangeError('x'))).toBe('RangeError');
+  });
+
+  it('never returns the message (§13.1, §38.28.3)', () => {
+    // The message is where a connection string or a token arrives; only the class travels.
+    expect(errorNameOf(new Error('connect ECONNREFUSED 10.0.0.5:5432 password=hunter2'))).toBe('Error');
+  });
+
+  it('reports a non-Error throwable as UnknownError', () => {
+    expect(errorNameOf({ secret: 'do not serialise me' })).toBe('UnknownError');
+    expect(errorNameOf('nope')).toBe('UnknownError');
+    expect(errorNameOf(undefined)).toBe('UnknownError');
+    expect(errorNameOf(null)).toBe('UnknownError');
+  });
+
+  it('reports an empty or unsafe name as UnknownError rather than passing it through', () => {
+    // An attacker-influenced `name` must not become an injection vector.
+    const empty = new Error('x');
+    empty.name = '';
+    expect(errorNameOf(empty)).toBe('UnknownError');
+
+    const spaced = new Error('x');
+    spaced.name = 'bad name with spaces';
+    expect(errorNameOf(spaced)).toBe('UnknownError');
+
+    const long = new Error('x');
+    long.name = 'a'.repeat(65);
+    expect(errorNameOf(long)).toBe('UnknownError');
   });
 });

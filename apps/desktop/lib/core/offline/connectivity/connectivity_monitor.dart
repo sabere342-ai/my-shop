@@ -28,6 +28,8 @@ import 'dart:math';
 import 'package:my_shop_desktop/core/offline/connectivity/connectivity_probe.dart';
 import 'package:my_shop_desktop/core/offline/connectivity/connectivity_state.dart';
 import 'package:my_shop_desktop/core/offline/sync/backoff_policy.dart';
+import 'package:my_shop_desktop/core/telemetry/error_class.dart';
+import 'package:my_shop_desktop/core/telemetry/structured_log.dart';
 
 /// Monitors backend reachability from probe results and sync evidence.
 class ConnectivityMonitor {
@@ -49,7 +51,10 @@ class ConnectivityMonitor {
   final Duration successFreshness;
   final DateTime Function() clock;
   final Random? random;
-  final void Function(String, dynamic)? logger;
+
+  /// Structured, redacted diagnostics (§38.28.3). Passive evidence only: a
+  /// probe classification is never derived from it.
+  final TelemetryLogger? logger;
 
   ConnectivitySnapshot _snapshot = ConnectivitySnapshot.initial;
   ConnectivitySnapshot? _lastEmitted;
@@ -185,7 +190,13 @@ class ConnectivityMonitor {
       _emit();
       return _snapshot;
     } on Object catch (error) {
-      logger?.call('connectivity-probe-unexpected', error.toString());
+      logger?.log(
+        SyncLogEvents.connectivityProbeUnexpected,
+        fields: <String, Object?>{
+          LoggableKeys.component: 'connectivity_monitor',
+          LoggableKeys.errorClass: errorClassOf(error),
+        },
+      );
       if (_disposed) {
         _probeInFlight = false;
         return _snapshot;

@@ -38,6 +38,7 @@ import 'package:my_shop_desktop/core/offline/grace/grace_signature_verifier.dart
 import 'package:my_shop_desktop/core/offline/grace/offline_auth_gate.dart';
 import 'package:my_shop_desktop/core/offline/grace/offline_grace_record.dart';
 import 'package:my_shop_desktop/core/offline/grace/offline_grace_store.dart';
+import 'package:my_shop_desktop/core/telemetry/structured_log.dart';
 
 /// The outcome of an [OfflineGraceService.establishSession] attempt.
 enum GraceEstablishment {
@@ -99,6 +100,7 @@ class OfflineGraceService implements OfflineAuthGate {
     DateTime Function()? wallClock,
     Duration Function()? monotonicClock,
     this.forwardJumpTolerance = ClockIntegrityGuard.defaultTolerance,
+    this.telemetry,
   })  : _store = OfflineGraceStore(db),
         _wallClock = wallClock ?? DateTime.now,
         _monotonicClock = monotonicClock ?? _defaultMonotonic;
@@ -108,6 +110,10 @@ class OfflineGraceService implements OfflineAuthGate {
   /// The signature verifier this session trusts (§38.16.3). Required, with no
   /// accepting default, so a device can never verify a record by accident.
   final GraceSignatureVerifier verifier;
+
+  /// Structured, redacted diagnostics (§38.28.3, §38.16.5). Passive: a forward
+  /// clock jump is recorded here, but the admission verdict never reads it.
+  final TelemetryLogger? telemetry;
 
   final DateTime Function() _wallClock;
   final Duration Function() _monotonicClock;
@@ -207,6 +213,17 @@ class OfflineGraceService implements OfflineAuthGate {
       // §38.16.5: record the security event and require online re-validation.
       await _store.recordClockTamper();
       await _store.setRequiresRevalidation(required: true);
+      // §38.16.5 names a "security event"; the durable flag is the local half,
+      // and this structured record is the observable half. It carries no clock
+      // value, no record, and no payload — only that the class of event
+      // occurred, so a future security-event sink can be built on it (§38.28.3).
+      telemetry?.log(
+        SyncLogEvents.clockTamper,
+        fields: <String, Object?>{
+          LoggableKeys.component: 'offline_grace',
+          LoggableKeys.reason: 'forward_jump',
+        },
+      );
       return _Admission(
         reason: MutationRefusalReason.clockTamperForward,
         record: record,

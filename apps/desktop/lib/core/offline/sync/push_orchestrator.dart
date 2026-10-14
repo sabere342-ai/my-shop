@@ -29,6 +29,10 @@ import 'package:my_shop_desktop/core/offline/outbox/sync_state.dart';
 import 'package:my_shop_desktop/core/offline/outbox/uuid_v7.dart';
 import 'package:my_shop_desktop/core/offline/sync/backoff_policy.dart';
 import 'package:my_shop_desktop/core/offline/sync/push_transport.dart';
+import 'package:my_shop_desktop/core/telemetry/correlation.dart';
+import 'package:my_shop_desktop/core/telemetry/error_class.dart';
+import 'package:my_shop_desktop/core/telemetry/metrics.dart';
+import 'package:my_shop_desktop/core/telemetry/structured_log.dart';
 
 /// Why a whole batch failed, when it did (§38.10.4). `null` on a pass that sent
 /// a batch and mapped every outcome, including a partial one.
@@ -145,8 +149,11 @@ class PushOrchestrator {
     this.backoff = const BackoffPolicy(),
     this.batchSize = OutboxRepository.maxPushBatchSize,
     this.batchIdFactory = generateUuidV7,
+    this.traceIdFactory = generateTraceId,
     this.clock = DateTime.now,
     this.random,
+    this.logger,
+    this.metrics,
   });
 
   final OutboxRepository outbox;
@@ -161,11 +168,25 @@ class PushOrchestrator {
   /// Source of the §38.28.1 batch correlation id.
   final String Function() batchIdFactory;
 
-  /// The clock used for retry eligibility; injectable for deterministic tests.
+  /// Source of the §38.28.1 `trace_id` for a pass.
+  ///
+  /// Generated, never adopted from an inbound value: a push originates here, so
+  /// this is where the request's end-to-end identity is minted (§38.28.1).
+  final String Function() traceIdFactory;
+
+  /// The clock used for retry eligibility and for latency measurement;
+  /// injectable for deterministic tests.
   final DateTime Function() clock;
 
   /// Entropy for the §38.10.4 jitter; `null` uses the default RNG.
   final Random? random;
+
+  /// Structured, redacted diagnostics (§38.28.3). Passive evidence only — a
+  /// `null` logger costs a record, never a mutation.
+  final TelemetryLogger? logger;
+
+  /// Metrics emission (§38.28.2). Passive evidence only.
+  final TelemetryMetrics? metrics;
 
   bool _running = false;
 
@@ -185,7 +206,9 @@ class PushOrchestrator {
 
       final List<OutboxData> pending = await outbox.pendingForPush(limit: batchSize);
       if (pending.isEmpty) {
-        return PushRunResult(recovered: recovered, promoted: promoted);
+        final PushRunResult idle = PushRunResult(recovered: recovered, promoted: promoted);
+        _emitObservability(idle, correlation: null, durationMs: null);
+        return idle;
       }
 
       final List<OutboxData> syncing = <OutboxData>[];
@@ -193,33 +216,187 @@ class PushOrchestrator {
         syncing.add(await outbox.transition(mutationId: row.mutationId, to: SyncState.syncing));
       }
 
+      // One batch, one `sync_batch_id`, one `trace_id` (§38.28.1). The trace id
+      // is minted here because a push originates here; a concrete transport
+      // sends it as `x-trace-id` so the server line shares it.
+      final String deviceId = syncing.first.deviceId;
+      final String syncBatchId = batchIdFactory();
+      final String traceId = traceIdFactory();
+      final SyncCorrelation correlation = SyncCorrelation(
+        deviceId: deviceId,
+        syncBatchId: syncBatchId,
+        traceId: traceId,
+      );
+
       final PushBatchRequest request = PushBatchRequest(
-        deviceId: syncing.first.deviceId,
-        syncBatchId: batchIdFactory(),
+        deviceId: deviceId,
+        syncBatchId: syncBatchId,
+        traceId: traceId,
         localSchemaVersion: localSchemaVersion,
         mutations: <PushMutationWire>[for (final OutboxData row in syncing) _toWire(row)],
       );
 
+      final DateTime startedAt = clock();
       final PushBatchResponse response;
       try {
         response = await transport.push(request);
       } on SyncPushTransportException catch (error) {
-        return await _onBatchFailure(syncing, error, recovered, promoted);
+        final PushRunResult result = await _onBatchFailure(syncing, error, recovered, promoted);
+        _emitObservability(
+          result,
+          correlation: correlation,
+          durationMs: _elapsedMs(startedAt),
+          transportError: error,
+        );
+        return result;
       } on Object catch (error) {
         // §38.10.4: an unexpected transport fault is ambiguous, so treat it as
         // a network failure and retry. Leaving the rows in SYNCING would strand
-        // them; the retry is safe because every mutation is idempotent.
-        return await _onBatchFailure(
-          syncing,
-          SyncPushTransportException(kind: PushFailureKind.network, diagnostic: '$error'),
-          recovered,
-          promoted,
+        // them; the retry is safe because every mutation is idempotent. The
+        // diagnostic is the error's *class*, never its message (§38.28.3).
+        logger?.log(
+          SyncLogEvents.pushTransportUnexpected,
+          fields: <String, Object?>{
+            ...correlation.toLogFields(),
+            LoggableKeys.errorClass: errorClassOf(error),
+          },
         );
+        final SyncPushTransportException wrapped = SyncPushTransportException(
+          kind: PushFailureKind.network,
+          diagnostic: errorClassOf(error),
+        );
+        final PushRunResult result = await _onBatchFailure(syncing, wrapped, recovered, promoted);
+        _emitObservability(
+          result,
+          correlation: correlation,
+          durationMs: _elapsedMs(startedAt),
+          transportError: wrapped,
+        );
+        return result;
       }
 
-      return await _onOutcomes(syncing, response, recovered, promoted);
+      final PushRunResult result = await _onOutcomes(
+        syncing,
+        response,
+        recovered,
+        promoted,
+        correlation: correlation,
+      );
+      _emitObservability(result, correlation: correlation, durationMs: _elapsedMs(startedAt));
+      return result;
     } finally {
       _running = false;
+    }
+  }
+
+  /// Milliseconds from [startedAt] to now, floored at zero.
+  ///
+  /// Uses the injected clock, so a test with a fixed clock observes `0` rather
+  /// than reading a real stopwatch (§38.24 T-6: no wall-clock dependence).
+  double _elapsedMs(DateTime startedAt) {
+    final int micros = clock().difference(startedAt).inMicroseconds;
+    return (micros < 0 ? 0 : micros) / 1000.0;
+  }
+
+  /// Emits the pass's structured log line and its §38.28.2 metrics.
+  ///
+  /// Deliberately passive: [TelemetryLogger] and [TelemetryMetrics] isolate a
+  /// throwing sink, and this method itself has no failure path, so observability
+  /// can never become a source of truth or a way for a pass to fail.
+  void _emitObservability(
+    PushRunResult result, {
+    required SyncCorrelation? correlation,
+    required double? durationMs,
+    SyncPushTransportException? transportError,
+  }) {
+    final TelemetryLogger? telemetry = logger;
+    final TelemetryMetrics? metricSink = metrics;
+    final Map<String, Object?> correlationFields =
+        correlation?.toLogFields() ?? const <String, Object?>{};
+
+    if (telemetry != null) {
+      telemetry.log(
+        SyncLogEvents.pushPass,
+        fields: <String, Object?>{
+          ...correlationFields,
+          LoggableKeys.recovered: result.recovered,
+          LoggableKeys.promoted: result.promoted,
+          LoggableKeys.attempted: result.attempted,
+          LoggableKeys.applied: result.applied,
+          LoggableKeys.replayed: result.replayed,
+          LoggableKeys.rejected: result.rejected,
+          LoggableKeys.contradicted: result.contradicted,
+          LoggableKeys.retryable: result.retryable,
+          LoggableKeys.requeued: result.requeued,
+          if (result.fault != null) LoggableKeys.fault: result.fault!.name,
+          if (result.httpStatus != null) LoggableKeys.statusCode: result.httpStatus,
+          LoggableKeys.durationMs: ?durationMs,
+        },
+      );
+      if (result.fault != null) {
+        telemetry.log(
+          SyncLogEvents.pushBatchFailure,
+          fields: <String, Object?>{
+            ...correlationFields,
+            LoggableKeys.fault: result.fault!.name,
+            if (transportError != null) LoggableKeys.errorClass: errorClassOf(transportError),
+            if (transportError?.code != null) LoggableKeys.errorCode: transportError!.code,
+            if (result.httpStatus != null) LoggableKeys.statusCode: result.httpStatus,
+          },
+        );
+      }
+    }
+
+    if (metricSink == null) return;
+    if (durationMs != null) {
+      metricSink.observe(
+        SyncMetricNames.pushDurationMs,
+        durationMs,
+        labels: <String, Object?>{MetricLabels.operation: 'PUSH'},
+      );
+    }
+    if (result.retryable > 0) {
+      metricSink.counter(
+        SyncMetricNames.pushAttempts,
+        result.retryable,
+        labels: <String, Object?>{MetricLabels.errorClass: _retryErrorClass(result)},
+      );
+    }
+    if (result.rejected > 0) {
+      metricSink.counter(SyncMetricNames.permanentRejections, result.rejected);
+    }
+    if (result.contradicted > 0) {
+      metricSink.counter(
+        SyncMetricNames.conflicts,
+        result.contradicted,
+        labels: <String, Object?>{MetricLabels.conflictClass: 'IDEMPOTENCY_CONTRADICTION'},
+      );
+    }
+    if (result.attempted > 0) {
+      final int acknowledged = result.applied + result.replayed;
+      metricSink.gauge(
+        SyncMetricNames.pushSuccessRatio,
+        acknowledged / result.attempted,
+        labels: <String, Object?>{MetricLabels.operation: 'PUSH'},
+      );
+    }
+  }
+
+  /// The bounded error class a retryable pass is attributed to (§38.28.2).
+  String _retryErrorClass(PushRunResult result) {
+    switch (result.fault) {
+      case PushRunFault.transient:
+        return 'TRANSIENT';
+      case PushRunFault.authenticationRequired:
+        return 'AUTHENTICATION_REQUIRED';
+      case PushRunFault.clientTooOld:
+        return 'CLIENT_TOO_OLD';
+      case PushRunFault.serverUnsupported:
+        return 'SERVER_UNSUPPORTED';
+      case PushRunFault.permanentBatchRejection:
+        return 'PERMANENT_BATCH_REJECTED';
+      case null:
+        return 'MISSING_OUTCOME';
     }
   }
 
@@ -270,8 +447,9 @@ class PushOrchestrator {
     List<OutboxData> syncing,
     PushBatchResponse response,
     int recovered,
-    int promoted,
-  ) async {
+    int promoted, {
+    required SyncCorrelation correlation,
+  }) async {
     final Map<String, PushMutationOutcome> byId = <String, PushMutationOutcome>{
       for (final PushMutationOutcome outcome in response.outcomes) outcome.mutationId: outcome,
     };
@@ -299,6 +477,7 @@ class PushOrchestrator {
         case PushMutationStatus.applied:
           await outbox.transition(mutationId: row.mutationId, to: SyncState.synced);
           applied++;
+          _observeAckLatency(row);
         case PushMutationStatus.replay:
           await outbox.transition(mutationId: row.mutationId, to: SyncState.synced);
           replayed++;
@@ -309,6 +488,13 @@ class PushOrchestrator {
             errorCode: outcome.rejectionCode ?? 'REJECTED',
           );
           rejected++;
+          logger?.log(
+            SyncLogEvents.pushMutationRejected,
+            fields: <String, Object?>{
+              ...correlation.withMutation(row.mutationId).toLogFields(),
+              LoggableKeys.errorCode: outcome.rejectionCode ?? 'REJECTED',
+            },
+          );
         case PushMutationStatus.contradiction:
           await outbox.transition(
             mutationId: row.mutationId,
@@ -316,6 +502,13 @@ class PushOrchestrator {
             errorCode: outcome.rejectionCode ?? 'MUTATION_CONTRADICTION',
           );
           contradicted++;
+          logger?.log(
+            SyncLogEvents.pushMutationContradiction,
+            fields: <String, Object?>{
+              ...correlation.withMutation(row.mutationId).toLogFields(),
+              LoggableKeys.errorCode: outcome.rejectionCode ?? 'MUTATION_CONTRADICTION',
+            },
+          );
       }
     }
 
@@ -331,6 +524,25 @@ class PushOrchestrator {
       // A per-mutation outcome pass is an implicit `200`: the transport works,
       // there is no whole-request fault, and no server-directed delay applies.
       httpStatus: 200,
+    );
+  }
+
+  /// Observes local-commit → acknowledgement latency for one applied mutation.
+  ///
+  /// §38.28.2 calls this "the single most important operational metric" because
+  /// it measures cashier-exposure duration: how long a committed sale sits on
+  /// the device before the server acknowledges it. Observed only on `APPLIED` —
+  /// a `REPLAY` acknowledges a mutation that was already stored, so counting it
+  /// here would understate the exposure.
+  void _observeAckLatency(OutboxData row) {
+    final TelemetryMetrics? metricSink = metrics;
+    if (metricSink == null) return;
+    final int micros = clock().difference(row.localCreatedAt).inMicroseconds;
+    if (micros < 0) return;
+    metricSink.observe(
+      SyncMetricNames.ackLatencyMs,
+      micros / 1000.0,
+      labels: <String, Object?>{MetricLabels.outcome: PushMutationStatus.applied.wireName},
     );
   }
 

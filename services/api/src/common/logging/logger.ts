@@ -159,6 +159,28 @@ export function logPayload(candidate: Readonly<Record<string, unknown>>): Record
 }
 
 /**
+ * Returns the constructor name of [error], and nothing else.
+ *
+ * §13.1 and §38.28.3 require that a log never carries a token, a password, a
+ * connection string, or payload content. An `Error`'s `message` and `stack` are
+ * the most common carriers of all four, and Pino's `err` serializer emits both.
+ * So an error is logged by its *class*, not by its value: the name is bounded,
+ * developer-authored, and carries no runtime data.
+ *
+ * A throwable that is not an `Error`, whose `name` is empty, or whose `name` is
+ * not a plain identifier is reported as `UnknownError` rather than passed
+ * through — an attacker-influenced `name` must not become an injection vector.
+ */
+const SAFE_ERROR_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+
+export function errorNameOf(error: unknown): string {
+  if (error instanceof Error && SAFE_ERROR_NAME.test(error.name)) {
+    return error.name;
+  }
+  return 'UnknownError';
+}
+
+/**
  * Returns a copy of `headers` safe to log: credential-bearing headers are replaced
  * wholesale, and nothing else is inspected.
  *

@@ -111,9 +111,18 @@ class PushBatchRequest {
   const PushBatchRequest({
     required this.deviceId,
     required this.syncBatchId,
+    required this.traceId,
     required this.localSchemaVersion,
     required this.mutations,
   });
+
+  /// The header name the §38.28.1 `trace_id` travels under.
+  ///
+  /// The same `x-trace-id` the server's request logger and exception filter
+  /// honour, so a client pass and the server line that answered it share one
+  /// value. It is a header and **not** a body field, so the §38.10.1 wire
+  /// contract and its generated OpenAPI document do not change.
+  static const String traceHeaderName = 'x-trace-id';
 
   /// The producing installation, asserted — the server verifies it against the
   /// authenticated device binding and refuses a mismatch (§38.16).
@@ -121,6 +130,13 @@ class PushBatchRequest {
 
   /// Client-generated batch identity for correlation (§38.28.1).
   final String syncBatchId;
+
+  /// §38.28.1 `trace_id` — one request, end to end, client and server.
+  ///
+  /// Deliberately absent from [toJson]: correlation metadata is not business
+  /// payload, and adding it to the body would be a contract change this slice
+  /// must not make. A concrete transport sends it as [traceHeaderName].
+  final String traceId;
 
   /// §38.7.2: the local schema version this client speaks, published on every
   /// push.
