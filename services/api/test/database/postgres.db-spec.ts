@@ -25,8 +25,11 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { PrismaClient, type Prisma } from '@prisma/client';
 import { loadConfig } from '../../src/common/config/app.config';
 import { PrismaService } from '../../src/common/database/prisma.service';
@@ -44,6 +47,21 @@ import { SYNC_MUTATION_APPLIER } from '../../src/common/sync/push/sync-mutation-
 import { SYNC_AUTHENTICATOR, type SyncTrustedContext } from '../../src/common/sync/push/sync-auth';
 import { SYNC_AUTHENTICATOR as PULL_SYNC_AUTHENTICATOR } from '../../src/common/sync/pull/sync-auth';
 import { MAX_PULL_PAGE_SIZE } from '../../src/common/sync/pull/pull.contract';
+import {
+  EXIT_CONFLICT,
+  EXIT_RUNTIME,
+  EXIT_SUCCESS,
+  EXIT_USAGE,
+  runBootstrapCli,
+  type BootstrapCliIo,
+  type BootstrapConnectorFactory,
+} from '../../src/common/tenancy/bootstrap-cli';
+import { BootstrapConflictError } from '../../src/common/tenancy/organization-bootstrap.errors';
+import {
+  OrganizationBootstrapService,
+  type BootstrapRequest,
+  type BootstrapResult,
+} from '../../src/common/tenancy/organization-bootstrap.service';
 import { createOverriddenTestHarness, createTestHarness, destroyTestHarness, type TestHarness } from '../harness';
 import { FixedSyncAuthenticator } from '../sync/test-sync-authenticator';
 import { ScriptedMutationApplier, probeDirective } from '../sync/scripted-mutation-applier';
@@ -99,16 +117,29 @@ function requireTestUrls(): DatabaseUrls {
   return urls;
 }
 
+/** Extra arguments and environment overrides for `dbScript`. */
+interface DbScriptOptions {
+  /** Forwarded to the command, e.g. `--schema <path>` to aim at a scratch migration history. */
+  readonly args?: readonly string[];
+  /** Merged over the ambient environment, e.g. a scratch database's URLs. */
+  readonly env?: Readonly<Record<string, string>>;
+}
+
 /**
  * Runs `scripts/db.mjs <command>` in a child process, which is the same entry
  * point an operator uses (`npm run db:migrate`), so the suite exercises the
  * supported workflow rather than a test-only shortcut.
+ *
+ * `options` lets the M2-S1 upgrade case point the *same* operator entry point at
+ * a scratch database and a reduced migration history: the workflow under test
+ * stays the production one, only its target changes.
  */
-function dbScript(command: string): void {
-  const result = spawnSync(process.execPath, [path.join(API_ROOT, 'scripts', 'db.mjs'), command], {
+function dbScript(command: string, options: DbScriptOptions = {}): void {
+  const argv = [path.join(API_ROOT, 'scripts', 'db.mjs'), command, ...(options.args ?? [])];
+  const result = spawnSync(process.execPath, argv, {
     cwd: API_ROOT,
     encoding: 'utf8',
-    env: process.env,
+    env: { ...process.env, ...(options.env ?? {}) },
     // Captured rather than inherited: on success the output is Prisma's banner
     // noise, and on failure it is appended to the thrown error where it is
     // actually useful.
@@ -118,6 +149,39 @@ function dbScript(command: string): void {
   if (result.status !== 0) {
     throw new Error(`scripts/db.mjs ${command} exited with ${result.status}\n${result.stdout}\n${result.stderr}`);
   }
+}
+
+/** The Prisma CLI entry point, resolved exactly as `scripts/db.mjs` resolves it. */
+function prismaCliEntry(): string {
+  const requireFromApi = createRequire(path.join(API_ROOT, 'package.json'));
+  return requireFromApi.resolve('prisma/build/index.js');
+}
+
+interface PrismaCliResult {
+  readonly status: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+/**
+ * Runs the Prisma CLI directly — never through `db.mjs`, which only wraps
+ * `migrate deploy|dev|status`. Used by AC-18's in-suite drift gate, which needs
+ * `migrate diff`. The connection URL is passed as a process argument to a child
+ * that is never echoed, and it carries no password (§13.6).
+ */
+function prismaCli(args: readonly string[], env: Readonly<Record<string, string>>): PrismaCliResult {
+  const result = spawnSync(process.execPath, [prismaCliEntry(), ...args], {
+    cwd: API_ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  if (result.error !== undefined && result.error !== null) {
+    throw result.error;
+  }
+
+  return { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 
 interface RoleRow {
@@ -189,22 +253,29 @@ describe('database acceptance (real PostgreSQL)', () => {
         ORDER BY migration_name
       `;
 
-      // M1b-S4 adds the sync ledger migrations to M1-S3's skeleton; every applied
-      // migration must be finished and never rolled back (migration history is
-      // append-only, Master Plan §44.1).
-      expect(rows.map((row) => row.migration_name)).toEqual(['0001_schema_skeleton', '0002_mutation_ledger']);
+      // M1b-S4 adds the sync ledger migrations to M1-S3's skeleton and M2-S1 adds
+      // `0003_organizations`; every applied migration must be finished and never
+      // rolled back (migration history is append-only, Master Plan §44.1).
+      expect(rows.map((row) => row.migration_name)).toEqual([
+        '0001_schema_skeleton',
+        '0002_mutation_ledger',
+        '0003_organizations',
+      ]);
       for (const row of rows) {
         expect(row.finished_at).not.toBeNull();
         expect(row.rolled_back_at).toBeNull();
       }
     });
 
-    it('creates exactly the sync-ledger tables and no domain tables yet', async () => {
+    it('creates exactly the authorized tables and no others', async () => {
       // §39.5: a table exists only for a capability whose slice authorized it.
       // M1b-S4 authorizes the four tables of the sync ledger (§38.9, §38.11,
       // §40.5): the idempotency table, the change feed, the per-device cursors,
-      // and the per-organization sequence counter. No business table exists yet —
-      // the first is a business slice's to authorize.
+      // and the per-organization sequence counter. M2-S1 authorizes the first
+      // domain tables (§40.6, §8.4): `organizations` (tenant root), `users`
+      // (credential-free identity), and `organization_memberships`. Nothing else
+      // — M2-S2's credential columns, M2-S3's roles, and M2-S4's RLS all have
+      // their own slices and their own migrations.
       const rows = await migrator.$queryRaw<NameRow[]>`
         SELECT tablename FROM pg_tables
         WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'
@@ -215,7 +286,10 @@ describe('database acceptance (real PostgreSQL)', () => {
         'change_log',
         'device_sync_cursors',
         'mutation_ledger',
+        'organization_memberships',
+        'organizations',
         'sync_sequences',
+        'users',
       ]);
     });
 
@@ -223,7 +297,7 @@ describe('database acceptance (real PostgreSQL)', () => {
       dbScript('deploy');
 
       const rows = await migrator.$queryRaw<MigrationRow[]>`SELECT migration_name FROM _prisma_migrations`;
-      expect(rows).toHaveLength(2);
+      expect(rows).toHaveLength(3);
     });
   });
 
@@ -1168,5 +1242,799 @@ describe('database acceptance (real PostgreSQL)', () => {
         expect(resumed.body).toMatchObject({ rebaselineRequired: false, nextAfter: '3', hasMore: false });
       });
     });
+  });
+
+  /**
+   * M2-S1 acceptance — organizations, memberships, and the operator-only
+   * bootstrap command against **real PostgreSQL** (§36.1 T-2: no mock, no
+   * in-memory substitute, no skipped run).
+   *
+   * §40.6's M2-S1 key acceptance is the tenancy foundation and the §10.4
+   * command: the three tables this slice authorizes (and only those — the
+   * table-list case above proves the "and no others"), idempotency enforced by
+   * the database rather than by a flag in the caller, and a command line whose
+   * credential is possession of the migrator URL.
+   *
+   * Every assertion below reads rows back out of PostgreSQL after the fact:
+   * §36.1 T-2 is exactly the claim that the store, not the returned message, is
+   * the source of truth. The clients are the ones the outer suite already
+   * opened — one per role — so each case also proves *which role* may run the
+   * statement it uses, and AC-14 re-drives the finished command line with a
+   * credential canary in its environment (§13.6, §42.6).
+   */
+  describe('organizations and operator bootstrap (M2-S1)', () => {
+    /** The durable organization the shared cases create, retry, and conflict on. */
+    const FIRST_KEY = 'm2s1-first-tenant';
+    const FIRST_NAME = 'Northwind Retail';
+    const FIRST_EMAIL = 'owner.m2s1@example.test';
+    /** Prepared inside AC-14: an organization whose owner membership is deleted out of band. */
+    const ANOMALY_KEY = 'm2s1-anomaly-tenant';
+    const CLI_KEY = 'm2s1-cli-tenant';
+    const CLI_EMAIL = 'cli.m2s1@example.test';
+    const CLI_ARGV: readonly string[] = [
+      '--bootstrap-key',
+      CLI_KEY,
+      '--name',
+      'CLI Tenant',
+      '--owner-email',
+      CLI_EMAIL,
+    ];
+    /**
+     * The §10.4 request the shared retry replays, byte for byte: padded name
+     * and mixed-case email, so the stored rows also prove trim + canonicalize.
+     */
+    const FIRST_REQUEST: BootstrapRequest = {
+      bootstrapKey: FIRST_KEY,
+      organizationName: `  ${FIRST_NAME}  `,
+      ownerEmail: '  Owner.M2S1@Example.TEST  ',
+    };
+    /**
+     * A password the repository's secret-scan already classifies as a permitted
+     * fixture by name (the same value the CLI unit suite uses). Inert under the
+     * trust authentication the local host and CI both use, so AC-14 can put it
+     * in a URL that really connects and still assert it never reaches output.
+     */
+    const CANARY = 'do-not-log-this';
+    const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+    interface CountRow {
+      n: number;
+    }
+    interface OrgRow {
+      id: string;
+      name: string;
+      status: string;
+      bootstrap_key: string;
+    }
+    interface UserRow {
+      id: string;
+      email: string;
+    }
+    interface MembershipRow {
+      id: string;
+      organization_id: string;
+      user_id: string;
+      is_owner: boolean;
+    }
+    interface ColumnRow {
+      column_name: string;
+    }
+    interface IndexDefRow {
+      indexdef: string;
+    }
+    interface ForeignKeyRow {
+      conname: string;
+      confdeltype: string;
+      confupdtype: string;
+    }
+    interface ConstraintKindRow {
+      conname: string;
+      contype: string;
+    }
+    interface EnumLabelRow {
+      enumlabel: string;
+    }
+    interface CapturedIo {
+      stdout: string[];
+      stderr: string[];
+    }
+
+    /** Durable row counts for one (key, email) pair — the acceptance unit of "no duplicates". */
+    const countsFor = async (
+      bootstrapKey: string,
+      email: string,
+    ): Promise<{ orgs: number; users: number; memberships: number }> => {
+      const [orgs, users, memberships] = await Promise.all([
+        migrator.$queryRaw<
+          CountRow[]
+        >`SELECT count(*)::int AS n FROM organizations WHERE bootstrap_key = ${bootstrapKey}`,
+        migrator.$queryRaw<CountRow[]>`SELECT count(*)::int AS n FROM users WHERE email = ${email}`,
+        migrator.$queryRaw<CountRow[]>`
+          SELECT count(*)::int AS n FROM organization_memberships m
+          JOIN users u ON u.id = m.user_id WHERE u.email = ${email}`,
+      ]);
+      return { orgs: orgs[0]?.n ?? 0, users: users[0]?.n ?? 0, memberships: memberships[0]?.n ?? 0 };
+    };
+
+    const captureIo = (): { io: BootstrapCliIo; captured: CapturedIo } => {
+      const captured: CapturedIo = { stdout: [], stderr: [] };
+      const io: BootstrapCliIo = {
+        out: (line) => {
+          captured.stdout.push(line);
+        },
+        err: (line) => {
+          captured.stderr.push(line);
+        },
+      };
+      return { io, captured };
+    };
+
+    /** Drives the real command line in-process (the parser, the config, and the Prisma connector). */
+    const runCli = async (
+      argv: readonly string[],
+      env: Record<string, string | undefined>,
+      connect?: BootstrapConnectorFactory,
+    ): Promise<{ code: number; captured: CapturedIo }> => {
+      const { io, captured } = captureIo();
+      const code = await runBootstrapCli(argv, env, io, connect === undefined ? {} : { connect });
+      return { code, captured };
+    };
+
+    /** A connector factory that records the attempt and refuses: "never connected" as a fact. */
+    const neverConnects = (): { readonly factory: BootstrapConnectorFactory; readonly calls: number[] } => {
+      const calls: number[] = [];
+      return {
+        calls,
+        factory: (url) => {
+          calls.push(url.length);
+          return Promise.reject(new Error('the command must not open a connection for this case'));
+        },
+      };
+    };
+
+    /**
+     * A URL for the same host and database carrying the canary password. Built
+     * from the suite's own environment, so it works wherever the suite runs; the
+     * credential exists only at runtime, never in this file (§13.6).
+     */
+    const canaryUrlFor = (username: string): string => {
+      const parsed = new URL(urls.migration);
+      parsed.username = username;
+      parsed.password = CANARY;
+      return parsed.toString();
+    };
+
+    const firstOf = <T>(rows: readonly T[], what: string): T => {
+      const [row] = rows;
+      if (row === undefined) {
+        throw new Error(`expected exactly one ${what}, found none`);
+      }
+      return row;
+    };
+
+    /**
+     * The PostgreSQL SQLSTATE behind a failed raw statement.
+     *
+     * Prisma reports a raw-statement failure as `P2010` ("raw query failed")
+     * and carries the driver's own five-digit SQLSTATE in the message, so the
+     * assertions below use the *database's* classification — 23505 unique,
+     * 23503 foreign key, 23514 check — rather than a client-side mapping of it.
+     */
+    const sqlStateOf = (error: unknown): string | undefined =>
+      error instanceof Error ? (/Code: `(\d{5})`/.exec(error.message)?.[1] ?? undefined) : undefined;
+
+    it('AC-01: the first bootstrap durably writes one organization, one owner user, and one owner membership', async () => {
+      const result = await new OrganizationBootstrapService({ prisma: migrator }).bootstrap(FIRST_REQUEST);
+
+      expect(result).toMatchObject({ status: 'BOOTSTRAPPED', bootstrapKey: FIRST_KEY });
+      expect(result.organizationId).toMatch(UUID_PATTERN);
+      expect(result.userId).toMatch(UUID_PATTERN);
+      expect(result.membershipId).toMatch(UUID_PATTERN);
+
+      // The stored organization, not the returned message (§36.1 T-2).
+      const organizations = await migrator.$queryRaw<OrgRow[]>`
+        SELECT id, name, status::text AS status, bootstrap_key
+        FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`;
+      expect(organizations).toHaveLength(1);
+      expect(organizations[0]).toMatchObject({
+        id: result.organizationId,
+        name: FIRST_NAME,
+        status: 'ACTIVE',
+        bootstrap_key: FIRST_KEY,
+      });
+
+      const users = await migrator.$queryRaw<UserRow[]>`SELECT id, email FROM users WHERE email = ${FIRST_EMAIL}`;
+      expect(users.map((user) => user.id)).toEqual([result.userId]);
+
+      const memberships = await migrator.$queryRaw<MembershipRow[]>`
+        SELECT id, organization_id, user_id, is_owner
+        FROM organization_memberships WHERE organization_id = ${result.organizationId}::uuid`;
+      expect(memberships).toEqual([
+        { id: result.membershipId, organization_id: result.organizationId, user_id: result.userId, is_owner: true },
+      ]);
+
+      // §8.4: the identity table is credential-free — exactly three columns.
+      const columns = await migrator.$queryRaw<ColumnRow[]>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'users' ORDER BY column_name`;
+      expect(columns.map((column) => column.column_name)).toEqual(['created_at', 'email', 'id']);
+    });
+
+    it('AC-02: an identical retry answers ALREADY_BOOTSTRAPPED with the stored ids and writes nothing', async () => {
+      const retry = await new OrganizationBootstrapService({ prisma: migrator }).bootstrap(FIRST_REQUEST);
+
+      expect(retry.status).toBe('ALREADY_BOOTSTRAPPED');
+      expect(retry.organizationId).toMatch(UUID_PATTERN);
+
+      const organizations = await migrator.$queryRaw<OrgRow[]>`
+        SELECT id, name, status::text AS status, bootstrap_key
+        FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`;
+      expect(organizations).toHaveLength(1);
+      expect(retry.organizationId).toBe(organizations[0]?.id);
+      expect(await countsFor(FIRST_KEY, FIRST_EMAIL)).toEqual({ orgs: 1, users: 1, memberships: 1 });
+    });
+
+    it('AC-03: four concurrent identical bootstraps converge on one durable consistent result', async () => {
+      const raceKey = 'm2s1-race-tenant';
+      const raceEmail = 'race.m2s1@example.test';
+      const request: BootstrapRequest = {
+        bootstrapKey: raceKey,
+        organizationName: 'Race Tenant',
+        ownerEmail: raceEmail,
+      };
+      const service = new OrganizationBootstrapService({ prisma: migrator });
+
+      const answers = await Promise.all([
+        service.bootstrap(request),
+        service.bootstrap(request),
+        service.bootstrap(request),
+        service.bootstrap(request),
+      ]);
+
+      // The advisory lock serializes the racers: one writer, three reconciliations.
+      expect(answers.filter((answer) => answer.status === 'BOOTSTRAPPED')).toHaveLength(1);
+      expect(answers.filter((answer) => answer.status === 'ALREADY_BOOTSTRAPPED')).toHaveLength(3);
+      expect(new Set(answers.map((answer) => answer.organizationId)).size).toBe(1);
+      expect(new Set(answers.map((answer) => answer.userId)).size).toBe(1);
+      expect(await countsFor(raceKey, raceEmail)).toEqual({ orgs: 1, users: 1, memberships: 1 });
+    }, 60_000);
+
+    it('AC-04: a retry with the same key but different parameters is an explicit conflict and adopts nothing', async () => {
+      const service = new OrganizationBootstrapService({ prisma: migrator });
+
+      const wrongName = await service
+        .bootstrap({ ...FIRST_REQUEST, organizationName: 'Some Other Name' })
+        .catch((error: unknown) => error);
+      expect(wrongName).toBeInstanceOf(BootstrapConflictError);
+      expect((wrongName as BootstrapConflictError).reason).toBe('NAME_MISMATCH');
+
+      const wrongEmail = await service
+        .bootstrap({ ...FIRST_REQUEST, ownerEmail: 'someone.else@example.test' })
+        .catch((error: unknown) => error);
+      expect(wrongEmail).toBeInstanceOf(BootstrapConflictError);
+      expect((wrongEmail as BootstrapConflictError).reason).toBe('OWNER_EMAIL_MISMATCH');
+
+      // Nothing was adopted, overwritten, or repaired: the stored row is untouched.
+      const stored = await migrator.$queryRaw<OrgRow[]>`
+        SELECT id, name, status::text AS status, bootstrap_key
+        FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`;
+      expect(stored).toHaveLength(1);
+      expect(stored[0]).toMatchObject({ name: FIRST_NAME, status: 'ACTIVE' });
+      expect(await countsFor(FIRST_KEY, FIRST_EMAIL)).toEqual({ orgs: 1, users: 1, memberships: 1 });
+    });
+
+    it('AC-05: a failure after all three inserts but before commit leaves zero committed rows', async () => {
+      const rollbackKey = 'm2s1-rollback-tenant';
+      const rollbackEmail = 'rollback.m2s1@example.test';
+      const failing = new OrganizationBootstrapService(
+        { prisma: migrator },
+        {
+          failureProbe: () => {
+            throw new Error('injected failure before commit');
+          },
+        },
+      );
+
+      await expect(
+        failing.bootstrap({
+          bootstrapKey: rollbackKey,
+          organizationName: 'Rollback Tenant',
+          ownerEmail: rollbackEmail,
+        }),
+      ).rejects.toThrow('injected failure before commit');
+
+      // Real rollback against real PostgreSQL: organization, user, and
+      // membership all absent — not "created and then cleaned up".
+      expect(await countsFor(rollbackKey, rollbackEmail)).toEqual({ orgs: 0, users: 0, memberships: 0 });
+    });
+
+    it('AC-06: the real command line bootstraps once, then answers its own identical retry with the same ids', async () => {
+      const env = { MIGRATION_DATABASE_URL: urls.migration };
+
+      const first = await runCli(CLI_ARGV, env);
+      expect(first.code).toBe(EXIT_SUCCESS);
+      expect(first.captured.stderr).toEqual([]);
+      expect(first.captured.stdout).toHaveLength(1);
+      const payload = JSON.parse(first.captured.stdout[0] ?? '{}') as BootstrapResult;
+      expect(payload.status).toBe('BOOTSTRAPPED');
+      expect(payload.bootstrapKey).toBe(CLI_KEY);
+      expect(payload.organizationId).toMatch(UUID_PATTERN);
+
+      const retry = await runCli(CLI_ARGV, env);
+      expect(retry.code).toBe(EXIT_SUCCESS);
+      expect(retry.captured.stderr).toEqual([]);
+      expect(JSON.parse(retry.captured.stdout[0] ?? '{}')).toMatchObject({
+        status: 'ALREADY_BOOTSTRAPPED',
+        organizationId: payload.organizationId,
+        userId: payload.userId,
+        membershipId: payload.membershipId,
+      });
+
+      expect(await countsFor(CLI_KEY, CLI_EMAIL)).toEqual({ orgs: 1, users: 1, memberships: 1 });
+    }, 60_000);
+
+    it('AC-07: malformed input is refused with exit 2 before any connection is attempted', async () => {
+      const probe = neverConnects();
+
+      const answer = await runCli(
+        ['--bootstrap-key', 'Not A Valid Key', '--name', 'Whatever', '--owner-email', 'ac07@example.test'],
+        { MIGRATION_DATABASE_URL: urls.migration },
+        probe.factory,
+      );
+
+      expect(answer.code).toBe(EXIT_USAGE);
+      expect(probe.calls).toEqual([]);
+      expect(answer.captured.stdout).toEqual([]);
+      expect(answer.captured.stderr).toHaveLength(1);
+      expect(JSON.parse(answer.captured.stderr[0] ?? '{}')).toMatchObject({
+        error: 'BOOTSTRAP_INPUT_INVALID',
+        field: 'bootstrapKey',
+      });
+    });
+
+    it('AC-08: without MIGRATION_DATABASE_URL the command refuses, and §13.4 refuses identical role identities', async () => {
+      const probe = neverConnects();
+
+      const missing = await runCli(CLI_ARGV, { DATABASE_URL: urls.application }, probe.factory);
+      expect(missing.code).toBe(EXIT_USAGE);
+      expect(JSON.parse(missing.captured.stderr[0] ?? '{}')).toMatchObject({ error: 'MISSING_CREDENTIAL' });
+
+      const collapsed = await runCli(
+        CLI_ARGV,
+        { DATABASE_URL: urls.application, MIGRATION_DATABASE_URL: urls.application },
+        probe.factory,
+      );
+      expect(collapsed.code).toBe(EXIT_USAGE);
+      expect(JSON.parse(collapsed.captured.stderr[0] ?? '{}')).toMatchObject({ error: 'CONFIGURATION_REFUSED' });
+
+      expect(probe.calls).toEqual([]);
+    });
+
+    it('AC-09: the database refuses a second membership for the same organization and user', async () => {
+      const membershipCount = async (): Promise<number> => {
+        const rows = await migrator.$queryRaw<CountRow[]>`
+          SELECT count(*)::int AS n FROM organization_memberships
+          WHERE organization_id = (SELECT id FROM organizations WHERE bootstrap_key = ${FIRST_KEY})`;
+        return rows[0]?.n ?? 0;
+      };
+
+      const before = await membershipCount();
+      expect(before).toBeGreaterThan(0);
+
+      // The application role is the writer that could ever duplicate a row, so
+      // the attempt goes through it — same organization, same user, new row.
+      const duplicate = await app.$executeRaw`
+          INSERT INTO organization_memberships (organization_id, user_id, is_owner)
+          SELECT organization_id, user_id, false FROM organization_memberships
+          WHERE organization_id = (SELECT id FROM organizations WHERE bootstrap_key = ${FIRST_KEY})
+          LIMIT 1`.catch((error: unknown) => error);
+
+      expect(duplicate).toBeInstanceOf(Error);
+      expect(sqlStateOf(duplicate)).toBe('23505');
+      expect(await membershipCount()).toBe(before);
+    });
+
+    it('AC-10: one user can own two organizations through two membership rows (§9.2 T-4)', async () => {
+      const secondKey = 'm2s1-second-tenant';
+      const result = await new OrganizationBootstrapService({ prisma: migrator }).bootstrap({
+        bootstrapKey: secondKey,
+        organizationName: 'Second Tenant',
+        ownerEmail: FIRST_EMAIL,
+      });
+      expect(result.status).toBe('BOOTSTRAPPED');
+
+      // The identity row is reused, not duplicated; the membership edge is new.
+      const users = await migrator.$queryRaw<UserRow[]>`SELECT id FROM users WHERE email = ${FIRST_EMAIL}`;
+      expect(users.map((user) => user.id)).toEqual([result.userId]);
+      expect(await countsFor(secondKey, FIRST_EMAIL)).toEqual({ orgs: 1, users: 1, memberships: 2 });
+
+      const memberships = await migrator.$queryRaw<MembershipRow[]>`
+        SELECT m.organization_id, m.is_owner FROM organization_memberships m
+        JOIN users u ON u.id = m.user_id WHERE u.email = ${FIRST_EMAIL}`;
+      expect(new Set(memberships.map((membership) => membership.organization_id)).size).toBe(2);
+      expect(memberships.every((membership) => membership.is_owner)).toBe(true);
+    });
+
+    it('AC-11: at most one owner per organization — a partial unique index, not a code check', async () => {
+      // A second identity, written straight through the application role.
+      const inserted = await app.$queryRaw<UserRow[]>`
+        INSERT INTO users (email) VALUES ('member.m2s1@example.test') RETURNING id`;
+      const memberId = firstOf(inserted, 'member identity').id;
+
+      const organizations = await migrator.$queryRaw<{ id: string }[]>`
+        SELECT id FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`;
+      const organizationId = firstOf(organizations, 'organization').id;
+
+      // A second owner row is refused by PostgreSQL whatever the caller believes.
+      const secondOwner = await app.$executeRaw`
+          INSERT INTO organization_memberships (organization_id, user_id, is_owner)
+          VALUES (${organizationId}::uuid, ${memberId}::uuid, true)`.catch((error: unknown) => error);
+      expect(secondOwner).toBeInstanceOf(Error);
+      expect(sqlStateOf(secondOwner)).toBe('23505');
+
+      // A non-owner membership for the same pair is a different row and is accepted.
+      await expect(app.$executeRaw`
+        INSERT INTO organization_memberships (organization_id, user_id, is_owner)
+        VALUES (${organizationId}::uuid, ${memberId}::uuid, false)`).resolves.toBe(1);
+
+      const owners = await migrator.$queryRaw<CountRow[]>`
+        SELECT count(*)::int AS n FROM organization_memberships
+        WHERE organization_id = ${organizationId}::uuid AND is_owner`;
+      expect(owners[0]?.n ?? 0).toBe(1);
+    });
+
+    it('AC-12: foreign keys reject memberships that reference no organization or no user', async () => {
+      const organizations = await migrator.$queryRaw<{ id: string }[]>`
+        SELECT id FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`;
+      const users = await migrator.$queryRaw<{ id: string }[]>`SELECT id FROM users WHERE email = ${FIRST_EMAIL}`;
+      const organizationId = firstOf(organizations, 'organization').id;
+      const userId = firstOf(users, 'user').id;
+
+      const missingOrganization = await app.$executeRaw`
+          INSERT INTO organization_memberships (organization_id, user_id, is_owner)
+          VALUES (${randomUUID()}::uuid, ${userId}::uuid, false)`.catch((error: unknown) => error);
+      expect(missingOrganization).toBeInstanceOf(Error);
+      expect(sqlStateOf(missingOrganization)).toBe('23503');
+
+      const missingUser = await app.$executeRaw`
+          INSERT INTO organization_memberships (organization_id, user_id, is_owner)
+          VALUES (${organizationId}::uuid, ${randomUUID()}::uuid, false)`.catch((error: unknown) => error);
+      expect(missingUser).toBeInstanceOf(Error);
+      expect(sqlStateOf(missingUser)).toBe('23503');
+    });
+
+    it('AC-13: role attributes are unchanged, the new tables are migrator-owned, and the application role still cannot run DDL', async () => {
+      const roles = await admin.$queryRaw<RoleRow[]>`
+        SELECT rolname, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole, rolreplication, rolcanlogin
+        FROM pg_roles WHERE rolname IN ('my_shop_migrator', 'my_shop_app') ORDER BY rolname`;
+      expect(roles.map((role) => role.rolname)).toEqual(['my_shop_app', 'my_shop_migrator']);
+      for (const role of roles) {
+        expect(role).toMatchObject({
+          rolsuper: false,
+          rolbypassrls: false,
+          rolcreatedb: false,
+          rolcreaterole: false,
+          rolreplication: false,
+          rolcanlogin: true,
+        });
+      }
+
+      // Every table this slice births is owned by the migrator — the credential
+      // the bootstrap command (AC-06) ran with — never by the application.
+      // (Read through the migrator connection: the privileged maintenance
+      // client is connected to the maintenance database, not this one.)
+      const owners = await migrator.$queryRaw<OwnerRow[]>`
+        SELECT c.relname, r.rolname AS owner
+        FROM pg_class c
+        JOIN pg_roles r ON r.oid = c.relowner
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relname IN ('organizations', 'users', 'organization_memberships')
+        ORDER BY c.relname`;
+      expect(owners).toEqual([
+        { relname: 'organization_memberships', owner: 'my_shop_migrator' },
+        { relname: 'organizations', owner: 'my_shop_migrator' },
+        { relname: 'users', owner: 'my_shop_migrator' },
+      ]);
+
+      // §13.4's runtime half: the application role keeps DML and loses DDL.
+      await expect(app.$executeRaw`ALTER TABLE organizations ADD COLUMN probe text`).rejects.toThrow();
+      const columns = await migrator.$queryRaw<ColumnRow[]>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'organizations' ORDER BY column_name`;
+      expect(columns.map((column) => column.column_name)).toEqual([
+        'bootstrap_key',
+        'created_at',
+        'id',
+        'name',
+        'status',
+      ]);
+      const readable = await migrator.$queryRaw<CountRow[]>`SELECT count(*)::int AS n FROM organizations`;
+      expect(readable[0]?.n ?? -1).toBeGreaterThan(0);
+    });
+
+    it('AC-14: no credential-shaped value reaches any command line output path (secret canary)', async () => {
+      const outputs: string[] = [];
+      const collect = (answer: { readonly code: number; readonly captured: CapturedIo }): number => {
+        outputs.push(...answer.captured.stdout, ...answer.captured.stderr);
+        return answer.code;
+      };
+
+      // An organization whose owner membership is deleted out of band: the
+      // stored row contradicts the invariants the schema enforces, which is an
+      // integrity alarm (exit 1) — and the connection below succeeds, so the
+      // driver has nothing to complain about either way.
+      await new OrganizationBootstrapService({ prisma: migrator }).bootstrap({
+        bootstrapKey: ANOMALY_KEY,
+        organizationName: 'Anomaly Tenant',
+        ownerEmail: 'anomaly.m2s1@example.test',
+      });
+      await migrator.$executeRaw`
+        DELETE FROM organization_memberships
+        WHERE organization_id = (SELECT id FROM organizations WHERE bootstrap_key = ${ANOMALY_KEY})`;
+
+      // 1. Success — a real connection carrying the canary password (trust auth).
+      expect(
+        collect(
+          await runCli(
+            [
+              '--bootstrap-key',
+              'm2s1-canary-tenant',
+              '--name',
+              'Canary Tenant',
+              '--owner-email',
+              'canary.m2s1@example.test',
+            ],
+            { MIGRATION_DATABASE_URL: canaryUrlFor('my_shop_migrator') },
+          ),
+        ),
+      ).toBe(EXIT_SUCCESS);
+      // 2. Usage refused before configuration is even loaded.
+      expect(
+        collect(
+          await runCli(['--bootstrap-key', 'm2s1', '--name'], {
+            MIGRATION_DATABASE_URL: canaryUrlFor('my_shop_migrator'),
+          }),
+        ),
+      ).toBe(EXIT_USAGE);
+      // 3. Conflicting retry (the stored organization of AC-01 under a new name).
+      expect(
+        collect(
+          await runCli(['--bootstrap-key', FIRST_KEY, '--name', 'Renamed Elsewhere', '--owner-email', FIRST_EMAIL], {
+            MIGRATION_DATABASE_URL: canaryUrlFor('my_shop_migrator'),
+          }),
+        ),
+      ).toBe(EXIT_CONFLICT);
+      // 4. Missing operator credential: the canary sits in DATABASE_URL, the
+      //    one variable the command must never fall back to (AC-08).
+      expect(
+        collect(
+          await runCli(
+            [
+              '--bootstrap-key',
+              'm2s1-canary-tenant',
+              '--name',
+              'Canary Tenant',
+              '--owner-email',
+              'canary.m2s1@example.test',
+            ],
+            { DATABASE_URL: canaryUrlFor('my_shop_app') },
+          ),
+        ),
+      ).toBe(EXIT_USAGE);
+      // 5. Stored-state anomaly — a real, completed connection and a real refusal.
+      expect(
+        collect(
+          await runCli(
+            ['--bootstrap-key', ANOMALY_KEY, '--name', 'Anomaly Tenant', '--owner-email', 'anomaly.m2s1@example.test'],
+            { MIGRATION_DATABASE_URL: canaryUrlFor('my_shop_migrator') },
+          ),
+        ),
+      ).toBe(EXIT_RUNTIME);
+
+      // §10.4's output contract: exactly one line per invocation, across five
+      // different exit codes — and not one of them carries the credential.
+      expect(outputs).toHaveLength(5);
+      const joined = outputs.join('\n');
+      expect(joined.includes(CANARY)).toBe(false);
+      expect(joined.includes('postgresql://')).toBe(false);
+    }, 60_000);
+
+    it('holds the M2-S1 contract in the database: enum vocabulary, CHECK rules, the single-owner index, and the foreign keys', async () => {
+      const labels = await migrator.$queryRaw<EnumLabelRow[]>`
+        SELECT e.enumlabel FROM pg_enum e
+        JOIN pg_type t ON t.oid = e.enumtypid
+        WHERE t.typname = 'organization_status' ORDER BY e.enumsortorder`;
+      expect(labels.map((label) => label.enumlabel)).toEqual(['ACTIVE', 'DEACTIVATED']);
+
+      const blankName =
+        await app.$executeRaw`INSERT INTO organizations (name, bootstrap_key) VALUES ('   ', 'm2s1-blank-name-probe')`.catch(
+          (error: unknown) => error,
+        );
+      expect(blankName).toBeInstanceOf(Error);
+      expect(sqlStateOf(blankName)).toBe('23514');
+      const blankRows = await migrator.$queryRaw<CountRow[]>`
+        SELECT count(*)::int AS n FROM organizations WHERE bootstrap_key = 'm2s1-blank-name-probe'`;
+      expect(blankRows[0]?.n ?? -1).toBe(0);
+
+      const mixedCase = await app.$executeRaw`INSERT INTO users (email) VALUES ('Mixed.Case@Example.test')`.catch(
+        (error: unknown) => error,
+      );
+      expect(mixedCase).toBeInstanceOf(Error);
+      expect(sqlStateOf(mixedCase)).toBe('23514');
+      const emailRows = await migrator.$queryRaw<CountRow[]>`
+        SELECT count(*)::int AS n FROM users WHERE email = 'Mixed.Case@Example.test'`;
+      expect(emailRows[0]?.n ?? -1).toBe(0);
+
+      const indexes = await migrator.$queryRaw<IndexDefRow[]>`
+        SELECT indexdef FROM pg_indexes
+        WHERE schemaname = 'public' AND indexname = 'uq_organizations_single_owner'`;
+      expect(indexes).toHaveLength(1);
+      expect(indexes[0]?.indexdef).toContain('WHERE is_owner');
+
+      const pairs = await migrator.$queryRaw<ConstraintKindRow[]>`
+        SELECT conname, contype FROM pg_constraint
+        WHERE conrelid = 'organization_memberships'::regclass AND contype IN ('p', 'u') ORDER BY conname`;
+      expect(pairs.map((pair) => pair.conname)).toEqual([
+        'organization_memberships_organization_id_user_id_key',
+        'organization_memberships_pkey',
+      ]);
+
+      const foreignKeys = await migrator.$queryRaw<ForeignKeyRow[]>`
+        SELECT conname, confdeltype, confupdtype FROM pg_constraint
+        WHERE conrelid = 'organization_memberships'::regclass AND contype = 'f' ORDER BY conname`;
+      // 'r' = ON DELETE RESTRICT, 'c' = ON UPDATE CASCADE (§9.2 T-2/T-5).
+      expect(foreignKeys).toEqual([
+        { conname: 'organization_memberships_organization_id_fkey', confdeltype: 'r', confupdtype: 'c' },
+        { conname: 'organization_memberships_user_id_fkey', confdeltype: 'r', confupdtype: 'c' },
+      ]);
+    });
+
+    it('AC-16: upgrading a database that already runs 0001+0002 with M1b rows preserves every row', async () => {
+      const scratchName = 'my_shop_m2s1_upgrade';
+      const scratchMigrations = new URL(urls.migration);
+      scratchMigrations.pathname = `/${scratchName}`;
+      const scratchApplication = new URL(urls.application);
+      scratchApplication.pathname = `/${scratchName}`;
+      const scratchRoot = mkdtempSync(path.join(tmpdir(), 'my-shop-m2s1-'));
+      const scratchSchema = path.join(scratchRoot, 'schema.prisma');
+
+      await admin.$executeRawUnsafe(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`);
+      await admin.$executeRawUnsafe(`CREATE DATABASE ${scratchName}`);
+
+      const scratch = new PrismaClient({ datasourceUrl: scratchMigrations.toString() });
+      try {
+        // Roles and grants exactly as `test-setup` provisions the fixed database.
+        dbScript('bootstrap', { env: { DATABASE_URL: scratchApplication.toString() } });
+
+        // A reduced history: only the migrations this slice is allowed to
+        // upgrade from (§35.1 — merged migrations are never touched or copied
+        // forward; the scratch schema is the same file production builds).
+        cpSync(path.join(API_ROOT, 'prisma', 'schema.prisma'), scratchSchema);
+        mkdirSync(path.join(scratchRoot, 'migrations'), { recursive: true });
+        for (const migration of ['0001_schema_skeleton', '0002_mutation_ledger']) {
+          cpSync(
+            path.join(API_ROOT, 'prisma', 'migrations', migration),
+            path.join(scratchRoot, 'migrations', migration),
+            { recursive: true },
+          );
+        }
+        dbScript('deploy', {
+          args: ['--schema', scratchSchema],
+          env: { MIGRATION_DATABASE_URL: scratchMigrations.toString() },
+        });
+
+        await scratch.$connect();
+        const fixtureOrganization = randomUUID();
+        const fixtureDevice = randomUUID();
+        await scratch.$executeRaw`
+          INSERT INTO mutation_ledger (organization_id, mutation_id, device_id, received_at, payload_hash, status)
+          VALUES (${fixtureOrganization}::uuid, ${randomUUID()}::uuid, ${fixtureDevice}::uuid, now(), ${'a'.repeat(64)}, 'APPLIED'::mutation_ledger_status)`;
+        await scratch.$executeRaw`
+          INSERT INTO change_log (organization_id, server_sequence, mutation_id, entity_type, entity_id, changed_at)
+          VALUES (${fixtureOrganization}::uuid, 1, NULL, 'M1B_FIXTURE', 'before-m2s1', now())`;
+        await scratch.$executeRaw`
+          INSERT INTO device_sync_cursors (organization_id, device_id, updated_at)
+          VALUES (${fixtureOrganization}::uuid, ${fixtureDevice}::uuid, now())`;
+        await scratch.$executeRaw`
+          INSERT INTO sync_sequences (organization_id, last_sequence)
+          VALUES (${fixtureOrganization}::uuid, 7)`;
+
+        // The slice's migration now joins a history that is already in use.
+        cpSync(
+          path.join(API_ROOT, 'prisma', 'migrations', '0003_organizations'),
+          path.join(scratchRoot, 'migrations', '0003_organizations'),
+          { recursive: true },
+        );
+        dbScript('deploy', {
+          args: ['--schema', scratchSchema],
+          env: { MIGRATION_DATABASE_URL: scratchMigrations.toString() },
+        });
+
+        const migrations = await scratch.$queryRaw<MigrationRow[]>`
+          SELECT migration_name FROM _prisma_migrations ORDER BY migration_name`;
+        expect(migrations.map((row) => row.migration_name)).toEqual([
+          '0001_schema_skeleton',
+          '0002_mutation_ledger',
+          '0003_organizations',
+        ]);
+
+        // Every pre-existing M1b row survives the upgrade untouched...
+        const ledger = await scratch.$queryRaw<CountRow[]>`
+          SELECT count(*)::int AS n FROM mutation_ledger WHERE organization_id = ${fixtureOrganization}::uuid`;
+        const changes = await scratch.$queryRaw<CountRow[]>`
+          SELECT count(*)::int AS n FROM change_log WHERE organization_id = ${fixtureOrganization}::uuid`;
+        const cursors = await scratch.$queryRaw<CountRow[]>`
+          SELECT count(*)::int AS n FROM device_sync_cursors WHERE organization_id = ${fixtureOrganization}::uuid`;
+        const sequences = await scratch.$queryRaw<{ last_sequence: string }[]>`
+          SELECT last_sequence::text AS last_sequence FROM sync_sequences
+          WHERE organization_id = ${fixtureOrganization}::uuid`;
+        expect({ ledger: ledger[0]?.n, changes: changes[0]?.n, cursors: cursors[0]?.n }).toEqual({
+          ledger: 1,
+          changes: 1,
+          cursors: 1,
+        });
+        expect(sequences).toEqual([{ last_sequence: '7' }]);
+
+        // ...and the new tables arrive empty: an upgrade creates no tenant.
+        const organizations = await scratch.$queryRaw<CountRow[]>`SELECT count(*)::int AS n FROM organizations`;
+        const users = await scratch.$queryRaw<CountRow[]>`SELECT count(*)::int AS n FROM users`;
+        const memberships = await scratch.$queryRaw<CountRow[]>`
+          SELECT count(*)::int AS n FROM organization_memberships`;
+        expect({ organizations: organizations[0]?.n, users: users[0]?.n, memberships: memberships[0]?.n }).toEqual({
+          organizations: 0,
+          users: 0,
+          memberships: 0,
+        });
+      } finally {
+        await Promise.allSettled([scratch.$disconnect()]);
+        try {
+          await admin.$executeRawUnsafe(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`);
+        } catch {
+          /* best-effort cleanup; the fixed test database is untouched either way */
+        }
+        rmSync(scratchRoot, { recursive: true, force: true });
+      }
+    }, 300_000);
+
+    it('AC-18: the Prisma schema and the migration history agree — migrate diff exits 0', () => {
+      // No shadow database and no second server: the diff runs against the very
+      // database this suite just migrated, so exit 0 means "history == schema".
+      const diff = prismaCli(
+        [
+          'migrate',
+          'diff',
+          '--from-url',
+          urls.migration,
+          '--to-schema-datamodel',
+          path.join(API_ROOT, 'prisma', 'schema.prisma'),
+          '--exit-code',
+        ],
+        { DATABASE_URL: urls.application },
+      );
+
+      if (diff.status !== 0) {
+        throw new Error(`prisma migrate diff exited ${diff.status}\n${diff.stdout}\n${diff.stderr}`);
+      }
+    }, 60_000);
+
+    it('AC-23: no public organizations endpoint exists — the command is operator-only (§10.4, §39.2)', async () => {
+      const config = loadConfig({
+        NODE_ENV: 'test',
+        LOG_LEVEL: 'silent',
+        LOG_PRETTY: 'false',
+        DATABASE_URL: urls.application,
+      });
+      const harness = await createTestHarness(config);
+
+      try {
+        // No controller, no route, no DTO: the real application graph answers
+        // 404 for both verbs, so there is no client-reachable bootstrap at all.
+        await harness.http.get('/api/v1/organizations').expect(404);
+        await harness.http.post('/api/v1/organizations').send({ name: 'Rogue Tenant' }).expect(404);
+      } finally {
+        await destroyTestHarness(harness);
+      }
+    }, 60_000);
   });
 });
