@@ -1,5 +1,5 @@
-// My Shop — Prisma schema (Master Plan section 40.4, slices M1-S3, M1b-S4 and
-// M2-S1).
+// My Shop — Prisma schema (Master Plan section 40.4, slices M1-S3, M1b-S4,
+// M2-S1 and M2-S2).
 //
 // section 8.3 makes `prisma migrate deploy` the only migration command permitted
 // outside a developer machine, and section 35 keeps migrations forward-only: this
@@ -153,7 +153,14 @@ model User {
   email     String   @unique @db.VarChar(320)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamp(3)
 
+  /// Master Plan §10.3 / §11: bumped whenever a user's effective permissions
+  /// change, so a stale access token is detectable (`TOKEN_STALE`). M2-S2 carries
+  /// the claim and compares it; M2-S3 owns the writer.
+  permissionsVersion Int @default(0) @map("permissions_version")
+
   memberships OrganizationMembership[]
+  credential   UserCredential?
+  sessions     Session[]
 
   @@map("users")
 }
@@ -181,4 +188,87 @@ model OrganizationMembership {
   @@unique([organizationId, userId])
   @@index([userId])
   @@map("organization_memberships")
+}
+
+/// section 40.6 M2-S2, section 10.2: the password credential, 1:1 with `users`.
+/// Only the Argon2id PHC string is ever stored — never plaintext and never a
+/// reversible form. The database CHECK
+/// `chk_user_credentials_password_hash_argon2id` restates the algorithm prefix,
+/// so a writer that bypasses the service cannot store a foreign scheme (the same
+/// F-3 discipline M2-S1's migration 0004 applied to the bootstrap key).
+///
+/// A missing row means "this user has no password set" and is a refusal, never an
+/// empty credential.
+model UserCredential {
+  userId            String   @id @map("user_id") @db.Uuid
+  passwordHash      String   @map("password_hash")
+  passwordUpdatedAt DateTime @default(now()) @map("password_updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("user_credentials")
+}
+
+/// section 40.6 M2-S2, section 10.3: the server-side session. One row is one
+/// refresh-token **family**: every token minted from a single login belongs to
+/// it, so reuse detection revokes the whole family by revoking this one row.
+///
+/// `revoked_at IS NULL` means active. Revocation is permanent: a new login opens
+/// a new session rather than un-revoking an old one. `revoked_reason` is a closed
+/// vocabulary enforced by a CHECK (the database is the last line of defence).
+model Session {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt        DateTime  @default(now()) @map("last_used_at") @db.Timestamptz(6)
+  absoluteExpiresAt DateTime  @map("absolute_expires_at") @db.Timestamptz(6)
+  revokedAt         DateTime? @map("revoked_at") @db.Timestamptz(6)
+  revokedReason     String?   @map("revoked_reason")
+
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  tokens RefreshToken[]
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+/// section 40.6 M2-S2, section 10.3: one rotating opaque refresh token. Only the
+/// SHA-256 hex digest is persisted (`token_hash`); the token itself exists only in
+/// the response body and is never logged or stored in clear.
+///
+/// `consumed_at` + `successor_id` is the rotation chain: consuming a token marks
+/// it used and links the replacement that replaced it. Presenting a token that is
+/// already consumed is a **reuse** signal, and the service revokes the family.
+/// The CHECK `chk_refresh_tokens_consumed_has_successor` makes "consumed implies a
+/// successor" a database fact.
+model RefreshToken {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId     String    @map("session_id") @db.Uuid
+  tokenHash     String    @unique @map("token_hash") @db.Char(64)
+  issuedAt      DateTime  @default(now()) @map("issued_at") @db.Timestamptz(6)
+  idleExpiresAt DateTime  @map("idle_expires_at") @db.Timestamptz(6)
+  consumedAt    DateTime? @map("consumed_at") @db.Timestamptz(6)
+  successorId   String?   @unique @map("successor_id") @db.Uuid
+
+  session     Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  successor   RefreshToken? @relation("RefreshTokenSuccessor", fields: [successorId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  predecessor RefreshToken? @relation("RefreshTokenSuccessor")
+
+  @@index([sessionId])
+  @@map("refresh_tokens")
+}
+
+/// section 40.6 M2-S2, section 10.2: bounded failed-attempt backoff. The key is a
+/// caller-derived scope (the canonical email for account lockout, and separately
+/// the client address) so one primitive throttles both. `blocked_until` is always
+/// bounded in the future by the service, so a lockout is never permanent and an
+/// administrative unlock is possible by deleting the row.
+model AuthThrottle {
+  key            String    @id
+  failureCount   Int       @map("failure_count")
+  firstFailureAt DateTime  @map("first_failure_at") @db.Timestamptz(6)
+  lastFailureAt  DateTime  @map("last_failure_at") @db.Timestamptz(6)
+  blockedUntil   DateTime? @map("blocked_until") @db.Timestamptz(6)
+
+  @@map("auth_throttles")
 }

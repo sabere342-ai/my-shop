@@ -27,11 +27,11 @@
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { PrismaClient, type Prisma } from '@prisma/client';
-import { loadConfig } from '../../src/common/config/app.config';
+import { loadConfig, type AppConfigShape } from '../../src/common/config/app.config';
 import { PrismaService } from '../../src/common/database/prisma.service';
 import { ERROR_CODES } from '../../src/common/errors/problem';
 import { MutationContradictionError, MutationRejectedError } from '../../src/common/sync/ledger/mutation-ledger.errors';
@@ -57,6 +57,9 @@ import {
   type BootstrapConnectorFactory,
 } from '../../src/common/bootstrap/bootstrap-cli';
 import { BootstrapConflictError } from '../../src/common/bootstrap/organization-bootstrap.errors';
+import { PASSWORD_ENV_VAR, runCredentialCli, type CredentialCliIo } from '../../src/common/identity/credential-cli';
+import { hashPassword } from '../../src/common/identity/password';
+import { hashRefreshToken } from '../../src/common/identity/refresh-token';
 import {
   OrganizationBootstrapService,
   type BootstrapRequest,
@@ -255,13 +258,16 @@ describe('database acceptance (real PostgreSQL)', () => {
 
       // M1b-S4 adds the sync ledger migrations to M1-S3's skeleton; M2-S1 adds
       // `0003_organizations`, and its hardening adds `0004_bootstrap_key_shape`;
-      // every applied migration must be finished and never rolled back
+      // M2-S2 adds `0005_identity_auth` and `0006_users_permissions_version`.
+      // Every applied migration must be finished and never rolled back
       // (migration history is append-only, Master Plan §44.1).
       expect(rows.map((row) => row.migration_name)).toEqual([
         '0001_schema_skeleton',
         '0002_mutation_ledger',
         '0003_organizations',
         '0004_bootstrap_key_shape',
+        '0005_identity_auth',
+        '0006_users_permissions_version',
       ]);
       for (const row of rows) {
         expect(row.finished_at).not.toBeNull();
@@ -275,9 +281,12 @@ describe('database acceptance (real PostgreSQL)', () => {
       // §40.5): the idempotency table, the change feed, the per-device cursors,
       // and the per-organization sequence counter. M2-S1 authorizes the first
       // domain tables (§40.6, §8.4): `organizations` (tenant root), `users`
-      // (credential-free identity), and `organization_memberships`. Nothing else
-      // — M2-S2's credential columns, M2-S3's roles, and M2-S4's RLS all have
-      // their own slices and their own migrations.
+      // (credential-free identity), and `organization_memberships`. M2-S2
+      // authorizes the authentication tables (§40.6, §10.2, §10.3): the password
+      // credential, the session (refresh-token family), the refresh-token rotation
+      // chain, and the failed-attempt backoff. Nothing else — M2-S3's roles,
+      // M2-S4's RLS, and M2-S5's device enrolment all have their own slices and
+      // their own migrations.
       const rows = await migrator.$queryRaw<NameRow[]>`
         SELECT tablename FROM pg_tables
         WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'
@@ -285,12 +294,16 @@ describe('database acceptance (real PostgreSQL)', () => {
       `;
 
       expect(rows.map((row) => row.tablename)).toEqual([
+        'auth_throttles',
         'change_log',
         'device_sync_cursors',
         'mutation_ledger',
         'organization_memberships',
         'organizations',
+        'refresh_tokens',
+        'sessions',
         'sync_sequences',
+        'user_credentials',
         'users',
       ]);
     });
@@ -299,7 +312,7 @@ describe('database acceptance (real PostgreSQL)', () => {
       dbScript('deploy');
 
       const rows = await migrator.$queryRaw<MigrationRow[]>`SELECT migration_name FROM _prisma_migrations`;
-      expect(rows).toHaveLength(4);
+      expect(rows).toHaveLength(6);
     });
   });
 
@@ -1455,11 +1468,14 @@ describe('database acceptance (real PostgreSQL)', () => {
         { id: result.membershipId, organization_id: result.organizationId, user_id: result.userId, is_owner: true },
       ]);
 
-      // §8.4: the identity table is credential-free — exactly three columns.
+      // §8.4: the identity table stays credential-free — `users` holds no password
+      // or token. M2-S2 adds `permissions_version`, an authentication-adjacent
+      // generation counter (not a credential): the password lives in
+      // `user_credentials`, which M2-S2's `0005_identity_auth` creates.
       const columns = await migrator.$queryRaw<ColumnRow[]>`
         SELECT column_name FROM information_schema.columns
         WHERE table_schema = 'public' AND table_name = 'users' ORDER BY column_name`;
-      expect(columns.map((column) => column.column_name)).toEqual(['created_at', 'email', 'id']);
+      expect(columns.map((column) => column.column_name)).toEqual(['created_at', 'email', 'id', 'permissions_version']);
     });
 
     it('AC-02: an identical retry answers ALREADY_BOOTSTRAPPED with the stored ids and writes nothing', async () => {
@@ -1989,8 +2005,15 @@ describe('database acceptance (real PostgreSQL)', () => {
           VALUES (${fixtureOrganization}::uuid, 7)`;
 
         // The slice's migration now joins a history that is already in use,
-        // followed by its hardening migration 0004.
-        for (const migration of ['0003_organizations', '0004_bootstrap_key_shape']) {
+        // followed by its hardening migration 0004, followed by M2-S2's
+        // `0005_identity_auth` and `0006_users_permissions_version` — the same
+        // forward-only chain production replays.
+        for (const migration of [
+          '0003_organizations',
+          '0004_bootstrap_key_shape',
+          '0005_identity_auth',
+          '0006_users_permissions_version',
+        ]) {
           cpSync(
             path.join(API_ROOT, 'prisma', 'migrations', migration),
             path.join(scratchRoot, 'migrations', migration),
@@ -2011,6 +2034,8 @@ describe('database acceptance (real PostgreSQL)', () => {
           '0002_mutation_ledger',
           '0003_organizations',
           '0004_bootstrap_key_shape',
+          '0005_identity_auth',
+          '0006_users_permissions_version',
         ]);
 
         // Every pre-existing M1b row survives the upgrade untouched...
@@ -2090,5 +2115,444 @@ describe('database acceptance (real PostgreSQL)', () => {
         await destroyTestHarness(harness);
       }
     }, 60_000);
+  });
+
+  describe('identity, sessions, and refresh rotation (M2-S2)', () => {
+    /** The one identity this block provisions, authenticates, rotates, and revokes. */
+    const OWNER_EMAIL = 'owner.m2s2@example.test';
+    const PASSPHRASE = 'a-sufficiently-long-m2s2-passphrase';
+    const BOOTSTRAP_KEY = 'm2s2-identity-tenant';
+    const ORG_NAME = 'Identity Tenant';
+    const CONSTRAINT_EMAIL = 'constraint.m2s2@example.test';
+    const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    const BASE64URL = /^[A-Za-z0-9_-]+$/;
+    /** A syntactically valid, non-Argon2 credential used to prove the CHECK rejects it. */
+    const NOT_ARGON2ID = 'plaintext-password-or-md5';
+
+    let config: AppConfigShape;
+    let harness: TestHarness;
+    let ownerId: string;
+    let organizationId: string;
+    let constraintUserId: string;
+
+    interface ResponseRow {
+      n: number;
+    }
+
+    const captureBootstrap = (): { io: BootstrapCliIo; stdout: string[]; stderr: string[] } => {
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      return {
+        stdout,
+        stderr,
+        io: {
+          out: (line) => stdout.push(line),
+          err: (line) => stderr.push(line),
+        },
+      };
+    };
+
+    const captureCredential = (): { io: CredentialCliIo; stdout: string[]; stderr: string[] } => {
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      return {
+        stdout,
+        stderr,
+        io: {
+          out: (line) => stdout.push(line),
+          err: (line) => stderr.push(line),
+        },
+      };
+    };
+
+    /** Drives the real provisioning command against the real database (§10.2). */
+    const provision = async (
+      email: string,
+      password: string,
+    ): Promise<{ code: number; status: string | undefined; stderr: string[] }> => {
+      const { io, stdout, stderr } = captureCredential();
+      const code = await runCredentialCli(
+        ['--email', email],
+        { NODE_ENV: 'test', DATABASE_URL: urls.application, [PASSWORD_ENV_VAR]: password },
+        io,
+      );
+      const payload = JSON.parse(stdout[0] ?? '{}') as { status?: string };
+      return { code, status: payload.status, stderr };
+    };
+
+    const login = (email: string, password: string) =>
+      harness.http.post('/api/v1/auth/login').send({ email, password });
+
+    const refresh = (refreshToken: string) => harness.http.post('/api/v1/auth/refresh').send({ refreshToken });
+
+    const logout = (refreshToken: string) => harness.http.post('/api/v1/auth/logout').send({ refreshToken });
+
+    const me = (accessToken: string) =>
+      harness.http.get('/api/v1/auth/me').set('Authorization', `Bearer ${accessToken}`);
+
+    /** The throttle is process-global, so each flow starts from a clean run. */
+    const clearThrottle = async (): Promise<void> => {
+      await migrator.$executeRaw`DELETE FROM auth_throttles`;
+    };
+
+    /**
+     * Asserts a statement is *rejected* by the database. The transaction always rolls
+     * back, so a broken constraint leaves nothing behind for the next case.
+     */
+    const expectDbRejects = async (run: (tx: Prisma.TransactionClient) => Promise<unknown>): Promise<void> => {
+      let rejected = false;
+      try {
+        await migrator.$transaction(async (tx) => {
+          try {
+            await run(tx);
+          } catch (error) {
+            rejected = true;
+            throw error;
+          }
+          throw new Error('the statement was admitted but the constraint should have rejected it');
+        });
+      } catch {
+        /* rolled back either way */
+      }
+      expect(rejected).toBe(true);
+    };
+
+    /** Asserts a statement is *admitted*, then rolls back so nothing is committed. */
+    const expectDbAdmits = async (run: (tx: Prisma.TransactionClient) => Promise<unknown>): Promise<void> => {
+      let admitted = false;
+      try {
+        await migrator.$transaction(async (tx) => {
+          await run(tx);
+          admitted = true;
+          throw new Error('rollback');
+        });
+      } catch {
+        /* rolled back */
+      }
+      expect(admitted).toBe(true);
+    };
+
+    beforeAll(async () => {
+      // 1. The tenant and its owner, through the real M2-S1 command line.
+      const bootstrap = captureBootstrap();
+      const bootstrapped = await runBootstrapCli(
+        ['--bootstrap-key', BOOTSTRAP_KEY, '--name', ORG_NAME, '--owner-email', OWNER_EMAIL],
+        { MIGRATION_DATABASE_URL: urls.migration },
+        bootstrap.io,
+      );
+      expect(bootstrapped).toBe(EXIT_SUCCESS);
+      const result = JSON.parse(bootstrap.stdout[0] ?? '{}') as BootstrapResult;
+      ownerId = result.userId;
+      organizationId = result.organizationId;
+      expect(ownerId).toMatch(UUID_PATTERN);
+
+      // 2. The password, through the real M2-S2 provisioning command.
+      const provisioned = await provision(OWNER_EMAIL, PASSPHRASE);
+      expect(provisioned.code).toBe(0);
+      expect(provisioned.status).toBe('CREATED');
+
+      // A second identity, used only by the constraint cases (it stays credential-free
+      // until a constraint case adds one and rolls back).
+      const constraintUser = await migrator.user.create({ data: { email: CONSTRAINT_EMAIL } });
+      constraintUserId = constraintUser.id;
+
+      // 3. The application graph, with a per-run key pair (§13.6: the key exists only
+      //    for the life of this process) and the lowest permitted Argon2id cost.
+      const { privateKey, publicKey } = generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      });
+      config = loadConfig({
+        NODE_ENV: 'test',
+        LOG_LEVEL: 'silent',
+        LOG_PRETTY: 'false',
+        DATABASE_URL: urls.application,
+        JWT_PRIVATE_KEY: Buffer.from(privateKey, 'utf8').toString('base64'),
+        JWT_PUBLIC_KEY: Buffer.from(publicKey, 'utf8').toString('base64'),
+        ARGON2_MEMORY_KIB: '8192',
+        ARGON2_TIME_COST: '1',
+      });
+      harness = await createTestHarness(config);
+    }, 180_000);
+
+    afterAll(async () => {
+      await destroyTestHarness(harness);
+    });
+
+    it('AC-19: login returns a token pair and /me resolves the verified identity', async () => {
+      await clearThrottle();
+
+      const response = await login(OWNER_EMAIL, PASSPHRASE).expect(200);
+      const tokens = response.body as { accessToken: string; refreshToken: string };
+      expect(response.body.tokenType).toBe('Bearer');
+      expect(response.body.expiresIn).toBe(900);
+      expect(response.body.refreshExpiresIn).toBe(604_800);
+      expect(tokens.refreshToken).toMatch(BASE64URL);
+      expect(tokens.refreshToken).toHaveLength(43);
+      expect(tokens.accessToken.split('.')).toHaveLength(3);
+
+      const identity = await me(tokens.accessToken).expect(200);
+      expect(identity.body).toMatchObject({
+        userId: ownerId,
+        email: OWNER_EMAIL,
+        sessionId: expect.stringMatching(UUID_PATTERN),
+        permissionsVersion: 0,
+      });
+      expect(identity.body.organizations).toEqual([organizationId]);
+
+      // The stored form is the digest, never the token (§10.3).
+      const stored = await migrator.$queryRaw<ResponseRow[]>`
+        SELECT count(*)::int AS n FROM refresh_tokens WHERE token_hash = ${hashRefreshToken(response.body.refreshToken as string)}`;
+      expect(stored[0]?.n).toBe(1);
+      const sessions = await migrator.$queryRaw<ResponseRow[]>`
+        SELECT count(*)::int AS n FROM sessions WHERE user_id = ${ownerId}::uuid AND revoked_at IS NULL`;
+      expect(sessions[0]?.n).toBe(1);
+    }, 60_000);
+
+    it('AC-20/AC-21: refresh rotates, and re-presenting a rotated token revokes the whole family', async () => {
+      await clearThrottle();
+
+      const first = await login(OWNER_EMAIL, PASSPHRASE).expect(200);
+      const firstRefresh = first.body.refreshToken as string;
+
+      const rotated = await refresh(firstRefresh).expect(200);
+      expect(rotated.body.refreshToken).not.toBe(firstRefresh);
+
+      // The consumed token now points forward in the chain, so the next presentation
+      // is a definite reuse signal rather than a guess.
+      const consumed = await migrator.$queryRaw<{ consumed_at: Date | null; successor_id: string | null }[]>`
+        SELECT consumed_at, successor_id FROM refresh_tokens WHERE token_hash = ${hashRefreshToken(firstRefresh)}`;
+      expect(consumed[0]?.consumed_at).not.toBeNull();
+      expect(consumed[0]?.successor_id).toMatch(UUID_PATTERN);
+
+      // Reuse: the whole family is revoked, and the refusal is a plain UNAUTHENTICATED.
+      const reuse = await refresh(firstRefresh).expect(401);
+      expect(reuse.body.code).toBe('UNAUTHENTICATED');
+
+      const revoked = await migrator.$queryRaw<{ revoked_reason: string | null }[]>`
+        SELECT revoked_reason FROM sessions WHERE user_id = ${ownerId}::uuid
+        ORDER BY created_at DESC LIMIT 1`;
+      expect(revoked[0]?.revoked_reason).toBe('REUSE_DETECTED');
+
+      // The successor is dead too — the revocation is the family, not the token.
+      await refresh(rotated.body.refreshToken as string).expect(401);
+      // And the unexpired access token minted before the reuse is refused immediately.
+      await me(rotated.body.accessToken as string).expect(401);
+    }, 60_000);
+
+    it('AC-22: logout revokes the family, invalidating its tokens at once and idempotently', async () => {
+      await clearThrottle();
+
+      const session = await login(OWNER_EMAIL, PASSPHRASE).expect(200);
+      const refreshToken = session.body.refreshToken as string;
+
+      await logout(refreshToken).expect(204);
+      await me(session.body.accessToken as string).expect(401);
+      await refresh(refreshToken).expect(401);
+
+      // A second logout is a success, not an error: logout is never a validity oracle.
+      await logout(refreshToken).expect(204);
+      const stored = await migrator.$queryRaw<{ revoked_reason: string | null }[]>`
+        SELECT revoked_reason FROM sessions WHERE user_id = ${ownerId}::uuid
+        ORDER BY created_at DESC LIMIT 1`;
+      expect(stored[0]?.revoked_reason).toBe('LOGOUT');
+    }, 60_000);
+
+    it('AC-23: an unknown account and a wrong password are the same refusal — no enumeration', async () => {
+      await clearThrottle();
+
+      const unknown = await login('nobody.m2s2@example.test', PASSPHRASE).expect(401);
+      const wrong = await login(OWNER_EMAIL, 'a-different-long-passphrase').expect(401);
+
+      expect(unknown.body.code).toBe('UNAUTHENTICATED');
+      // The two problem documents are identical except for the per-request traceId.
+      const { traceId: unknownTrace, ...unknownRest } = unknown.body as Record<string, unknown>;
+      const { traceId: wrongTrace, ...wrongRest } = wrong.body as Record<string, unknown>;
+      expect(unknownTrace).toBeDefined();
+      expect(wrongTrace).toBeDefined();
+      expect(unknownRest).toEqual(wrongRest);
+    }, 60_000);
+
+    it('AC-24: an unrecognised refresh token is refused UNAUTHENTICATED and safe to log out', async () => {
+      await clearThrottle();
+      const unknown = 'z'.repeat(43);
+
+      const response = await refresh(unknown).expect(401);
+      expect(response.body.code).toBe('UNAUTHENTICATED');
+      await logout(unknown).expect(204);
+    }, 60_000);
+
+    it('AC-25/AC-26: the failed-attempt backoff blocks after the free attempts and is administratively unlockable', async () => {
+      await clearThrottle();
+
+      // 5 free attempts (the configured AUTH_THROTTLE_FREE_ATTEMPTS) do not block.
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await login(OWNER_EMAIL, 'a-wrong-but-long-passphrase').expect(401);
+      }
+
+      const blocked = await login(OWNER_EMAIL, PASSPHRASE).expect(429);
+      expect(blocked.body.code).toBe('RATE_LIMITED');
+
+      const row = await migrator.$queryRaw<{ failure_count: number; blocked_until: Date | null }[]>`
+        SELECT failure_count, blocked_until FROM auth_throttles WHERE key = ${`login:account:${OWNER_EMAIL}`}`;
+      expect(row[0]?.failure_count).toBe(5);
+      expect(row[0]?.blocked_until).not.toBeNull();
+
+      // The administrative unlock is deleting the row (§10.2: the block is bounded).
+      await migrator.$executeRaw`DELETE FROM auth_throttles`;
+      await login(OWNER_EMAIL, PASSPHRASE).expect(200);
+    }, 60_000);
+
+    it('AC-27: a permissions change makes an outstanding access token TOKEN_STALE', async () => {
+      await clearThrottle();
+      const session = await login(OWNER_EMAIL, PASSPHRASE).expect(200);
+
+      await migrator.$executeRaw`UPDATE users SET permissions_version = permissions_version + 1 WHERE id = ${ownerId}::uuid`;
+
+      const stale = await me(session.body.accessToken as string).expect(401);
+      expect(stale.body.code).toBe('TOKEN_STALE');
+    }, 60_000);
+
+    it('AC-28: an idle-expired refresh token is refused TOKEN_EXPIRED', async () => {
+      await clearThrottle();
+
+      const token = 'E'.repeat(43);
+      const now = new Date();
+      const session = await migrator.session.create({
+        data: {
+          userId: ownerId,
+          createdAt: new Date(now.getTime() - 7_200_000),
+          lastUsedAt: new Date(now.getTime() - 7_200_000),
+          absoluteExpiresAt: new Date(now.getTime() + 2_592_000_000),
+        },
+        select: { id: true },
+      });
+      await migrator.refreshToken.create({
+        data: {
+          sessionId: session.id,
+          tokenHash: hashRefreshToken(token),
+          issuedAt: new Date(now.getTime() - 7_200_000),
+          idleExpiresAt: new Date(now.getTime() - 3_600_000),
+        },
+      });
+
+      const response = await refresh(token).expect(401);
+      expect(response.body.code).toBe('TOKEN_EXPIRED');
+
+      await migrator.session.delete({ where: { id: session.id } });
+    }, 60_000);
+
+    it('AC-29: the provisioning command stores an Argon2id credential and rotates it on re-run', async () => {
+      await clearThrottle();
+
+      const stored = await migrator.$queryRaw<{ password_hash: string }[]>`
+        SELECT password_hash FROM user_credentials WHERE user_id = ${ownerId}::uuid`;
+      expect(stored[0]?.password_hash.startsWith('$argon2id$')).toBe(true);
+
+      const rotated = await provision(OWNER_EMAIL, PASSPHRASE);
+      expect(rotated.code).toBe(0);
+      expect(rotated.status).toBe('ROTATED');
+      expect(rotated.stderr).toEqual([]);
+
+      // The rotated credential still verifies the same password, so login succeeds.
+      await login(OWNER_EMAIL, PASSPHRASE).expect(200);
+    }, 60_000);
+
+    describe('database invariants (the CHECK constraints the service relies on)', () => {
+      it('user_credentials admits only an Argon2id PHC string', async () => {
+        const realHash = await hashPassword('a-real-argon2id-candidate', {
+          memoryKib: 8192,
+          timeCost: 1,
+          parallelism: 1,
+        });
+
+        await expectDbRejects(
+          (tx) =>
+            tx.$executeRaw`INSERT INTO user_credentials (user_id, password_hash) VALUES (${constraintUserId}::uuid, ${NOT_ARGON2ID})`,
+        );
+        await expectDbRejects(
+          (tx) =>
+            tx.$executeRaw`INSERT INTO user_credentials (user_id, password_hash) VALUES (${constraintUserId}::uuid, ${'$argon2i$v=19$m=8192,t=1,p=1$c2FsdA$aGFzaA'})`,
+        );
+        await expectDbAdmits(
+          (tx) =>
+            tx.$executeRaw`INSERT INTO user_credentials (user_id, password_hash) VALUES (${constraintUserId}::uuid, ${realHash})`,
+        );
+      }, 60_000);
+
+      it('users.permissions_version never goes negative', async () => {
+        await expectDbRejects(
+          (tx) => tx.$executeRaw`UPDATE users SET permissions_version = -1 WHERE id = ${constraintUserId}::uuid`,
+        );
+        await expectDbAdmits(
+          (tx) => tx.$executeRaw`UPDATE users SET permissions_version = 0 WHERE id = ${constraintUserId}::uuid`,
+        );
+      }, 60_000);
+
+      it('a session revocation always carries a reason from the closed vocabulary', async () => {
+        const now = new Date();
+        const base = (tx: Prisma.TransactionClient, revoked: Date | null, reason: string | null) =>
+          tx.$executeRaw`INSERT INTO sessions (user_id, created_at, last_used_at, absolute_expires_at, revoked_at, revoked_reason)
+            VALUES (${constraintUserId}::uuid, ${now}, ${now}, ${new Date(now.getTime() + 86_400_000)}, ${revoked}, ${reason})`;
+
+        // revoked_at set, reason absent → rejected (the NULL-safe predicate the migration documents).
+        await expectDbRejects((tx) => base(tx, now, null));
+        // reason set, revoked_at absent → rejected (the two columns move together).
+        await expectDbRejects((tx) => base(tx, null, 'LOGOUT'));
+        // reason outside the vocabulary → rejected.
+        await expectDbRejects((tx) => base(tx, now, 'NONSENSE'));
+        // active session, and a proper revocation → both admitted.
+        await expectDbAdmits((tx) => base(tx, null, null));
+        await expectDbAdmits((tx) => base(tx, now, 'REUSE_DETECTED'));
+      }, 60_000);
+
+      it('a session absolute ceiling is strictly after its creation', async () => {
+        const now = new Date();
+        await expectDbRejects(
+          (tx) =>
+            tx.$executeRaw`INSERT INTO sessions (user_id, created_at, last_used_at, absolute_expires_at)
+              VALUES (${constraintUserId}::uuid, ${now}, ${now}, ${now})`,
+        );
+      }, 60_000);
+
+      it('a consumed refresh token always has a successor', async () => {
+        const session = await migrator.session.create({
+          data: {
+            userId: constraintUserId,
+            absoluteExpiresAt: new Date(Date.now() + 86_400_000),
+          },
+          select: { id: true },
+        });
+        const now = new Date();
+        const insert = (tx: Prisma.TransactionClient, consumed: Date | null) =>
+          tx.$executeRaw`INSERT INTO refresh_tokens (session_id, token_hash, issued_at, idle_expires_at, consumed_at)
+            VALUES (${session.id}::uuid, ${'a'.repeat(64)}, ${now}, ${new Date(now.getTime() + 86_400_000)}, ${consumed})`;
+
+        await expectDbRejects((tx) => insert(tx, now));
+        await expectDbAdmits((tx) => insert(tx, null));
+
+        await migrator.session.delete({ where: { id: session.id } });
+      }, 60_000);
+
+      it('a throttle row records a positive failure count with an ordered window', async () => {
+        const now = new Date();
+        await expectDbRejects(
+          (tx) =>
+            tx.$executeRaw`INSERT INTO auth_throttles (key, failure_count, first_failure_at, last_failure_at)
+              VALUES (${'constraint:m2s2'}, 0, ${now}, ${now})`,
+        );
+        await expectDbRejects(
+          (tx) =>
+            tx.$executeRaw`INSERT INTO auth_throttles (key, failure_count, first_failure_at, last_failure_at)
+              VALUES (${'constraint:m2s2'}, 1, ${now}, ${new Date(now.getTime() - 1000)})`,
+        );
+        await expectDbAdmits(
+          (tx) =>
+            tx.$executeRaw`INSERT INTO auth_throttles (key, failure_count, first_failure_at, last_failure_at)
+              VALUES (${'constraint:m2s2'}, 1, ${now}, ${now})`,
+        );
+      }, 60_000);
+    });
   });
 });

@@ -28,6 +28,7 @@ import { DatabaseModule } from './common/database/database.module';
 import { LedgerModule } from './common/sync/ledger/mutation-ledger.module';
 import { PullModule } from './common/sync/pull/sync-pull.module';
 import { PushModule } from './common/sync/push/sync-push.module';
+import { IdentityModule } from './common/identity/identity.module';
 import { ProblemDetailsFilter } from './common/errors/problem.filter';
 import { createValidationPipe } from './common/pipes/validation.pipe';
 import { APP_LOGGER, createAppLogger } from './app.providers';
@@ -70,13 +71,17 @@ export class AppModule {
       // sync route: `POST /api/v1/sync/push`, guarded and fail-closed until M2
       // supplies real identity (§38.10.1, §38.16). The pull module (M1b-S6) is
       // the matching egress: `GET /api/v1/sync/pull` reads the same change feed,
-      // guarded and fail-closed the same way (§38.11.2, §38.16).
+      // guarded and fail-closed the same way (§38.11.2, §38.16). The identity
+      // module (M2-S2) is the first real authentication surface: `/api/v1/auth/*`
+      // issues, rotates, and revokes the tokens the sync guards will consume
+      // (§10.1–§10.3, §40.6).
       imports: [
         HealthModule,
         DatabaseModule.forRoot(config),
         LedgerModule.forRoot(config),
         PushModule.forRoot(config),
         PullModule.forRoot(config),
+        IdentityModule.forRoot(config),
       ],
       providers: coreProviders(config),
       exports: [APP_CONFIG, APP_LOGGER],

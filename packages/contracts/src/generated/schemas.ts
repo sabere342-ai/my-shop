@@ -10,6 +10,27 @@ export interface LivenessReport {
   readonly status: 'ok';
 }
 
+/** OpenAPI schema `LoginRequest` (Master Plan §7.1, ADR-001). */
+export interface LoginRequest {
+  readonly email: string;
+  readonly password: string;
+}
+
+/** OpenAPI schema `LogoutRequest` (Master Plan §7.1, ADR-001). */
+export interface LogoutRequest {
+  readonly refreshToken: string;
+}
+
+/** OpenAPI schema `MeResponse` (Master Plan §7.1, ADR-001). */
+export interface MeResponse {
+  readonly userId: string;
+  readonly email: string;
+  readonly organizations: readonly unknown[];
+  readonly sessionId: string;
+  readonly permissionsVersion: number;
+  readonly expiresAt: string;
+}
+
 /** OpenAPI schema `MutationId` (Master Plan §7.1, ADR-001). */
 export type MutationId = string;
 
@@ -127,6 +148,20 @@ export interface ReadinessReport {
   readonly checks: Readonly<Record<string, ReadinessDetail>>;
 }
 
+/** OpenAPI schema `RefreshRequest` (Master Plan §7.1, ADR-001). */
+export interface RefreshRequest {
+  readonly refreshToken: string;
+}
+
 /** OpenAPI schema `SyncState` (Master Plan §7.1, ADR-001). */
 export type SyncState =
   'LOCAL_ONLY' | 'PENDING' | 'SYNCING' | 'SYNCED' | 'RETRYABLE_ERROR' | 'CONFLICT' | 'PERMANENT_REJECTED';
+
+/** OpenAPI schema `TokenResponse` (Master Plan §7.1, ADR-001). */
+export interface TokenResponse {
+  readonly accessToken: string;
+  readonly tokenType: 'Bearer';
+  readonly expiresIn: number;
+  readonly refreshToken: string;
+  readonly refreshExpiresIn: number;
+}
