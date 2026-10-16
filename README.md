@@ -137,6 +137,50 @@ The target database must already exist: neither role may create one (§13.4), so
 `db:bootstrap`/`db:migrate` fail with a clear error until it does. Locally,
 `node scripts/db.mjs test-setup` (from `services/api`) creates it first.
 
+### Credential provisioning
+
+The organization bootstrap (above) creates the owner **without** a password. Setting
+or rotating that owner's password is a second **operator command, not an API**
+(Master Plan §10.2, §10.4). It reads the password from `PROVISION_PASSWORD` in the
+environment only — never from an argument, never printed, never falling back to
+`MIGRATION_DATABASE_URL`:
+
+```bash
+PROVISION_PASSWORD='a-sufficiently-long-passphrase' \
+  npm run provision:credential -- --email owner@example.com
+```
+
+The stored credential is an Argon2id PHC string; the command refuses a password that
+fails the §10.2 policy (minimum length, no composition rules) and, by construction,
+never lets a password or hash reach stdout, stderr, or a log line. Exit codes match
+the bootstrap command: `0` success, `1` runtime failure, `2` usage, input, or
+configuration refused, with exactly one JSON object on the matching stream.
+
+The successful login path **cannot** be exercised without a session, and the secret
+key pair is required: set `JWT_PRIVATE_KEY`/`JWT_PUBLIC_KEY` (base64 of PEM text) in
+the environment before starting the API in any environment where login is expected.
+When either is absent outside production, the authentication surface is fail-closed —
+no token can be minted or approved, and the affected requests are refused `503`.
+
+### Authentication surface (§10.3)
+
+Once a credential exists and a key pair is configured, the API exposes the four
+versioned, unauthenticated-at-the-transport-level endpoints (the bearer requirement
+is per route):
+
+| Method | Path                    | Purpose                                                       |
+| ------ | ----------------------- | ------------------------------------------------------------- |
+| `POST` | `/api/v1/auth/login`    | Exchange an email and password for an access/refresh pair.    |
+| `POST` | `/api/v1/auth/refresh`  | Rotate a refresh token; the presented token is consumed.      |
+| `POST` | `/api/v1/auth/logout`   | Revoke the session family a refresh token belongs to.         |
+| `GET`  | `/api/v1/auth/me`       | The verified identity behind a `Bearer` access token.         |
+
+Refresh rotation records a chain: re-presenting an already-consumed token is a
+definite reuse signal and revokes the **entire session family** (Master Plan §40.6,
+the slice's key acceptance). The access token is a short-lived RS256 JWT whose
+organization and session claims are read from the verified token, never from a
+request body.
+
 The root `npm test` runs the database acceptance suite, which drops and recreates a
 fixed database named `my_shop_test`. It therefore requires `DATABASE_URL`,
 `MIGRATION_DATABASE_URL`, and `ADMIN_DATABASE_URL` to be set **and to name that
