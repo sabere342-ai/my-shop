@@ -24,6 +24,8 @@
     "test:cov": "jest --coverage",
     "db:migrate": "node scripts/db.mjs",
     "db:bootstrap": "node scripts/db.mjs bootstrap",
+    "bootstrap:org": "node scripts/org-bootstrap.mjs",
+    "prebootstrap:org": "npm run build",
     "postinstall": "prisma generate"
   },
   "dependencies": {

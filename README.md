@@ -117,6 +117,22 @@ npm run db:migrate          # prisma migrate deploy, as the migrator role
 npm run db:migrate -- dev   # create a migration — local development only (§8.3)
 ```
 
+The one-time organization bootstrap is an **operator command, not an API**
+(Master Plan §10.4). It runs as the migrator role and reads its credential from
+`MIGRATION_DATABASE_URL` only — never from an argument, never printed, and never
+falling back to `DATABASE_URL`:
+
+```bash
+npm run bootstrap:org -- --bootstrap-key main-shop --name "Main Shop" --owner-email owner@example.com
+```
+
+One transaction creates the organization, its owner user, and the owner
+membership. Re-running the identical command is a no-op; reusing
+`--bootstrap-key` with different parameters is refused and nothing is adopted.
+Exit codes are `0` success (including an idempotent retry), `1` runtime failure,
+`2` usage, input, or configuration refused, and `3` conflicting retry, with
+exactly one JSON object on stdout (success) or stderr (refusal).
+
 The target database must already exist: neither role may create one (§13.4), so
 `db:bootstrap`/`db:migrate` fail with a clear error until it does. Locally,
 `node scripts/db.mjs test-setup` (from `services/api`) creates it first.

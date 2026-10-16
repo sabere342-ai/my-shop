@@ -32,6 +32,7 @@
     "build": "npm run build --workspace @my-shop/contracts && npm run build --workspace @my-shop/testkit && npm run build --workspace @my-shop/api",
     "db:bootstrap": "npm run db:bootstrap --workspace @my-shop/api",
     "db:migrate": "npm run db:migrate --workspace @my-shop/api --",
+    "bootstrap:org": "npm run bootstrap:org --workspace @my-shop/api --",
     "gate:secret-scan": "node ./tool/ci/secret-scan.mjs",
     "gate:markdown": "node ./tool/ci/markdown-check.mjs",
     "gate:import-boundary": "node ./tool/ci/import-boundary.mjs",

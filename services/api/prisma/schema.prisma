@@ -1,4 +1,5 @@
-// My Shop — Prisma schema (Master Plan section 40.4, slices M1-S3 and M1b-S4).
+// My Shop — Prisma schema (Master Plan section 40.4, slices M1-S3, M1b-S4 and
+// M2-S1).
 //
 // section 8.3 makes `prisma migrate deploy` the only migration command permitted
 // outside a developer machine, and section 35 keeps migrations forward-only: this
@@ -46,16 +47,16 @@ enum MutationLedgerStatus {
 /// `payload_hash` is SHA-256 over the canonical payload; `result_hash` over the
 /// resulting state, so a genuine contradiction is distinguishable from a replay.
 model MutationLedger {
-  organizationId String   @map("organization_id") @db.Uuid
-  mutationId     String   @map("mutation_id") @db.Uuid
-  deviceId       String   @map("device_id") @db.Uuid
-  receivedAt     DateTime @map("received_at") @db.Timestamptz(6)
-  payloadHash    String   @map("payload_hash") @db.VarChar(64)
-  resultRef      String?  @map("result_ref")
-  resultHash     String?  @map("result_hash") @db.VarChar(64)
-  serverSequence BigInt?  @map("server_sequence")
+  organizationId String               @map("organization_id") @db.Uuid
+  mutationId     String               @map("mutation_id") @db.Uuid
+  deviceId       String               @map("device_id") @db.Uuid
+  receivedAt     DateTime             @map("received_at") @db.Timestamptz(6)
+  payloadHash    String               @map("payload_hash") @db.VarChar(64)
+  resultRef      String?              @map("result_ref")
+  resultHash     String?              @map("result_hash") @db.VarChar(64)
+  serverSequence BigInt?              @map("server_sequence")
   status         MutationLedgerStatus
-  rejectionCode  String?  @map("rejection_code")
+  rejectionCode  String?              @map("rejection_code")
 
   @@id([organizationId, mutationId])
   @@index([organizationId, deviceId])
@@ -85,11 +86,11 @@ model ChangeLog {
 /// backwards); `last_pull` is the pull-resume cursor (section 38.11.2), advanced
 /// only after a batch is applied locally.
 model DeviceSyncCursor {
-  organizationId          String   @map("organization_id") @db.Uuid
-  deviceId                String   @map("device_id") @db.Uuid
-  lastPushedServerSequence BigInt? @map("last_pushed_server_sequence")
-  lastPullServerSequence  BigInt   @default(0) @map("last_pull_server_sequence")
-  updatedAt               DateTime @map("updated_at") @db.Timestamptz(6)
+  organizationId           String   @map("organization_id") @db.Uuid
+  deviceId                 String   @map("device_id") @db.Uuid
+  lastPushedServerSequence BigInt?  @map("last_pushed_server_sequence")
+  lastPullServerSequence   BigInt   @default(0) @map("last_pull_server_sequence")
+  updatedAt                DateTime @map("updated_at") @db.Timestamptz(6)
 
   @@id([organizationId, deviceId])
   @@map("device_sync_cursors")
@@ -103,4 +104,81 @@ model SyncSequence {
 
   @@id([organizationId])
   @@map("sync_sequences")
+}
+
+/// section 40.6 M2-S1: lifecycle state of a tenant root aggregate. A closed
+/// vocabulary (§35.1): adding a value is a new forward-only migration.
+/// The deactivation *workflow* is out of scope here — only the state exists.
+enum OrganizationStatus {
+  ACTIVE
+  DEACTIVATED
+
+  @@map("organization_status")
+}
+
+/// section 40.6 M2-S1, §9.2 T-1/T-6: the tenant root aggregate — the boundary
+/// every organization-scoped table inherits.
+///
+/// `bootstrap_key` is the DB-enforced idempotency key (§10.4) of the
+/// operator-only bootstrap command: one row may ever carry a key, so an
+/// identical retry is classified from the stored row and a conflicting retry
+/// fails on the unique constraint instead of being adopted or overwritten.
+/// It is never read from a request body (§39.2: no client-supplied tenant or
+/// idempotency identifiers).
+///
+/// `name` is intentionally **not** globally unique (§9.2 T-7): a global name
+/// unique would later leak another tenant's existence through a uniqueness
+/// violation. Uniqueness lives only where it is operationally required.
+///
+/// Ownership is expressed solely by `organization_memberships.is_owner`
+/// (partial unique index) — one source of truth, no dual owner columns.
+model Organization {
+  id           String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name         String             @db.VarChar(200)
+  status       OrganizationStatus @default(ACTIVE)
+  bootstrapKey String             @unique @map("bootstrap_key") @db.VarChar(64)
+  createdAt    DateTime           @default(now()) @map("created_at") @db.Timestamp(3)
+
+  memberships OrganizationMembership[]
+
+  @@map("organizations")
+}
+
+/// section 40.6 M2-S1 identity foundation, §8.4: credential-free on purpose.
+/// Email is stored canonicalized (trim + lowercase) — the natural key, and the
+/// narrow seam M2-S2 will reuse for login. Password material, sessions, tokens,
+/// and roles arrive with M2-S2/M2-S3 in their own migrations, never here.
+model User {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email     String   @unique @db.VarChar(320)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+
+  memberships OrganizationMembership[]
+
+  @@map("users")
+}
+
+/// §9.2 T-2/T-5 (one owner) and T-4 (multi-org membership): the membership
+/// edge. The partial unique index `uq_organizations_single_owner
+/// (organization_id) WHERE is_owner` is the single ownership source of truth —
+/// a second owner row fails in PostgreSQL no matter what the caller believes.
+///
+/// `ON DELETE RESTRICT` keeps tenant history referential: an organization or
+/// user that still has memberships can never be deleted out from under them.
+/// Cross-slice `organization_id` columns (sync tables) intentionally carry no
+/// FK — merged migrations are immutable (§35.1) and FK-free sync writes stay
+/// available during bootstrap.
+model OrganizationMembership {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  isOwner        Boolean  @default(false) @map("is_owner")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("organization_memberships")
 }
