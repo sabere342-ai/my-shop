@@ -97,11 +97,16 @@ describe('access token (RS256)', () => {
   it('refuses a tampered signature', () => {
     const token = service.sign(CLAIMS, BASE);
     const parts = token.split('.');
-    const signature = parts[2] ?? '';
-    const flipped = `${signature.slice(0, -1)}${signature.endsWith('A') ? 'B' : 'A'}`;
-    const tampered = `${parts[0]}.${parts[1]}.${flipped}`;
+    // Flip a bit in the *first* byte of the signature. Flipping the last base64url
+    // character instead is a no-op on roughly one run in four: the final character
+    // of a 2048-bit signature carries only two significant bits, so `A` and `B`
+    // decode to the same byte, the signature still verifies, and the verifier moves
+    // on to the (wall-clock) expiry check. A whole-byte change always invalidates it.
+    const bytes = Buffer.from(parts[2] ?? '', 'base64url');
+    bytes[0] = (bytes[0] ?? 0) ^ 0x01;
+    const tampered = `${parts[0]}.${parts[1]}.${bytes.toString('base64url')}`;
 
-    expectDomainError(() => service.verify(tampered), ERROR_CODES.UNAUTHENTICATED);
+    expectDomainError(() => service.verify(tampered, BASE), ERROR_CODES.UNAUTHENTICATED);
   });
 
   it('refuses an `alg: none` header before any verification runs', () => {
@@ -116,17 +121,23 @@ describe('access token (RS256)', () => {
       exp: Math.floor(BASE.getTime() / 1000) + 900,
     })}.`;
 
-    expectDomainError(() => service.verify(forged), ERROR_CODES.UNAUTHENTICATED);
+    expectDomainError(() => service.verify(forged, BASE), ERROR_CODES.UNAUTHENTICATED);
   });
 
   it('refuses a token issued for a foreign issuer or audience', () => {
-    const foreign = createAccessTokenService({ ...IDENTITY, jwtIssuer: 'someone-else' });
-    expectDomainError(() => service.verify(foreign.sign(CLAIMS, BASE)), ERROR_CODES.UNAUTHENTICATED);
+    // Same key pair, a different `iss`/`aud`: the signature verifies, so this
+    // exercises the issuer and audience checks themselves rather than merely the
+    // signature check a foreign key would trip first.
+    const foreignIssuer = createAccessTokenService({ ...IDENTITY, jwtIssuer: 'someone-else' });
+    expectDomainError(() => service.verify(foreignIssuer.sign(CLAIMS, BASE), BASE), ERROR_CODES.UNAUTHENTICATED);
+
+    const foreignAudience = createAccessTokenService({ ...IDENTITY, jwtAudience: 'someone-else' });
+    expectDomainError(() => service.verify(foreignAudience.sign(CLAIMS, BASE), BASE), ERROR_CODES.UNAUTHENTICATED);
   });
 
   it('refuses a token that is not a three-segment JWT', () => {
     for (const notAToken of ['', 'abc', 'a.b', 'a.b.c.d']) {
-      expectDomainError(() => service.verify(notAToken), ERROR_CODES.UNAUTHENTICATED);
+      expectDomainError(() => service.verify(notAToken, BASE), ERROR_CODES.UNAUTHENTICATED);
     }
   });
 
