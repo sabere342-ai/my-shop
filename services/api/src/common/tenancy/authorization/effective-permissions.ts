@@ -113,3 +113,15 @@ export function toPermissionSet(permissions: readonly PermissionId[]): ReadonlyS
 export function holdsPermission(permissions: readonly PermissionId[], id: PermissionId): boolean {
   return permissions.includes(id);
 }
+
+/**
+ * Orders any bag of ids into the canonical catalog order, dropping unknown ids.
+ *
+ * Used where a stored set is read back (a role's grants, an override list) so a
+ * view or a snapshot is byte-stable regardless of the order the database returned.
+ * An unknown id is dropped for the same fail-closed reason the resolver ignores it.
+ */
+export function orderPermissionIds(ids: Iterable<PermissionId>): readonly PermissionId[] {
+  const wanted = new Set(ids);
+  return Object.freeze(PERMISSION_IDS.filter((id) => wanted.has(id)));
+}
