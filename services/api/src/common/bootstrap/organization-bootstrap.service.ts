@@ -1,5 +1,6 @@
 /**
- * §40.6 M2-S1 / §10.4 — the operator-only organization bootstrap.
+ * §40.6 M2-S1 / §10.4 — the operator-only organization bootstrap, as the
+ * **composition root** of the tenancy and identity contexts.
  *
  * One command, one transaction, one durable answer. The invariants this
  * service is responsible for, and how each is enforced **in the database**
@@ -30,16 +31,37 @@
  *   class worth translating — a unique violation — is therefore translated
  *   *after* `$transaction` returns, from a fresh read outside it.
  *
+ * **Why this file lives under `bootstrap/`, not `tenancy/`.** §39.3 D-1 makes
+ * the dependency direction one-way: this command must compose a tenancy write
+ * (organization + membership) with an identity write (the owner user) in one
+ * transaction, which needs *both* contexts. Putting that orchestration in
+ * either context would create the `tenancy → identity` (or reverse) edge D-1
+ * forbids. So the orchestration is a neutral composition root that imports
+ * both, while `common/tenancy/**` and `common/identity/**` import neither each
+ * other nor this file — a fact the architectural regression test in
+ * `common/architecture/` enforces.
+ *
  * The host is the `PrismaHost` seam shared with the mutation ledger: the
  * service never constructs a client and never reads configuration, so the
  * OpenAPI build boots with no `DATABASE_URL` and the acceptance suite can
  * drive the same code against real PostgreSQL as the application role.
  */
 
-import type { Organization, OrganizationMembership, Prisma, User } from '@prisma/client';
+import type { Organization, Prisma } from '@prisma/client';
 import type { Logger as PinoLogger } from 'pino';
-import { canonicalizeEmail, EmailShapeError, findOrCreateUserByEmail } from '../identity/user-provisioning';
+import {
+  canonicalizeEmail,
+  EmailShapeError,
+  findOrCreateUserByEmail,
+  findUserById,
+} from '../identity/user-provisioning';
 import type { PrismaHost } from '../sync/ledger/mutation-ledger.service';
+import {
+  acquireBootstrapKeyLock,
+  createOrganizationWithOwner,
+  findOrganizationByBootstrapKey,
+  findOwnerMembership,
+} from '../tenancy/organization.service';
 import {
   BootstrapConflictError,
   BootstrapInputError,
@@ -86,6 +108,12 @@ const ORGANIZATION_NAME_MAX = 200;
  * Pure and connection-free by design: the CLI calls it *before* it loads
  * configuration or opens a socket, so a malformed request costs nothing and
  * can never be mistaken for a database failure (AC-07, exit code 2).
+ *
+ * The same `^[a-z0-9]+(-[a-z0-9]+)*$` grammar and 3..64 bound are re-enforced
+ * in PostgreSQL by `chk_organizations_bootstrap_key_shape` (length + trim,
+ * `0003`) and `chk_organizations_bootstrap_key_kebab` (the kebab grammar,
+ * `0004`), so a writer that bypasses this seam still cannot store a key this
+ * command would refuse.
  */
 export function normalizeBootstrapRequest(request: BootstrapRequest): NormalizedBootstrapRequest {
   const key = request.bootstrapKey;
@@ -117,22 +145,12 @@ export function normalizeBootstrapRequest(request: BootstrapRequest): Normalized
   return { bootstrapKey: key, name, email };
 }
 
-/** The `organization` read shape used by both the transaction and the retry classifier. */
-type BootstrapReader = Pick<Prisma.TransactionClient, 'organization'>;
-
-/** One organization with its owner membership (the partial unique index makes it at most one). */
-interface StoredOwnerMembership extends OrganizationMembership {
-  readonly user: User;
-}
-
-interface StoredOrganization extends Organization {
-  readonly memberships: readonly StoredOwnerMembership[];
-}
-
-/** The §10.4 advisory-lock namespace for one bootstrap key. */
-function bootstrapLockKey(bootstrapKey: string): string {
-  return `tenancy:bootstrap-key:${bootstrapKey}`;
-}
+/**
+ * The surface a classification read needs: the tenant root, its owner
+ * membership, and the owner identity — each from its owning context. Both the
+ * in-transaction client and the root client satisfy it.
+ */
+type ClassificationReader = Pick<Prisma.TransactionClient, 'organization' | 'organizationMembership' | 'user'>;
 
 export interface OrganizationBootstrapOptions {
   /**
@@ -184,12 +202,11 @@ export class OrganizationBootstrapService {
   ): Promise<BootstrapResult> {
     // Before the lookup, not after: two racing identical requests serialize
     // here, so the second one classifies instead of inserting (AC-03).
-    const lockKey = bootstrapLockKey(request.bootstrapKey);
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+    await acquireBootstrapKeyLock(tx, request.bootstrapKey);
 
-    const stored = await this.findStored(tx, request.bootstrapKey);
+    const stored = await findOrganizationByBootstrapKey(tx, request.bootstrapKey);
     if (stored !== null) {
-      return this.classify(stored, request);
+      return this.classify(tx, stored, request);
     }
 
     // Fixed lock order — bootstrap_key (just taken), then the identity
@@ -197,11 +214,12 @@ export class OrganizationBootstrapService {
     // order, so the waits form a chain and never a cycle.
     const { user } = await findOrCreateUserByEmail(tx, request.email);
 
-    const organization = await tx.organization.create({
-      data: { name: request.name, bootstrapKey: request.bootstrapKey },
-    });
-    const membership = await tx.organizationMembership.create({
-      data: { organizationId: organization.id, userId: user.id, isOwner: true },
+    // D-7: the tenancy context writes the organization and membership; the
+    // identity writer above wrote the user. Both share this transaction.
+    const { organization, membership } = await createOrganizationWithOwner(tx, {
+      name: request.name,
+      bootstrapKey: request.bootstrapKey,
+      ownerUserId: user.id,
     });
 
     // AC-05: everything above exists only if this returns. A throw here must
@@ -217,31 +235,36 @@ export class OrganizationBootstrapService {
     };
   }
 
-  /** The stored result for a key: organization plus its single owner, if any. */
-  private async findStored(reader: BootstrapReader, bootstrapKey: string): Promise<StoredOrganization | null> {
-    return reader.organization.findUnique({
-      where: { bootstrapKey },
-      include: { memberships: { where: { isOwner: true }, include: { user: true } } },
-    });
-  }
-
   /**
    * The whole idempotency contract: identical parameters answer
    * `ALREADY_BOOTSTRAPPED`, different parameters are refused, and a stored row
    * the schema says cannot exist is reported as an anomaly rather than
    * "repaired" by adoption.
+   *
+   * The three reads come from the two owning contexts (tenant root and owner
+   * membership from tenancy, the owner identity from identity); the comparison
+   * is this composition root's decision.
    */
-  private classify(stored: StoredOrganization, request: NormalizedBootstrapRequest): BootstrapResult {
-    const [owner] = stored.memberships;
-    if (owner === undefined) {
+  private async classify(
+    reader: ClassificationReader,
+    stored: Organization,
+    request: NormalizedBootstrapRequest,
+  ): Promise<BootstrapResult> {
+    const owner = await findOwnerMembership(reader, stored.id);
+    if (owner === null) {
       throw new BootstrapStateAnomalyError('OWNER_MEMBERSHIP_MISSING', request.bootstrapKey);
+    }
+
+    const ownerUser = await findUserById(reader, owner.userId);
+    if (ownerUser === null) {
+      throw new BootstrapStateAnomalyError('OWNER_USER_MISSING', request.bootstrapKey);
     }
 
     if (stored.name !== request.name) {
       this.warnConflict(request, 'NAME_MISMATCH');
       throw new BootstrapConflictError('NAME_MISMATCH', request.bootstrapKey);
     }
-    if (owner.user.email !== request.email) {
+    if (ownerUser.email !== request.email) {
       this.warnConflict(request, 'OWNER_EMAIL_MISMATCH');
       throw new BootstrapConflictError('OWNER_EMAIL_MISMATCH', request.bootstrapKey);
     }
@@ -250,7 +273,7 @@ export class OrganizationBootstrapService {
       status: 'ALREADY_BOOTSTRAPPED',
       bootstrapKey: request.bootstrapKey,
       organizationId: stored.id,
-      userId: owner.user.id,
+      userId: ownerUser.id,
       membershipId: owner.id,
     };
   }
@@ -270,10 +293,10 @@ export class OrganizationBootstrapService {
   ): Promise<BootstrapResult | null> {
     if (!isUniqueConstraintViolation(error)) return null;
 
-    const stored = await this.findStored(this.host.prisma, request.bootstrapKey);
+    const stored = await findOrganizationByBootstrapKey(this.host.prisma, request.bootstrapKey);
     if (stored === null) return null;
 
-    return this.classify(stored, request);
+    return this.classify(this.host.prisma, stored, request);
   }
 
   /** §13.1: a conflict is a security-relevant event; the log carries the key, never the values. */

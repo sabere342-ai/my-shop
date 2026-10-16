@@ -25,6 +25,18 @@
  * successful (including idempotent) run, exactly one JSON object on stderr for
  * a refusal. Exit codes: `0` success, `1` runtime failure, `2`
  * usage/input/configuration, `3` conflicting retry.
+ *
+ * Two runtime failures are distinguished by *what is known*, not by *where the
+ * code caught it*:
+ *
+ * - `CONNECTION_FAILED` — the socket never opened, so nothing ran and nothing
+ *   was written. Definite.
+ * - `BOOTSTRAP_OUTCOME_UNKNOWN` — the connection opened but the transaction
+ *   did not report a definitive result. A failure *after* the commit reached
+ *   the server but *before* its acknowledgement arrived is indistinguishable
+ *   from a rollback, so the command must not claim "no state was committed".
+ *   It says the outcome is unknown and tells the operator to re-run with the
+ *   same `--bootstrap-key`, which is idempotent.
  */
 
 import { PrismaClient } from '@prisma/client';
@@ -267,6 +279,8 @@ export async function runBootstrapCli(
   try {
     connector = await connect(migrationUrl);
   } catch {
+    // The socket never opened: nothing ran, nothing was written. This is the
+    // one runtime failure whose outcome is *definite*, so it says so.
     io.err(jsonLine({ error: 'CONNECTION_FAILED', detail: 'could not open the operator database connection' }));
     return EXIT_RUNTIME;
   }
@@ -299,11 +313,17 @@ export async function runBootstrapCli(
     // Deliberately opaque: the driver's message can carry the host, the role,
     // and — on some drivers — the URL. The operator gets a code and a lookup,
     // not a credential in a log file.
+    //
+    // The outcome is also honestly *unknown*: the connection opened, the
+    // transaction did not report a result, and a lost commit acknowledgement is
+    // indistinguishable from a rollback. The command must not claim that
+    // nothing was committed — it tells the operator to re-run, which is safe
+    // because the bootstrap is idempotent by `bootstrap_key`.
     io.err(
       jsonLine({
-        error: 'BOOTSTRAP_RUNTIME_FAILURE',
+        error: 'BOOTSTRAP_OUTCOME_UNKNOWN',
         detail:
-          'the bootstrap did not complete; no state was committed. Check database availability and logs (no credential is printed here)',
+          'the bootstrap transaction did not report a definitive result, so whether it committed is unknown. Re-run the same command with the same --bootstrap-key: the bootstrap is idempotent, so a retry either creates the organization or answers ALREADY_BOOTSTRAPPED. No credential is printed here',
       }),
     );
     return EXIT_RUNTIME;

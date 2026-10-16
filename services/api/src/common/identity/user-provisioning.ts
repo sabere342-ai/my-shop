@@ -2,8 +2,9 @@
  * §8.4 / §40.6 M2-S1 — the identity-context writer for `users`.
  *
  * This is the whole of the identity context in this slice: one canonical
- * email seam and one transactional writer. Two properties make it safe to be
- * the narrow dependency M2-S2 (authentication) will later reuse:
+ * email seam, one transactional writer, and one by-id read. Two properties
+ * make it safe to be the narrow dependency M2-S2 (authentication) will later
+ * reuse:
  *
  * - **Canonical by construction.** `canonicalizeEmail` is trim + lowercase +
  *   shape, so `Owner@Example.COM ` and `owner@example.com` are one identity.
@@ -138,4 +139,20 @@ export async function findOrCreateUserByEmail(
 
   const user = await tx.user.create({ data: { email } });
   return { user, created: true };
+}
+
+/**
+ * Reads one identity by id, or `null`.
+ *
+ * The second half of the narrow seam the bootstrap composition needs: the
+ * tenancy context holds only a `user_id` on the membership edge, and the
+ * classification of an idempotent retry compares that user's canonical email
+ * against the request. The composition root performs the comparison; this
+ * function stays a plain identity read (it never touches a tenancy table).
+ */
+export async function findUserById(
+  reader: Pick<Prisma.TransactionClient, 'user'>,
+  userId: string,
+): Promise<User | null> {
+  return reader.user.findUnique({ where: { id: userId } });
 }

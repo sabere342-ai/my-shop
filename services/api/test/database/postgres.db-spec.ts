@@ -55,13 +55,13 @@ import {
   runBootstrapCli,
   type BootstrapCliIo,
   type BootstrapConnectorFactory,
-} from '../../src/common/tenancy/bootstrap-cli';
-import { BootstrapConflictError } from '../../src/common/tenancy/organization-bootstrap.errors';
+} from '../../src/common/bootstrap/bootstrap-cli';
+import { BootstrapConflictError } from '../../src/common/bootstrap/organization-bootstrap.errors';
 import {
   OrganizationBootstrapService,
   type BootstrapRequest,
   type BootstrapResult,
-} from '../../src/common/tenancy/organization-bootstrap.service';
+} from '../../src/common/bootstrap/organization-bootstrap.service';
 import { createOverriddenTestHarness, createTestHarness, destroyTestHarness, type TestHarness } from '../harness';
 import { FixedSyncAuthenticator } from '../sync/test-sync-authenticator';
 import { ScriptedMutationApplier, probeDirective } from '../sync/scripted-mutation-applier';
@@ -253,13 +253,15 @@ describe('database acceptance (real PostgreSQL)', () => {
         ORDER BY migration_name
       `;
 
-      // M1b-S4 adds the sync ledger migrations to M1-S3's skeleton and M2-S1 adds
-      // `0003_organizations`; every applied migration must be finished and never
-      // rolled back (migration history is append-only, Master Plan §44.1).
+      // M1b-S4 adds the sync ledger migrations to M1-S3's skeleton; M2-S1 adds
+      // `0003_organizations`, and its hardening adds `0004_bootstrap_key_shape`;
+      // every applied migration must be finished and never rolled back
+      // (migration history is append-only, Master Plan §44.1).
       expect(rows.map((row) => row.migration_name)).toEqual([
         '0001_schema_skeleton',
         '0002_mutation_ledger',
         '0003_organizations',
+        '0004_bootstrap_key_shape',
       ]);
       for (const row of rows) {
         expect(row.finished_at).not.toBeNull();
@@ -297,7 +299,7 @@ describe('database acceptance (real PostgreSQL)', () => {
       dbScript('deploy');
 
       const rows = await migrator.$queryRaw<MigrationRow[]>`SELECT migration_name FROM _prisma_migrations`;
-      expect(rows).toHaveLength(3);
+      expect(rows).toHaveLength(4);
     });
   });
 
@@ -1890,6 +1892,52 @@ describe('database acceptance (real PostgreSQL)', () => {
       ]);
     });
 
+    it('hardening F-3: the bootstrap-key grammar is a database fact, not just a CLI rule', async () => {
+      // The constraint migration 0004 adds.
+      const constraints = await migrator.$queryRaw<ConstraintKindRow[]>`
+        SELECT conname, contype FROM pg_constraint
+        WHERE conrelid = 'organizations'::regclass
+          AND conname = 'chk_organizations_bootstrap_key_kebab'`;
+      expect(constraints).toEqual([{ conname: 'chk_organizations_bootstrap_key_kebab', contype: 'c' }]);
+
+      /** Inserts a key directly as the application role and returns the error, if any. */
+      const insertKey = async (key: string): Promise<unknown> =>
+        app.$executeRaw`INSERT INTO organizations (name, bootstrap_key) VALUES ('Kebab Probe', ${key})`.catch(
+          (error: unknown) => error,
+        );
+
+      // Shapes the 0003 constraint allows (length in range, already trimmed)
+      // but the grammar forbids; each names the exact constraint so the test
+      // cannot pass on an unrelated rejection.
+      for (const key of ['Mixed-Case', 'main_shop', 'has space', '-leading', 'trailing-', 'double--hyphen']) {
+        const error = await insertKey(key);
+        expect(error).toBeInstanceOf(Error);
+        expect(sqlStateOf(error)).toBe('23514');
+        expect((error as Error).message).toContain('chk_organizations_bootstrap_key_kebab');
+      }
+
+      // The 3..64 bound holds too, through two different database mechanisms:
+      // under-length hits the 0003 length CHECK (23514); over-length is stopped
+      // by the `varchar(64)` column type itself (22001, string truncation).
+      const tooShort = await insertKey('ab');
+      expect(sqlStateOf(tooShort)).toBe('23514');
+      const tooLong = await insertKey('a'.repeat(65));
+      expect(sqlStateOf(tooLong)).toBe('22001');
+
+      // Not one of the rejected shapes was stored.
+      const stored = await migrator.$queryRaw<CountRow[]>`
+        SELECT count(*)::int AS n FROM organizations WHERE name = 'Kebab Probe'`;
+      expect(stored[0]?.n ?? -1).toBe(0);
+
+      // A compliant key is still accepted at both boundaries (3 and 64).
+      await expect(
+        app.$executeRaw`INSERT INTO organizations (name, bootstrap_key) VALUES ('Kebab Probe', 'ok-3')`,
+      ).resolves.toBe(1);
+      await expect(
+        app.$executeRaw`INSERT INTO organizations (name, bootstrap_key) VALUES ('Kebab Probe', ${'a'.repeat(64)})`,
+      ).resolves.toBe(1);
+    });
+
     it('AC-16: upgrading a database that already runs 0001+0002 with M1b rows preserves every row', async () => {
       const scratchName = 'my_shop_m2s1_upgrade';
       const scratchMigrations = new URL(urls.migration);
@@ -1940,12 +1988,17 @@ describe('database acceptance (real PostgreSQL)', () => {
           INSERT INTO sync_sequences (organization_id, last_sequence)
           VALUES (${fixtureOrganization}::uuid, 7)`;
 
-        // The slice's migration now joins a history that is already in use.
-        cpSync(
-          path.join(API_ROOT, 'prisma', 'migrations', '0003_organizations'),
-          path.join(scratchRoot, 'migrations', '0003_organizations'),
-          { recursive: true },
-        );
+        // The slice's migration now joins a history that is already in use,
+        // followed by its hardening migration 0004.
+        for (const migration of ['0003_organizations', '0004_bootstrap_key_shape']) {
+          cpSync(
+            path.join(API_ROOT, 'prisma', 'migrations', migration),
+            path.join(scratchRoot, 'migrations', migration),
+            {
+              recursive: true,
+            },
+          );
+        }
         dbScript('deploy', {
           args: ['--schema', scratchSchema],
           env: { MIGRATION_DATABASE_URL: scratchMigrations.toString() },
@@ -1957,6 +2010,7 @@ describe('database acceptance (real PostgreSQL)', () => {
           '0001_schema_skeleton',
           '0002_mutation_ledger',
           '0003_organizations',
+          '0004_bootstrap_key_shape',
         ]);
 
         // Every pre-existing M1b row survives the upgrade untouched...

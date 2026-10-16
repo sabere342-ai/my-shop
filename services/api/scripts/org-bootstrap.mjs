@@ -4,7 +4,7 @@
  *
  * `npm run bootstrap:org -- --bootstrap-key <key> --name <name> --owner-email <email>`
  *
- * Everything meaningful lives in `src/common/tenancy/bootstrap-cli.ts`, which
+ * Everything meaningful lives in `src/common/bootstrap/bootstrap-cli.ts`, which
  * is compiled to `dist/` and is what the acceptance suite drives directly. This
  * file has one job: load the built module, forward `process.argv` and the
  * environment, and exit with the code the command decided.
@@ -22,9 +22,9 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const apiRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const cliPath = path.join(apiRoot, 'dist', 'common', 'tenancy', 'bootstrap-cli.js');
+const cliPath = path.join(apiRoot, 'dist', 'common', 'bootstrap', 'bootstrap-cli.js');
 
-/** @type {import('../dist/common/tenancy/bootstrap-cli.js')} */
+/** @type {import('../dist/common/bootstrap/bootstrap-cli.js')} */
 let cli;
 try {
   const loaded = await import(pathToFileURL(cliPath).href);

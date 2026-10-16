@@ -1,12 +1,16 @@
 /**
- * The organization bootstrap service — the §10.4 idempotency contract as pure
- * logic.
+ * The organization bootstrap composition — the §10.4 idempotency contract as
+ * pure logic.
  *
  * The database proves the atomic, concurrent behaviour (`postgres.db-spec.ts`);
  * this suite pins the decisions that must be identical whether or not a lock
  * was contended: what counts as an *identical* retry, what counts as a
  * *conflicting* one, which stored shapes are anomalies rather than conflicts,
  * and that the two advisory locks are always taken in the same order.
+ *
+ * The composition reads its three facts from two contexts — the tenant root
+ * and owner membership from tenancy, the owner identity from identity — so the
+ * fake below stands in for both, exactly as the real host does.
  *
  * The in-memory transaction stand-in also rolls back: a probe failure restores
  * the store, so "zero rows after a failure" (AC-05) is asserted here as well as
@@ -73,9 +77,8 @@ interface FakeBootstrap {
 }
 
 /**
- * An in-memory host that mimics the surfaces this service uses, including the
- * `include: { memberships: { where, include } }` read shape and transactional
- * rollback.
+ * An in-memory host that mimics the surfaces the composition uses across both
+ * contexts, including transactional rollback.
  *
  * `transactionReads` exists for the unique-violation cases: with it disabled
  * the transaction's lookup never sees the seed, so the write path runs and the
@@ -102,20 +105,33 @@ function fakeBootstrap(
     return `${prefix}-${String(sequence)}`;
   };
 
-  /** The `include`-aware organization read, shared by the transaction and the retry classifier. */
+  /** The tenant-root read, shared by the transaction and the retry classifier. */
   const findOrganization = jest.fn((args: { where: { bootstrapKey: string } }) => {
     const organization = store.organizations.find((row) => row.bootstrapKey === args.where.bootstrapKey);
-    if (organization === undefined) return Promise.resolve(null);
-    const memberships = store.memberships
-      .filter((row) => row.organizationId === organization.id && row.isOwner)
-      .map((row) => ({ ...row, user: store.users.find((user) => user.id === row.userId) }));
-    return Promise.resolve({ ...organization, memberships });
+    return Promise.resolve(organization ?? null);
   });
 
   /** The transaction's own view; it can be blinded so the write path is reached. */
   const findOrganizationInTransaction = jest.fn((args: { where: { bootstrapKey: string } }): Promise<unknown> => {
     if (options.transactionReads === false) return Promise.resolve(null);
     return findOrganization(args);
+  });
+
+  /** The owner-membership read (tenancy context); at most one row is possible. */
+  const findOwnerMembership = jest.fn((args: { where: { organizationId: string; isOwner: boolean } }) => {
+    const membership = store.memberships.find(
+      (row) => row.organizationId === args.where.organizationId && row.isOwner === args.where.isOwner,
+    );
+    return Promise.resolve(membership ?? null);
+  });
+
+  /** The identity read: the writer looks up by email, the classifier by id. */
+  const findUser = jest.fn((args: { where: { email?: string; id?: string } }) => {
+    const user =
+      args.where.email !== undefined
+        ? store.users.find((row) => row.email === args.where.email)
+        : store.users.find((row) => row.id === args.where.id);
+    return Promise.resolve(user ?? null);
   });
 
   const organizationCreate = jest.fn((args: { data: { name: string; bootstrapKey: string } }) => {
@@ -158,13 +174,8 @@ function fakeBootstrap(
       return Promise.resolve(1);
     }),
     organization: { findUnique: findOrganizationInTransaction, create: organizationCreate },
-    user: {
-      findUnique: jest.fn((args: { where: { email: string } }) => {
-        return Promise.resolve(store.users.find((row) => row.email === args.where.email) ?? null);
-      }),
-      create: userCreate,
-    },
-    organizationMembership: { create: membershipCreate },
+    organizationMembership: { create: membershipCreate, findFirst: findOwnerMembership },
+    user: { findUnique: findUser, create: userCreate },
   };
 
   /** Snapshot/restore is the fake's rollback: the property PostgreSQL provides. */
@@ -185,7 +196,12 @@ function fakeBootstrap(
   });
 
   const host = {
-    prisma: { $transaction: transaction, organization: { findUnique: findOrganization } },
+    prisma: {
+      $transaction: transaction,
+      organization: { findUnique: findOrganization },
+      organizationMembership: { findFirst: findOwnerMembership },
+      user: { findUnique: findUser },
+    },
   } as unknown as PrismaHost;
 
   return {
@@ -327,6 +343,18 @@ describe('OrganizationBootstrapService', () => {
     await expect(new OrganizationBootstrapService(host).bootstrap(request())).rejects.toMatchObject({
       code: 'BOOTSTRAP_STATE_ANOMALY',
       reason: 'OWNER_MEMBERSHIP_MISSING',
+    });
+  });
+
+  it('reports an owner membership whose identity row is gone as an anomaly', async () => {
+    // The FK makes this impossible through any supported writer; a stored state
+    // that violates it must be an integrity alarm, not a silent adoption.
+    const seed = seededIdentical();
+    const { host } = fakeBootstrap({ seed: { organizations: seed.organizations, memberships: seed.memberships } });
+
+    await expect(new OrganizationBootstrapService(host).bootstrap(request())).rejects.toMatchObject({
+      code: 'BOOTSTRAP_STATE_ANOMALY',
+      reason: 'OWNER_USER_MISSING',
     });
   });
 

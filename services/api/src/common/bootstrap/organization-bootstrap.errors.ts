@@ -12,16 +12,24 @@
  *                              durable result — no state was adopted or
  *                              overwritten (exit 3, AC-04).
  * - `BootstrapStateAnomalyError` the database contradicts its own invariants —
- *                              a stored organization without a single owner.
- *                              This cannot be produced by this slice's writer,
+ *                              a stored organization without a single owner,
+ *                              or an owner membership whose user is gone.
+ *                              Neither can be produced by this slice's writer,
  *                              so it is an integrity alarm, not a conflict
  *                              (exit 1).
+ *
+ * The command line also reports `CONNECTION_FAILED` (a definite pre-transaction
+ * failure: the socket never opened) and `BOOTSTRAP_OUTCOME_UNKNOWN` (a
+ * transaction that did not report a definitive result, so its commit outcome
+ * is genuinely unknown). Those two are produced by `bootstrap-cli.ts`, not
+ * here: they describe the transport, not the domain.
  *
  * No error carries a connection string, a credential, or raw driver text:
  * every `message` below is written by this file and names values the operator
  * supplied themselves (§13.6, §42.6). The driver error, if one occurs, never
- * leaves the service — `OrganizationBootstrapService` translates the one class
- * it understands and the CLI reports the rest as an opaque runtime failure.
+ * leaves the composition service — `OrganizationBootstrapService` translates
+ * the one class it understands and the CLI reports the rest as an opaque
+ * runtime failure.
  */
 
 /** Which request field failed validation, for the exit-2 JSON object. */
@@ -37,7 +45,7 @@ export type BootstrapInputField = 'bootstrapKey' | 'organizationName' | 'ownerEm
 export type BootstrapConflictReason = 'NAME_MISMATCH' | 'OWNER_EMAIL_MISMATCH';
 
 /** Why the stored shape is impossible rather than merely conflicting. */
-export type BootstrapAnomalyReason = 'OWNER_MEMBERSHIP_MISSING';
+export type BootstrapAnomalyReason = 'OWNER_MEMBERSHIP_MISSING' | 'OWNER_USER_MISSING';
 
 /** The request was refused before any statement ran (exit code 2). */
 export class BootstrapInputError extends Error {
@@ -71,10 +79,13 @@ export class BootstrapConflictError extends Error {
 }
 
 /**
- * The stored row contradicts the invariants the schema enforces: an
+ * The stored row contradicts the invariants the schema enforces — either an
  * organization whose owner membership does not exist (AC-11 makes exactly one
  * owner possible, so zero owners means an out-of-band write or a partial
- * legacy state — never something this command may quietly "fix" by adopting).
+ * legacy state), or an owner membership whose user row is absent (the FK
+ * `organization_memberships_user_id_fkey` makes that impossible through any
+ * supported writer). Neither is something this command may quietly "fix" by
+ * adopting.
  */
 export class BootstrapStateAnomalyError extends Error {
   readonly code = 'BOOTSTRAP_STATE_ANOMALY' as const;

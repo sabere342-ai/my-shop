@@ -276,7 +276,7 @@ describe('runBootstrapCli outcomes', () => {
     expect(JSON.parse(err[0] ?? '{}')).toMatchObject({ error: 'BOOTSTRAP_STATE_ANOMALY' });
   });
 
-  it('exits 1 with an opaque failure when the driver error would have carried the credential', async () => {
+  it('exits 1 with an opaque, honest outcome when the driver error would have carried the credential', async () => {
     const { io, out, err } = capture();
     // The shape a driver error really has: it embeds the connection string.
     const connector = connectorReturning(new Error(`connect ECONNREFUSED for ${OPERATOR_URL}`));
@@ -287,7 +287,12 @@ describe('runBootstrapCli outcomes', () => {
 
     expect(code).toBe(EXIT_RUNTIME);
     expect(out).toEqual([]);
-    expect(JSON.parse(err[0] ?? '{}')).toMatchObject({ error: 'BOOTSTRAP_RUNTIME_FAILURE' });
+    const payload = JSON.parse(err[0] ?? '{}') as { error?: string; detail?: string };
+    expect(payload.error).toBe('BOOTSTRAP_OUTCOME_UNKNOWN');
+    // The commit outcome is genuinely unknown, so the command must not claim
+    // that nothing was committed; it must name the idempotent retry instead.
+    expect(payload.detail ?? '').not.toMatch(/no state was committed/i);
+    expect(payload.detail ?? '').toContain('--bootstrap-key');
     expect(err.join('\n').includes(CANARY)).toBe(false);
     expect(connector.close).toHaveBeenCalledTimes(1);
   });
