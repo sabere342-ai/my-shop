@@ -26,6 +26,8 @@
     "db:bootstrap": "node scripts/db.mjs bootstrap",
     "bootstrap:org": "node scripts/org-bootstrap.mjs",
     "prebootstrap:org": "npm run build",
+    "provision:credential": "node scripts/provision-credential.mjs",
+    "preprovision:credential": "npm run build",
     "postinstall": "prisma generate"
   },
   "dependencies": {
@@ -35,6 +37,7 @@
     "@nestjs/core": "11.2.7",
     "@nestjs/platform-express": "11.2.7",
     "@nestjs/swagger": "11.4.7",
+    "@node-rs/argon2": "2.2.2",
     "@prisma/client": "6.12.0",
     "body-parser": "2.3.0",
     "class-transformer": "0.5.1",

@@ -1,5 +1,19 @@
 import { ConfigurationError, LogLevel, NodeEnvironment, loadConfig } from './app.config';
 
+/**
+ * The identity key variables are base64-encoded PEM, so a test value is a throwaway
+ * PEM body built at runtime. No key material is committed: the configuration layer
+ * only checks that the value decodes to PEM, never that it is a usable key
+ * (§13.6 - a placeholder is not a credential).
+ */
+function pemText(label: string): string {
+  return `-----BEGIN ${label}-----\ntest-only\n-----END ${label}-----\n`;
+}
+
+function encodedPem(label: string): string {
+  return Buffer.from(pemText(label), 'utf8').toString('base64');
+}
+
 describe('loadConfig', () => {
   it('applies the documented defaults when the environment is empty', () => {
     // §22.2: every optional setting has a safe default, so the common path requires no
@@ -24,6 +38,8 @@ describe('loadConfig', () => {
       LOG_PRETTY: 'false',
       DATABASE_URL: 'postgresql://app@localhost:5432/myshop',
       MIGRATION_DATABASE_URL: 'postgresql://migrator@localhost:5432/myshop',
+      JWT_PRIVATE_KEY: encodedPem('PRIVATE KEY'),
+      JWT_PUBLIC_KEY: encodedPem('PUBLIC KEY'),
     });
 
     expect(config.nodeEnv).toBe(NodeEnvironment.Production);
@@ -32,6 +48,35 @@ describe('loadConfig', () => {
     expect(config.logging.prettyPrint).toBe(false);
     expect(config.database.applicationUrl).toBe('postgresql://app@localhost:5432/myshop');
     expect(config.database.migrationUrl).toBe('postgresql://migrator@localhost:5432/myshop');
+  });
+
+  it('applies the §10.2/§10.3 identity defaults when the environment is empty', () => {
+    const config = loadConfig({});
+
+    expect(config.identity?.jwtIssuer).toBe('my-shop');
+    expect(config.identity?.jwtAudience).toBe('my-shop-client');
+    expect(config.identity?.accessTokenTtlSeconds).toBe(900);
+    expect(config.identity?.refreshIdleTtlSeconds).toBe(604_800);
+    expect(config.identity?.refreshAbsoluteTtlSeconds).toBe(2_592_000);
+    expect(config.identity?.argon2MemoryKib).toBe(19_456);
+    expect(config.identity?.argon2TimeCost).toBe(2);
+    expect(config.identity?.argon2Parallelism).toBe(1);
+    expect(config.identity?.passwordMinLength).toBe(12);
+    expect(config.identity?.passwordMaxLength).toBe(128);
+    // No key material outside production, and none invented: absence is what makes
+    // the identity surface fail closed rather than run a weaker check.
+    expect(config.identity?.jwtPrivateKey).toBeUndefined();
+    expect(config.identity?.jwtPublicKey).toBeUndefined();
+  });
+
+  it('decodes the base64 key material to PEM for the application contract', () => {
+    const config = loadConfig({
+      JWT_PRIVATE_KEY: encodedPem('PRIVATE KEY'),
+      JWT_PUBLIC_KEY: encodedPem('PUBLIC KEY'),
+    });
+
+    expect(config.identity?.jwtPrivateKey).toBe(pemText('PRIVATE KEY'));
+    expect(config.identity?.jwtPublicKey).toBe(pemText('PUBLIC KEY'));
   });
 
   it('defaults the api namespace to the versioned one from §34.1', () => {
@@ -166,6 +211,64 @@ describe('loadConfig', () => {
         MIGRATION_DATABASE_URL: 'postgresql://migrator@localhost:5432/myshop',
       }),
     ).toThrow(ConfigurationError);
+  });
+
+  it('requires the identity key pair in production', () => {
+    // §13.6: an authentication surface must not be silently deployable unconfigured.
+    expect(() => loadConfig({ NODE_ENV: 'production' })).toThrow(/JWT_PRIVATE_KEY/);
+  });
+
+  it('permits an absent identity key pair outside production', () => {
+    expect(() => loadConfig({ NODE_ENV: 'test' })).not.toThrow();
+    expect(loadConfig({ NODE_ENV: 'test' }).identity?.jwtPrivateKey).toBeUndefined();
+  });
+
+  it('rejects key material that does not decode to PEM', () => {
+    expect(() => loadConfig({ JWT_PRIVATE_KEY: 'not-base64-pem', JWT_PUBLIC_KEY: encodedPem('PUBLIC KEY') })).toThrow(
+      /JWT_PRIVATE_KEY must be the base64 encoding of a PEM key/,
+    );
+  });
+
+  it('rejects half of the identity key pair', () => {
+    expect(() => loadConfig({ JWT_PRIVATE_KEY: encodedPem('PRIVATE KEY') })).toThrow(/JWT_PUBLIC_KEY/);
+    expect(() => loadConfig({ JWT_PUBLIC_KEY: encodedPem('PUBLIC KEY') })).toThrow(/JWT_PRIVATE_KEY/);
+  });
+
+  it('rejects an identity TTL outside its range', () => {
+    expect(() => loadConfig({ ACCESS_TOKEN_TTL_SECONDS: '5' })).toThrow(ConfigurationError);
+    expect(() => loadConfig({ ACCESS_TOKEN_TTL_SECONDS: '900000' })).toThrow(ConfigurationError);
+  });
+
+  it('rejects an idle refresh TTL longer than the absolute one', () => {
+    // An idle ceiling past the absolute ceiling would be dead policy.
+    expect(() => loadConfig({ REFRESH_IDLE_TTL_SECONDS: '2000000', REFRESH_ABSOLUTE_TTL_SECONDS: '1000000' })).toThrow(
+      /REFRESH_IDLE_TTL_SECONDS must not exceed REFRESH_ABSOLUTE_TTL_SECONDS/,
+    );
+  });
+
+  it('rejects a password minimum above the maximum', () => {
+    expect(() => loadConfig({ PASSWORD_MIN_LENGTH: '64', PASSWORD_MAX_LENGTH: '32' })).toThrow(
+      /PASSWORD_MIN_LENGTH must not exceed PASSWORD_MAX_LENGTH/,
+    );
+  });
+
+  it('rejects an Argon2 memory cost below the OWASP floor', () => {
+    expect(() => loadConfig({ ARGON2_MEMORY_KIB: '1024' })).toThrow(ConfigurationError);
+  });
+
+  it('never echoes the key material in a refusal', () => {
+    // The offending key is a secret; the refusal names the variable, never its value.
+    let caught: unknown;
+    try {
+      loadConfig({ JWT_PRIVATE_KEY: 'do-not-log-this-key-material' });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ConfigurationError);
+    const message = (caught as ConfigurationError).message;
+    expect(message).not.toContain('do-not-log-this-key-material');
+    expect(message).toContain('JWT_PRIVATE_KEY');
   });
 });
 

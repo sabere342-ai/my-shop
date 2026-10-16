@@ -153,6 +153,11 @@ model User {
   email     String   @unique @db.VarChar(320)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamp(3)
 
+  /// Master Plan §10.3 / §11: bumped whenever a user's effective permissions
+  /// change, so a stale access token is detectable (`TOKEN_STALE`). M2-S2 carries
+  /// the claim and compares it; M2-S3 owns the writer.
+  permissionsVersion Int @default(0) @map("permissions_version")
+
   memberships OrganizationMembership[]
   credential   UserCredential?
   sessions     Session[]

@@ -111,6 +111,96 @@ class DatabaseConfig {
   migrationUrl?: string;
 }
 
+/**
+ * Identity and authentication configuration (Master Plan §10.2, §10.3, §13.6).
+ *
+ * The two key values are **base64 encodings of PEM text** rather than raw PEM. A
+ * PEM block contains newlines, and every real environment surface (dotenv, Docker
+ * Compose, systemd, a CI secret) mangles them differently; base64 makes the value a
+ * single opaque token that survives all of them unchanged. The decoded PEM is what
+ * the signer and verifier consume.
+ *
+ * Key material is **optional here and required in production** (`checkIdentityConfig`).
+ * Outside production an absent key is not a configuration error: the identity module
+ * binds a fail-closed surface rather than a weaker one, exactly as the M1b sync
+ * boundary fails closed until M2 supplies verification.
+ *
+ * Nothing here has a default that could silently be a credential; the defaults are
+ * the §10.2/§10.3 policy numbers, not secrets.
+ */
+class IdentityConfig {
+  @IsString()
+  @IsOptional()
+  jwtPrivateKey?: string;
+
+  @IsString()
+  @IsOptional()
+  jwtPublicKey?: string;
+
+  @IsString()
+  @Matches(/^\S+$/, { message: 'JWT_ISSUER must be a non-empty value with no whitespace' })
+  jwtIssuer = 'my-shop';
+
+  @IsString()
+  @Matches(/^\S+$/, { message: 'JWT_AUDIENCE must be a non-empty value with no whitespace' })
+  jwtAudience = 'my-shop-client';
+
+  @IsInt({ message: 'ACCESS_TOKEN_TTL_SECONDS must be an integer' })
+  @Min(60, { message: 'ACCESS_TOKEN_TTL_SECONDS must be at least 60' })
+  @Max(86_400, { message: 'ACCESS_TOKEN_TTL_SECONDS must be at most 86400' })
+  accessTokenTtlSeconds = 900;
+
+  @IsInt({ message: 'REFRESH_IDLE_TTL_SECONDS must be an integer' })
+  @Min(300, { message: 'REFRESH_IDLE_TTL_SECONDS must be at least 300' })
+  @Max(2_592_000, { message: 'REFRESH_IDLE_TTL_SECONDS must be at most 2592000 (30 days)' })
+  refreshIdleTtlSeconds = 604_800;
+
+  @IsInt({ message: 'REFRESH_ABSOLUTE_TTL_SECONDS must be an integer' })
+  @Min(3_600, { message: 'REFRESH_ABSOLUTE_TTL_SECONDS must be at least 3600' })
+  @Max(2_592_000, { message: 'REFRESH_ABSOLUTE_TTL_SECONDS must be at most 2592000 (30 days)' })
+  refreshAbsoluteTtlSeconds = 2_592_000;
+
+  @IsInt({ message: 'ARGON2_MEMORY_KIB must be an integer' })
+  @Min(8_192, { message: 'ARGON2_MEMORY_KIB must be at least 8192 (OWASP minimum is 19456)' })
+  @Max(1_048_576, { message: 'ARGON2_MEMORY_KIB must be at most 1048576' })
+  argon2MemoryKib = 19_456;
+
+  @IsInt({ message: 'ARGON2_TIME_COST must be an integer' })
+  @Min(1, { message: 'ARGON2_TIME_COST must be at least 1' })
+  @Max(10, { message: 'ARGON2_TIME_COST must be at most 10' })
+  argon2TimeCost = 2;
+
+  @IsInt({ message: 'ARGON2_PARALLELISM must be an integer' })
+  @Min(1, { message: 'ARGON2_PARALLELISM must be at least 1' })
+  @Max(16, { message: 'ARGON2_PARALLELISM must be at most 16' })
+  argon2Parallelism = 1;
+
+  @IsInt({ message: 'AUTH_THROTTLE_BASE_DELAY_SECONDS must be an integer' })
+  @Min(1, { message: 'AUTH_THROTTLE_BASE_DELAY_SECONDS must be at least 1' })
+  @Max(86_400, { message: 'AUTH_THROTTLE_BASE_DELAY_SECONDS must be at most 86400' })
+  throttleBaseDelaySeconds = 1;
+
+  @IsInt({ message: 'AUTH_THROTTLE_MAX_DELAY_SECONDS must be an integer' })
+  @Min(1, { message: 'AUTH_THROTTLE_MAX_DELAY_SECONDS must be at least 1' })
+  @Max(86_400, { message: 'AUTH_THROTTLE_MAX_DELAY_SECONDS must be at most 86400' })
+  throttleMaxDelaySeconds = 900;
+
+  @IsInt({ message: 'AUTH_THROTTLE_FREE_ATTEMPTS must be an integer' })
+  @Min(1, { message: 'AUTH_THROTTLE_FREE_ATTEMPTS must be at least 1' })
+  @Max(100, { message: 'AUTH_THROTTLE_FREE_ATTEMPTS must be at most 100' })
+  throttleFreeAttempts = 5;
+
+  @IsInt({ message: 'PASSWORD_MIN_LENGTH must be an integer' })
+  @Min(12, { message: 'PASSWORD_MIN_LENGTH must be at least 12 (Master Plan section 10.2)' })
+  @Max(1_024, { message: 'PASSWORD_MIN_LENGTH must be at most 1024' })
+  passwordMinLength = 12;
+
+  @IsInt({ message: 'PASSWORD_MAX_LENGTH must be an integer' })
+  @Min(12, { message: 'PASSWORD_MAX_LENGTH must be at least 12' })
+  @Max(1_024, { message: 'PASSWORD_MAX_LENGTH must be at most 1024' })
+  passwordMaxLength = 128;
+}
+
 export class AppConfig {
   @IsEnum(NodeEnvironment)
   nodeEnv: NodeEnvironment = NodeEnvironment.Development;
@@ -126,6 +216,33 @@ export class AppConfig {
   @ValidateNested()
   @Type(() => DatabaseConfig)
   database!: DatabaseConfig;
+
+  @ValidateNested()
+  @Type(() => IdentityConfig)
+  identity!: IdentityConfig;
+}
+
+/**
+ * The identity configuration as the application consumes it. `jwtPrivateKey` and
+ * `jwtPublicKey` are already-decoded PEM text (base64 is a transport detail of the
+ * environment surface, not of the application contract).
+ */
+export interface IdentityConfigShape {
+  readonly jwtPrivateKey?: string;
+  readonly jwtPublicKey?: string;
+  readonly jwtIssuer: string;
+  readonly jwtAudience: string;
+  readonly accessTokenTtlSeconds: number;
+  readonly refreshIdleTtlSeconds: number;
+  readonly refreshAbsoluteTtlSeconds: number;
+  readonly argon2MemoryKib: number;
+  readonly argon2TimeCost: number;
+  readonly argon2Parallelism: number;
+  readonly throttleBaseDelaySeconds: number;
+  readonly throttleMaxDelaySeconds: number;
+  readonly throttleFreeAttempts: number;
+  readonly passwordMinLength: number;
+  readonly passwordMaxLength: number;
 }
 
 export interface AppConfigShape {
@@ -133,6 +250,13 @@ export interface AppConfigShape {
   readonly http: { readonly port: number; readonly apiPrefix: string };
   readonly logging: { readonly level: LogLevel; readonly prettyPrint: boolean };
   readonly database: { readonly applicationUrl?: string; readonly migrationUrl?: string };
+  /**
+   * Optional by design: its *absence* is the fail-closed state outside production.
+   * `loadConfig` populates it from validated environment input, but a hand-built
+   * configuration that omits it yields an identity surface that refuses everything
+   * rather than a weaker one.
+   */
+  readonly identity?: IdentityConfigShape;
 }
 
 /**
@@ -167,6 +291,7 @@ interface RawEnvironment {
   readonly http: RawGroup<HttpConfig>;
   readonly logging: RawGroup<LoggingConfig>;
   readonly database: RawGroup<DatabaseConfig>;
+  readonly identity: RawGroup<IdentityConfig>;
 }
 
 function readRaw(env: NodeJS.ProcessEnv): RawEnvironment {
@@ -184,7 +309,35 @@ function readRaw(env: NodeJS.ProcessEnv): RawEnvironment {
       applicationUrl: env['DATABASE_URL'],
       migrationUrl: env['MIGRATION_DATABASE_URL'],
     },
+    identity: {
+      jwtPrivateKey: env['JWT_PRIVATE_KEY'],
+      jwtPublicKey: env['JWT_PUBLIC_KEY'],
+      jwtIssuer: env['JWT_ISSUER'],
+      jwtAudience: env['JWT_AUDIENCE'],
+      accessTokenTtlSeconds: intOrUndefined(env['ACCESS_TOKEN_TTL_SECONDS']),
+      refreshIdleTtlSeconds: intOrUndefined(env['REFRESH_IDLE_TTL_SECONDS']),
+      refreshAbsoluteTtlSeconds: intOrUndefined(env['REFRESH_ABSOLUTE_TTL_SECONDS']),
+      argon2MemoryKib: intOrUndefined(env['ARGON2_MEMORY_KIB']),
+      argon2TimeCost: intOrUndefined(env['ARGON2_TIME_COST']),
+      argon2Parallelism: intOrUndefined(env['ARGON2_PARALLELISM']),
+      throttleBaseDelaySeconds: intOrUndefined(env['AUTH_THROTTLE_BASE_DELAY_SECONDS']),
+      throttleMaxDelaySeconds: intOrUndefined(env['AUTH_THROTTLE_MAX_DELAY_SECONDS']),
+      throttleFreeAttempts: intOrUndefined(env['AUTH_THROTTLE_FREE_ATTEMPTS']),
+      passwordMinLength: intOrUndefined(env['PASSWORD_MIN_LENGTH']),
+      passwordMaxLength: intOrUndefined(env['PASSWORD_MAX_LENGTH']),
+    },
   };
+}
+
+/**
+ * Parses an environment integer, preserving "absent" as `undefined`.
+ *
+ * A present-but-empty value (`PORT=`) becomes `Number('') === 0`, which the range
+ * validators then reject — the operator set the variable to nothing, which is an
+ * error, not a default. Only a genuinely absent variable is `undefined`.
+ */
+function intOrUndefined(value: string | undefined): number | undefined {
+  return value === undefined ? undefined : Number(value);
 }
 
 /**
@@ -284,6 +437,65 @@ function checkRoleSeparation(database: DatabaseConfig): readonly string[] {
 }
 
 /**
+ * Decodes one base64 PEM value and asserts it is actually PEM.
+ *
+ * The value is a secret, so a violation names the variable and the rule and never
+ * echoes the value — an exit-code-78 failure can land in CI logs (§13.6).
+ */
+function checkPemKey(value: string, variable: string): readonly string[] {
+  const decoded = Buffer.from(value, 'base64').toString('utf8');
+  if (!decoded.includes('-----BEGIN') || !decoded.includes('-----END')) {
+    return [`identity: ${variable} must be the base64 encoding of a PEM key`];
+  }
+  return [];
+}
+
+/**
+ * Master Plan §10.2/§10.3/§13.6: the identity configuration rules the shape
+ * validators cannot express.
+ *
+ * - A key must decode to PEM, so a mis-quoted or truncated secret is refused at
+ *   startup rather than at the first login.
+ * - The two keys are a pair: half a pair is a configuration mistake.
+ * - In production the pair is **required**. Outside production it may be absent, and
+ *   the identity module then fails closed rather than running a weaker check.
+ * - The ordering rules that must hold for the policy to make sense.
+ */
+function checkIdentityConfig(identity: IdentityConfig, nodeEnv: NodeEnvironment): readonly string[] {
+  const issues: string[] = [];
+
+  if (identity.jwtPrivateKey !== undefined) {
+    issues.push(...checkPemKey(identity.jwtPrivateKey, 'JWT_PRIVATE_KEY'));
+  }
+  if (identity.jwtPublicKey !== undefined) {
+    issues.push(...checkPemKey(identity.jwtPublicKey, 'JWT_PUBLIC_KEY'));
+  }
+  if (identity.jwtPrivateKey !== undefined && identity.jwtPublicKey === undefined) {
+    issues.push('identity: JWT_PRIVATE_KEY is set but JWT_PUBLIC_KEY is not; set both or neither');
+  }
+  if (identity.jwtPublicKey !== undefined && identity.jwtPrivateKey === undefined) {
+    issues.push('identity: JWT_PUBLIC_KEY is set but JWT_PRIVATE_KEY is not; set both or neither');
+  }
+  if (nodeEnv === NodeEnvironment.Production && identity.jwtPrivateKey === undefined) {
+    issues.push(
+      'identity: JWT_PRIVATE_KEY and JWT_PUBLIC_KEY are required in production; ' +
+        'the access-token surface cannot run fail-closed in a production deployment',
+    );
+  }
+  if (identity.refreshIdleTtlSeconds > identity.refreshAbsoluteTtlSeconds) {
+    issues.push('identity: REFRESH_IDLE_TTL_SECONDS must not exceed REFRESH_ABSOLUTE_TTL_SECONDS');
+  }
+  if (identity.passwordMinLength > identity.passwordMaxLength) {
+    issues.push('identity: PASSWORD_MIN_LENGTH must not exceed PASSWORD_MAX_LENGTH');
+  }
+  if (identity.throttleBaseDelaySeconds > identity.throttleMaxDelaySeconds) {
+    issues.push('identity: AUTH_THROTTLE_BASE_DELAY_SECONDS must not exceed AUTH_THROTTLE_MAX_DELAY_SECONDS');
+  }
+
+  return issues;
+}
+
+/**
  * Builds and validates the configuration, or throws ConfigurationError.
  *
  * Throwing is deliberate. Master Plan §36.1 T-1 requires that a rule be able to fail
@@ -298,6 +510,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfigShape
     http: mergeDefaults(new HttpConfig(), raw.http),
     logging: mergeDefaults(new LoggingConfig(), raw.logging),
     database: mergeDefaults(new DatabaseConfig(), raw.database),
+    identity: mergeDefaults(new IdentityConfig(), raw.identity),
   });
 
   const violations = validateSync(instance, {
@@ -306,7 +519,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfigShape
     skipMissingProperties: false,
   });
 
-  const allViolations = [...flattenViolations(violations), ...checkRoleSeparation(instance.database)];
+  const allViolations = [
+    ...flattenViolations(violations),
+    ...checkRoleSeparation(instance.database),
+    ...checkIdentityConfig(instance.identity, instance.nodeEnv),
+  ];
 
   if (allViolations.length > 0) {
     throw new ConfigurationError(allViolations);
@@ -319,6 +536,30 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfigShape
     database: {
       ...(instance.database.applicationUrl === undefined ? {} : { applicationUrl: instance.database.applicationUrl }),
       ...(instance.database.migrationUrl === undefined ? {} : { migrationUrl: instance.database.migrationUrl }),
+    },
+    // The base64 encoding is a transport detail of the environment surface; the
+    // application contract is PEM text, so it is decoded once, here. An absent key
+    // stays absent, which is what makes the identity module fail closed.
+    identity: {
+      ...(instance.identity.jwtPrivateKey === undefined
+        ? {}
+        : { jwtPrivateKey: Buffer.from(instance.identity.jwtPrivateKey, 'base64').toString('utf8') }),
+      ...(instance.identity.jwtPublicKey === undefined
+        ? {}
+        : { jwtPublicKey: Buffer.from(instance.identity.jwtPublicKey, 'base64').toString('utf8') }),
+      jwtIssuer: instance.identity.jwtIssuer,
+      jwtAudience: instance.identity.jwtAudience,
+      accessTokenTtlSeconds: instance.identity.accessTokenTtlSeconds,
+      refreshIdleTtlSeconds: instance.identity.refreshIdleTtlSeconds,
+      refreshAbsoluteTtlSeconds: instance.identity.refreshAbsoluteTtlSeconds,
+      argon2MemoryKib: instance.identity.argon2MemoryKib,
+      argon2TimeCost: instance.identity.argon2TimeCost,
+      argon2Parallelism: instance.identity.argon2Parallelism,
+      throttleBaseDelaySeconds: instance.identity.throttleBaseDelaySeconds,
+      throttleMaxDelaySeconds: instance.identity.throttleMaxDelaySeconds,
+      throttleFreeAttempts: instance.identity.throttleFreeAttempts,
+      passwordMinLength: instance.identity.passwordMinLength,
+      passwordMaxLength: instance.identity.passwordMaxLength,
     },
   };
 
