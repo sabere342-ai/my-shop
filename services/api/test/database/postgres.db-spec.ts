@@ -258,14 +258,16 @@ describe('database acceptance (real PostgreSQL)', () => {
 
       // M1b-S4 adds the sync ledger migrations to M1-S3's skeleton; M2-S1 adds
       // `0003_organizations`, and its hardening adds `0004_bootstrap_key_shape`;
-      // M2-S2 adds `0005_identity_auth`. Every applied migration must be finished
-      // and never rolled back (migration history is append-only, Master Plan §44.1).
+      // M2-S2 adds `0005_identity_auth` and `0006_users_permissions_version`.
+      // Every applied migration must be finished and never rolled back
+      // (migration history is append-only, Master Plan §44.1).
       expect(rows.map((row) => row.migration_name)).toEqual([
         '0001_schema_skeleton',
         '0002_mutation_ledger',
         '0003_organizations',
         '0004_bootstrap_key_shape',
         '0005_identity_auth',
+        '0006_users_permissions_version',
       ]);
       for (const row of rows) {
         expect(row.finished_at).not.toBeNull();
@@ -310,7 +312,7 @@ describe('database acceptance (real PostgreSQL)', () => {
       dbScript('deploy');
 
       const rows = await migrator.$queryRaw<MigrationRow[]>`SELECT migration_name FROM _prisma_migrations`;
-      expect(rows).toHaveLength(5);
+      expect(rows).toHaveLength(6);
     });
   });
 
@@ -2004,8 +2006,14 @@ describe('database acceptance (real PostgreSQL)', () => {
 
         // The slice's migration now joins a history that is already in use,
         // followed by its hardening migration 0004, followed by M2-S2's
-        // `0005_identity_auth` — the same forward-only chain production replays.
-        for (const migration of ['0003_organizations', '0004_bootstrap_key_shape', '0005_identity_auth']) {
+        // `0005_identity_auth` and `0006_users_permissions_version` — the same
+        // forward-only chain production replays.
+        for (const migration of [
+          '0003_organizations',
+          '0004_bootstrap_key_shape',
+          '0005_identity_auth',
+          '0006_users_permissions_version',
+        ]) {
           cpSync(
             path.join(API_ROOT, 'prisma', 'migrations', migration),
             path.join(scratchRoot, 'migrations', migration),
@@ -2027,6 +2035,7 @@ describe('database acceptance (real PostgreSQL)', () => {
           '0003_organizations',
           '0004_bootstrap_key_shape',
           '0005_identity_auth',
+          '0006_users_permissions_version',
         ]);
 
         // Every pre-existing M1b row survives the upgrade untouched...

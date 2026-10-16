@@ -26,14 +26,6 @@
 -- the acceptance suite's `prisma migrate diff --exit-code`, exactly as `0003`'s
 -- and `0004`'s CHECKs are).
 
--- §10.3/§11: the permission-generation column. M2-S2 mints the `perms_version`
--- claim and compares it on every authenticated request so a permissions change
--- invalidates an outstanding access token (`TOKEN_STALE`); M2-S3 owns the writer
--- that increments it. Additive with a default, so every existing row is valid
--- (§35.1: this is an added column on a table M2-S1 created, never a rewrite of
--- `0003`).
-ALTER TABLE "users" ADD COLUMN "permissions_version" INTEGER NOT NULL DEFAULT 0;
-
 -- §10.2/§40.6: the password credential, 1:1 with `users`.
 --
 --   user_id             primary key AND foreign key — one credential per identity
@@ -144,11 +136,6 @@ ALTER TABLE "refresh_tokens" ADD CONSTRAINT "refresh_tokens_successor_id_fkey" F
 ALTER TABLE "user_credentials"
   ADD CONSTRAINT "chk_user_credentials_password_hash_argon2id"
   CHECK ("password_hash" LIKE '$argon2id$%' AND length("password_hash") BETWEEN 32 AND 512);
-
--- §10.3/§11: a permission generation never goes backwards.
-ALTER TABLE "users"
-  ADD CONSTRAINT "chk_users_permissions_version_non_negative"
-  CHECK ("permissions_version" >= 0);
 
 -- §10.3: a revocation always carries a reason, and only from the closed
 -- vocabulary; an active session carries neither. The two columns move together.
