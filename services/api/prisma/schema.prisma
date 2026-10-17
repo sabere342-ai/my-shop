@@ -1,5 +1,5 @@
 // My Shop — Prisma schema (Master Plan section 40.4, slices M1-S3, M1b-S4,
-// M2-S1 and M2-S2).
+// M2-S1, M2-S2 and M2-S3).
 //
 // section 8.3 makes `prisma migrate deploy` the only migration command permitted
 // outside a developer machine, and section 35 keeps migrations forward-only: this
@@ -14,6 +14,14 @@
 // mutation idempotently replayable (section 38.9) and produce the per-organization
 // convergence feed (section 38.11). They are convergence artefacts, never business
 // tables (section 39.4, D-8), and none of them is posted to the accounting ledger.
+//
+// M2-S3 adds the RBAC surface (section 40.6 row M2-S3; section 11): the three
+// `tenancy`-owned authorization tables — `roles`, `role_permissions`, and
+// `permission_overrides` — plus the additive `organization_memberships.role_id`
+// column. The permission ids themselves are **not** a table or an enum (section
+// 11.2: strings in a versioned catalog in code, so the catalog grows without a
+// schema migration); the database only stores the grant edges and constrains
+// their shape.
 //
 // The datasource URL is read from `DATABASE_URL`, which the application role owns.
 // The migration wrapper (`scripts/db.mjs`) runs the Prisma CLI with `DATABASE_URL`
@@ -116,6 +124,17 @@ enum OrganizationStatus {
   @@map("organization_status")
 }
 
+/// section 11.4 / section 40.6 M2-S3: the closed vocabulary of a per-user override.
+/// A string is stored, not a boolean pair, so "no override" (no row) and "an explicit
+/// DENY" are distinct states (section 11.4). Mapped to the snake_case type the migration
+/// creates (§8.3 name discipline), exactly as `mutation_ledger_status`.
+enum PermissionEffect {
+  ALLOW
+  DENY
+
+  @@map("permission_effect")
+}
+
 /// section 40.6 M2-S1, §9.2 T-1/T-6: the tenant root aggregate — the boundary
 /// every organization-scoped table inherits.
 ///
@@ -140,6 +159,7 @@ model Organization {
   createdAt    DateTime           @default(now()) @map("created_at") @db.Timestamp(3)
 
   memberships OrganizationMembership[]
+  roles       Role[]
 
   @@map("organizations")
 }
@@ -180,13 +200,24 @@ model OrganizationMembership {
   organizationId String   @map("organization_id") @db.Uuid
   userId         String   @map("user_id") @db.Uuid
   isOwner        Boolean  @default(false) @map("is_owner")
+  /// §11.3/M2-S3: the single role the membership holds, or NULL for a pre-`0007`
+  /// membership the idempotent seeding has not yet classified. The composite
+  /// foreign key `(role_id, organization_id) -> roles (id, organization_id)` is what
+  /// makes a role of organization A structurally unappliable to a membership of
+  /// organization B (§9.2, AC-16). Nullable on purpose: an upgrade adds the column
+  /// before any role exists (§35.2 expand/contract).
+  roleId         String?  @map("role_id") @db.Uuid
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamp(3)
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   user         User         @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  role         Role?        @relation(fields: [roleId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
+
+  overrides PermissionOverride[]
 
   @@unique([organizationId, userId])
   @@index([userId])
+  @@index([roleId])
   @@map("organization_memberships")
 }
 
@@ -271,4 +302,77 @@ model AuthThrottle {
   blockedUntil   DateTime? @map("blocked_until") @db.Timestamptz(6)
 
   @@map("auth_throttles")
+}
+
+/// section 11.3 / section 40.6 M2-S3: a role is **data**, not an enum — a named set
+/// of permission ids scoped to one organization. The six built-in presets are seeded
+/// by idempotent application code (§35.4), never by a SQL data migration.
+///
+/// `is_owner` marks the built-in Owner role; the partial unique index
+/// `uq_roles_single_owner (organization_id) WHERE is_owner` makes it unique per
+/// organization in PostgreSQL, mirroring `uq_organizations_single_owner`. The Owner
+/// role always holds every catalog permission — a property the resolver enforces and
+/// the `role_permissions` rows record.
+///
+/// `(organization_id, key)` is unique so seeding is idempotent; `(id,
+/// organization_id)` is the composite target the org-scoped foreign keys from
+/// `role_permissions` and `organization_memberships.role_id` point at, which is what
+/// makes a role of one organization structurally unusable in another.
+model Role {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  key            String   @db.VarChar(64)
+  name           String   @db.VarChar(100)
+  isSystem       Boolean  @default(false) @map("is_system")
+  isOwner        Boolean  @default(false) @map("is_owner")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  permissions RolePermission[]
+  memberships OrganizationMembership[]
+
+  @@unique([organizationId, key])
+  @@unique([id, organizationId])
+  @@index([organizationId])
+  @@map("roles")
+}
+
+/// section 11.3 / section 40.6 M2-S3: the permission ids a role grants. The primary
+/// key `(role_id, permission_id)` makes a duplicate grant impossible; the composite
+/// foreign key `(role_id, organization_id) -> roles (id, organization_id)` keeps the
+/// grant inside the role's tenant. `permission_id` is TEXT, not an enum (section 11.2:
+/// the catalog lives in code), and a CHECK restates the id grammar so a writer that
+/// bypasses the service cannot store a malformed id.
+model RolePermission {
+  organizationId String @map("organization_id") @db.Uuid
+  roleId         String @map("role_id") @db.Uuid
+  permissionId   String @map("permission_id") @db.VarChar(100)
+
+  role Role @relation(fields: [roleId, organizationId], references: [id, organizationId], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([organizationId])
+  @@map("role_permissions")
+}
+
+/// section 11.4 / section 40.6 M2-S3: per-user `allow`/`deny` overrides, evaluated
+/// **after** the role. One row per (organization, user, permission); the absence of a
+/// row means "no override". The composite foreign key
+/// `(organization_id, user_id) -> organization_memberships (organization_id, user_id)`
+/// ties an override to a real membership of the same tenant — an override cannot exist
+/// for a non-member, and deleting the membership removes its overrides.
+model PermissionOverride {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String           @map("organization_id") @db.Uuid
+  userId         String           @map("user_id") @db.Uuid
+  permissionId   String           @map("permission_id") @db.VarChar(100)
+  effect         PermissionEffect
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamp(3)
+
+  membership OrganizationMembership @relation(fields: [organizationId, userId], references: [organizationId, userId], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([organizationId, userId, permissionId])
+  @@index([organizationId])
+  @@map("permission_overrides")
 }

@@ -30,10 +30,14 @@ interface ImportRule {
 
 const RULES: readonly ImportRule[] = [
   // D-1, the finding this test closes: tenancy never reaches into identity…
-  { dir: 'tenancy', forbidden: ['identity', 'bootstrap'] },
-  // …and identity never reaches into tenancy. `bootstrap` is the neutral
-  // composition root both would otherwise be tempted to import.
-  { dir: 'identity', forbidden: ['tenancy', 'bootstrap'] },
+  { dir: 'tenancy', forbidden: ['identity', 'bootstrap', 'authorization'] },
+  // and identity never reaches into tenancy. `bootstrap` is the neutral
+  // composition root both would otherwise be tempted to import. Neither may
+  // reach into the M2-S3 `authorization` composition layer either: it sits on
+  // top of both and composes them, so an import back would invert the layering.
+  { dir: 'identity', forbidden: ['tenancy', 'bootstrap', 'authorization'] },
+  // M2-S3: authorization composition layer must not import bootstrap
+  { dir: 'authorization', forbidden: ['bootstrap'] },
 ];
 
 /** Every non-spec TypeScript file under `root`, recursively. */

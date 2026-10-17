@@ -27,7 +27,7 @@
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID, createSign } from 'node:crypto';
 import { cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { PrismaClient, type Prisma } from '@prisma/client';
@@ -68,6 +68,28 @@ import {
 import { createOverriddenTestHarness, createTestHarness, destroyTestHarness, type TestHarness } from '../harness';
 import { FixedSyncAuthenticator } from '../sync/test-sync-authenticator';
 import { ScriptedMutationApplier, probeDirective } from '../sync/scripted-mutation-applier';
+import { AuthorizationService } from '../../src/common/tenancy/authorization/authorization.service';
+import {
+  AUTHORIZATION_SNAPSHOT_TTL_SECONDS,
+  createAuthorizationSnapshotService,
+} from '../../src/common/tenancy/authorization/authorization-snapshot';
+import {
+  OWNER_EXCLUSIVE_PERMISSION_IDS,
+  PERMISSION_CATALOG_VERSION,
+  PERMISSION_IDS,
+} from '../../src/common/tenancy/authorization/permission-catalog';
+import { ROLE_PRESETS } from '../../src/common/tenancy/authorization/role-presets';
+
+/**
+ * Jest 30's circus runner reads `testTimeout` from the *global* config and ignores
+ * the value declared on a project in `projects: [...]`, so the database project's
+ * `testTimeout: 120_000` never reaches these tests and each would be capped at the
+ * 5 s default. A case that boots a full application against an unreachable database
+ * waits out Prisma's ~5 s connection timeout before it can assert §37.4's refusal,
+ * which the default cannot cover on every host. Setting it here makes the declared
+ * budget effective for this suite only.
+ */
+jest.setTimeout(120_000);
 
 /** The one database this suite may destroy; `scripts/db.mjs` enforces the same name. */
 const TEST_DATABASE = 'my_shop_test';
@@ -258,7 +280,8 @@ describe('database acceptance (real PostgreSQL)', () => {
 
       // M1b-S4 adds the sync ledger migrations to M1-S3's skeleton; M2-S1 adds
       // `0003_organizations`, and its hardening adds `0004_bootstrap_key_shape`;
-      // M2-S2 adds `0005_identity_auth` and `0006_users_permissions_version`.
+      // M2-S2 adds `0005_identity_auth` and `0006_users_permissions_version`;
+      // M2-S3 adds `0007_authorization_roles`.
       // Every applied migration must be finished and never rolled back
       // (migration history is append-only, Master Plan §44.1).
       expect(rows.map((row) => row.migration_name)).toEqual([
@@ -268,6 +291,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         '0004_bootstrap_key_shape',
         '0005_identity_auth',
         '0006_users_permissions_version',
+        '0007_authorization_roles',
       ]);
       for (const row of rows) {
         expect(row.finished_at).not.toBeNull();
@@ -284,9 +308,11 @@ describe('database acceptance (real PostgreSQL)', () => {
       // (credential-free identity), and `organization_memberships`. M2-S2
       // authorizes the authentication tables (§40.6, §10.2, §10.3): the password
       // credential, the session (refresh-token family), the refresh-token rotation
-      // chain, and the failed-attempt backoff. Nothing else — M2-S3's roles,
-      // M2-S4's RLS, and M2-S5's device enrolment all have their own slices and
-      // their own migrations.
+      // chain, and the failed-attempt backoff. M2-S3 authorizes the RBAC tables
+      // (§40.6, §11.2, §11.4): `roles`, the `role_permissions` grant edges, and the
+      // per-user `permission_overrides`. The permission ids themselves are not a
+      // table (§11.2: the catalog lives in code). Nothing else — M2-S4's RLS and
+      // M2-S5's device enrolment have their own slices and their own migrations.
       const rows = await migrator.$queryRaw<NameRow[]>`
         SELECT tablename FROM pg_tables
         WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'
@@ -300,7 +326,10 @@ describe('database acceptance (real PostgreSQL)', () => {
         'mutation_ledger',
         'organization_memberships',
         'organizations',
+        'permission_overrides',
         'refresh_tokens',
+        'role_permissions',
+        'roles',
         'sessions',
         'sync_sequences',
         'user_credentials',
@@ -312,7 +341,7 @@ describe('database acceptance (real PostgreSQL)', () => {
       dbScript('deploy');
 
       const rows = await migrator.$queryRaw<MigrationRow[]>`SELECT migration_name FROM _prisma_migrations`;
-      expect(rows).toHaveLength(6);
+      expect(rows).toHaveLength(7);
     });
   });
 
@@ -1901,9 +1930,12 @@ describe('database acceptance (real PostgreSQL)', () => {
       const foreignKeys = await migrator.$queryRaw<ForeignKeyRow[]>`
         SELECT conname, confdeltype, confupdtype FROM pg_constraint
         WHERE conrelid = 'organization_memberships'::regclass AND contype = 'f' ORDER BY conname`;
-      // 'r' = ON DELETE RESTRICT, 'c' = ON UPDATE CASCADE (§9.2 T-2/T-5).
+      // 'r' = ON DELETE RESTRICT, 'c' = ON UPDATE CASCADE (§9.2 T-2/T-5). The
+      // `(role_id, organization_id) -> roles (id, organization_id)` key is added by
+      // M2-S3's 0007 (§11.3, AC-16); it does not change the M2-S1 tenant keys.
       expect(foreignKeys).toEqual([
         { conname: 'organization_memberships_organization_id_fkey', confdeltype: 'r', confupdtype: 'c' },
+        { conname: 'organization_memberships_role_id_organization_id_fkey', confdeltype: 'r', confupdtype: 'c' },
         { conname: 'organization_memberships_user_id_fkey', confdeltype: 'r', confupdtype: 'c' },
       ]);
     });
@@ -2554,5 +2586,842 @@ describe('database acceptance (real PostgreSQL)', () => {
         );
       }, 60_000);
     });
+  });
+  describe('authorization, roles, and permission snapshots (M2-S3)', () => {
+    /**
+     * The RBAC acceptance block (§40.6 M2-S3; §11, §9.3, §38.16.3). It provisions two
+     * tenants through the real bootstrap command, a non-owner member through the
+     * application role, and then exercises resolution, administration, invalidation,
+     * cross-tenant refusal, and the signed snapshot against real PostgreSQL.
+     *
+     * The seeding is the §35.4 **lazy application-code** path: the bootstrap command is
+     * outside this slice's allowed paths and creates no roles, so the first
+     * authorization touch of an organization is what materializes the six presets. The
+     * AC-05 assertion is therefore made *after* that first touch, and the AC-26 case
+     * proves the same seeding upgrades an organization that existed before `0007`.
+     */
+    const OWNER_A_EMAIL = 'owner.m2s3@example.test';
+    const OWNER_B_EMAIL = 'owner.m2s3.foreign@example.test';
+    const MEMBER_EMAIL = 'member.m2s3@example.test';
+    const PASSPHRASE = 'a-sufficiently-long-m2s3-passphrase';
+    const PRIMARY_KEY = 'm2s3-primary-tenant';
+    const FOREIGN_KEY = 'm2s3-foreign-tenant';
+    const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+    /** The snapshot claims a hand-forged token carries; the issuer pins these strings. */
+    const SNAPSHOT_ISSUER = 'my-shop';
+    const SNAPSHOT_AUDIENCE = 'my-shop:authorization-snapshot';
+
+    interface RoleWire {
+      id: string;
+      key: string;
+      name: string;
+      isSystem?: boolean;
+      isOwner?: boolean;
+      permissions: string[];
+    }
+
+    interface MeWire {
+      organizationId: string;
+      userId: string;
+      isOwner: boolean;
+      roleId: string | null;
+      roleKey: string | null;
+      permissionsVersion: number;
+      permissions: string[];
+    }
+
+    let config: AppConfigShape;
+    let harness: TestHarness;
+    let authz: AuthorizationService;
+    let ownerAId: string;
+    let orgAId: string;
+    let ownerBId: string;
+    let orgBId: string;
+    let memberId: string;
+    let privateKeyPem: string;
+    let ownerAToken: string;
+    let ownerBToken: string;
+
+    const b64url = (value: unknown): string => Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+    const b64urlJson = (segment: string): Record<string, unknown> =>
+      JSON.parse(Buffer.from(segment, 'base64url').toString('utf8')) as Record<string, unknown>;
+
+    const runBootstrap = async (argv: readonly string[]): Promise<BootstrapResult> => {
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const code = await runBootstrapCli(
+        argv,
+        { MIGRATION_DATABASE_URL: urls.migration },
+        { out: (line) => stdout.push(line), err: (line) => stderr.push(line) },
+      );
+      expect(stderr).toEqual([]);
+      expect(code).toBe(EXIT_SUCCESS);
+      return JSON.parse(stdout[0] ?? '{}') as BootstrapResult;
+    };
+
+    const provision = async (email: string): Promise<void> => {
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const code = await runCredentialCli(
+        ['--email', email],
+        { NODE_ENV: 'test', DATABASE_URL: urls.application, [PASSWORD_ENV_VAR]: PASSPHRASE },
+        { out: (line) => stdout.push(line), err: (line) => stderr.push(line) },
+      );
+      expect(stderr).toEqual([]);
+      expect(code).toBe(EXIT_SUCCESS);
+    };
+
+    const login = (email: string, password: string) =>
+      harness.http.post('/api/v1/auth/login').send({ email, password });
+
+    /** A fresh access token, used wherever a case has just invalidated the old one. */
+    const loginFresh = async (email: string): Promise<string> => {
+      const response = await login(email, PASSPHRASE).expect(200);
+      return response.body.accessToken as string;
+    };
+
+    const me = (token: string, organizationId: string) =>
+      harness.http
+        .get(`/api/v1/organizations/${organizationId}/authorization/me`)
+        .set('Authorization', `Bearer ${token}`);
+
+    const listRoles = (token: string, organizationId: string) =>
+      harness.http.get(`/api/v1/organizations/${organizationId}/roles`).set('Authorization', `Bearer ${token}`);
+
+    const roleIdByKey = async (token: string, organizationId: string): Promise<Record<string, string>> => {
+      const response = await listRoles(token, organizationId).expect(200);
+      const roles = response.body.roles as RoleWire[];
+      return Object.fromEntries(roles.map((role) => [role.key, role.id]));
+    };
+
+    const replaceRole = (token: string, organizationId: string, roleId: string, permissionIds: readonly string[]) =>
+      harness.http
+        .put(`/api/v1/organizations/${organizationId}/roles/${roleId}/permissions`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ permissions: permissionIds.map((permissionId) => ({ permissionId })) });
+
+    const assignMembership = (
+      token: string,
+      organizationId: string,
+      userId: string,
+      body: {
+        roleId: string | null;
+        allow: readonly { permissionId: string; effect: 'ALLOW' | 'DENY' }[];
+        deny: readonly { permissionId: string; effect: 'ALLOW' | 'DENY' }[];
+      },
+    ) =>
+      harness.http
+        .put(`/api/v1/organizations/${organizationId}/memberships/${userId}/authorization`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(body);
+
+    const mintSnapshot = (token: string, organizationId: string) =>
+      harness.http
+        .post(`/api/v1/organizations/${organizationId}/authorization/snapshot`)
+        .set('Authorization', `Bearer ${token}`);
+
+    const versionOf = async (userId: string): Promise<number> => {
+      const rows = await migrator.$queryRaw<{ permissions_version: number }[]>`
+        SELECT permissions_version FROM users WHERE id = ${userId}::uuid`;
+      return rows[0]?.permissions_version ?? -1;
+    };
+
+    /**
+     * Asserts a statement is *rejected* by the database; the transaction always rolls
+     * back, so a broken constraint leaves nothing behind for the next case.
+     */
+    const expectDbRejects = async (run: (tx: Prisma.TransactionClient) => Promise<unknown>): Promise<void> => {
+      let rejected = false;
+      try {
+        await migrator.$transaction(async (tx) => {
+          try {
+            await run(tx);
+          } catch (error) {
+            rejected = true;
+            throw error;
+          }
+          throw new Error('the statement was admitted but the constraint should have rejected it');
+        });
+      } catch {
+        /* rolled back either way */
+      }
+      expect(rejected).toBe(true);
+    };
+
+    /** Asserts a snapshot operation throws, optionally with a stable problem code. */
+    const expectSnapshotRejects = (operation: () => unknown, code?: string): void => {
+      let thrown: unknown;
+      try {
+        operation();
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeDefined();
+      if (code !== undefined) {
+        expect((thrown as { code?: string }).code).toBe(code);
+      }
+    };
+
+    beforeAll(async () => {
+      await migrator.$executeRaw`DELETE FROM auth_throttles`;
+
+      // 1. Two tenants through the real M2-S1 operator command.
+      const primary = await runBootstrap([
+        '--bootstrap-key',
+        PRIMARY_KEY,
+        '--name',
+        'Authorization Tenant',
+        '--owner-email',
+        OWNER_A_EMAIL,
+      ]);
+      ownerAId = primary.userId;
+      orgAId = primary.organizationId;
+      expect(ownerAId).toMatch(UUID_PATTERN);
+      expect(orgAId).toMatch(UUID_PATTERN);
+
+      const foreign = await runBootstrap([
+        '--bootstrap-key',
+        FOREIGN_KEY,
+        '--name',
+        'Foreign Tenant',
+        '--owner-email',
+        OWNER_B_EMAIL,
+      ]);
+      ownerBId = foreign.userId;
+      orgBId = foreign.organizationId;
+
+      // 2. Credentials through the real M2-S2 operator command.
+      await provision(OWNER_A_EMAIL);
+      await provision(OWNER_B_EMAIL);
+
+      // 3. A non-owner member of tenant A. The bootstrap creates only the owner
+      //    membership, so the member row is written through the application role —
+      //    the same path a later M3 invitation flow will use.
+      const inserted = await app.$queryRaw<{ id: string }[]>`
+        INSERT INTO users (email) VALUES (${MEMBER_EMAIL}) RETURNING id`;
+      memberId = inserted[0]?.id ?? '';
+      expect(memberId).toMatch(UUID_PATTERN);
+      await app.$executeRaw`
+        INSERT INTO organization_memberships (organization_id, user_id, is_owner)
+        VALUES (${orgAId}::uuid, ${memberId}::uuid, false)`;
+      await provision(MEMBER_EMAIL);
+
+      // 4. The application graph with a per-run key pair, and a low Argon2id cost so
+      //    the logins below are cheap (§13.6: no key material outlives the process).
+      const { privateKey, publicKey } = generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      });
+      privateKeyPem = privateKey;
+      config = loadConfig({
+        NODE_ENV: 'test',
+        LOG_LEVEL: 'silent',
+        LOG_PRETTY: 'false',
+        DATABASE_URL: urls.application,
+        JWT_PRIVATE_KEY: Buffer.from(privateKey, 'utf8').toString('base64'),
+        JWT_PUBLIC_KEY: Buffer.from(publicKey, 'utf8').toString('base64'),
+        ARGON2_MEMORY_KIB: '8192',
+        ARGON2_TIME_COST: '1',
+      });
+      harness = await createTestHarness(config);
+      authz = new AuthorizationService({ prisma: app });
+      ownerAToken = await loginFresh(OWNER_A_EMAIL);
+      ownerBToken = await loginFresh(OWNER_B_EMAIL);
+      await loginFresh(MEMBER_EMAIL);
+    }, 180_000);
+
+    afterAll(async () => {
+      await destroyTestHarness(harness);
+    });
+
+    it('AC-02: the eleven predecessor tables plus the three RBAC tables exist', async () => {
+      const rows = await migrator.$queryRaw<{ tablename: string }[]>`
+        SELECT tablename FROM pg_tables
+        WHERE schemaname = 'public'
+          AND tablename IN ('roles', 'role_permissions', 'permission_overrides')
+        ORDER BY tablename`;
+      expect(rows.map((row) => row.tablename)).toEqual(['permission_overrides', 'role_permissions', 'roles']);
+    });
+
+    it('AC-05/AC-06/AC-22: the owner resolves to the whole catalog, and the lazy seeding materializes the six presets', async () => {
+      // The first authorization touch of the organization is what seeds it.
+      const response = await me(ownerAToken, orgAId).expect(200);
+      const body = response.body as MeWire;
+      expect(body).toMatchObject({
+        organizationId: orgAId,
+        userId: ownerAId,
+        isOwner: true,
+        roleKey: 'owner',
+        permissionsVersion: 0,
+      });
+      expect(PERMISSION_IDS).toHaveLength(36);
+      expect(body.permissions).toEqual(PERMISSION_IDS);
+      expect(body.roleId).toMatch(UUID_PATTERN);
+
+      // All six presets exist with exactly the declared grant sets.
+      const listed = await listRoles(ownerAToken, orgAId).expect(200);
+      const roles = listed.body.roles as RoleWire[];
+      expect(roles.map((role) => role.key)).toEqual([
+        'accountant',
+        'cashier',
+        'manager',
+        'owner',
+        'salesperson',
+        'stockkeeper',
+      ]);
+      for (const preset of ROLE_PRESETS) {
+        const role = roles.find((candidate) => candidate.key === preset.key);
+        expect(role).toBeDefined();
+        expect(role?.isOwner).toBe(preset.isOwner);
+        expect(role?.permissions).toEqual([...preset.permissions]);
+      }
+
+      // AC-06: the Owner role holds every id and no non-owner preset holds the
+      // owner-exclusive one; O-8 withholds `sales.viewAll` from the Manager preset.
+      expect(roles.find((role) => role.key === 'owner')?.permissions).toEqual(PERMISSION_IDS);
+      expect(roles.find((role) => role.key === 'manager')?.permissions).not.toContain('sales.viewAll');
+      for (const role of roles) {
+        if (role.key !== 'owner') {
+          expect(role.permissions).not.toContain('accounting.journal.post');
+        }
+      }
+
+      // The owner membership now carries the seeded Owner role.
+      const stored = await migrator.$queryRaw<{ role_id: string | null; is_owner: boolean }[]>`
+        SELECT role_id, is_owner FROM organization_memberships
+        WHERE organization_id = ${orgAId}::uuid AND user_id = ${ownerAId}::uuid`;
+      expect(stored[0]?.is_owner).toBe(true);
+      expect(stored[0]?.role_id).toMatch(UUID_PATTERN);
+    });
+
+    it('AC-06: a second owner role in the same organization is refused by the partial unique index', async () => {
+      await expectDbRejects(
+        (tx) =>
+          tx.$executeRaw`INSERT INTO roles (organization_id, key, name, is_system, is_owner)
+            VALUES (${orgAId}::uuid, ${'owner_again'}, ${'Owner Again'}, true, true)`,
+      );
+    });
+
+    it('AC-25: the RBAC tables are migrator-owned, the application keeps DML and no DDL, and re-seeding is idempotent', async () => {
+      const owners = await migrator.$queryRaw<OwnerRow[]>`
+        SELECT c.relname, r.rolname AS owner
+        FROM pg_class c
+        JOIN pg_roles r ON r.oid = c.relowner
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relname IN ('roles', 'role_permissions', 'permission_overrides')
+        ORDER BY c.relname`;
+      expect(owners).toEqual([
+        { relname: 'permission_overrides', owner: 'my_shop_migrator' },
+        { relname: 'role_permissions', owner: 'my_shop_migrator' },
+        { relname: 'roles', owner: 'my_shop_migrator' },
+      ]);
+
+      // §13.4's runtime half: the application role still cannot run DDL.
+      await expect(app.$executeRaw`ALTER TABLE roles ADD COLUMN probe text`).rejects.toThrow();
+
+      const expectedGrants = ROLE_PRESETS.reduce((total, preset) => total + preset.permissions.length, 0);
+      const rolesBefore = await migrator.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM roles WHERE organization_id = ${orgAId}::uuid`;
+      await authz.resolveForMembership(orgAId, ownerAId);
+      await authz.ensureOrganizationRoles(orgAId);
+      const rolesAfter = await migrator.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM roles WHERE organization_id = ${orgAId}::uuid`;
+      const grants = await migrator.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM role_permissions WHERE organization_id = ${orgAId}::uuid`;
+      expect(rolesBefore[0]?.n).toBe(6);
+      expect(rolesAfter[0]?.n).toBe(6);
+      expect(grants[0]?.n).toBe(expectedGrants);
+    });
+
+    it('AC-11: a role edit refuses an unknown id, an owner-exclusive id for a non-owner role, and the Owner role', async () => {
+      const ids = await roleIdByKey(ownerAToken, orgAId);
+
+      const unknown = await replaceRole(ownerAToken, orgAId, ids.manager as string, ['not.in.catalog']).expect(400);
+      expect(unknown.body.code).toBe('VALIDATION_FAILED');
+
+      const ownerExclusive = await replaceRole(ownerAToken, orgAId, ids.manager as string, [
+        'accounting.journal.post',
+      ]).expect(400);
+      expect(ownerExclusive.body.code).toBe('VALIDATION_FAILED');
+
+      const ownerRole = await replaceRole(ownerAToken, orgAId, ids.owner as string, ['catalog.view']).expect(400);
+      expect(ownerRole.body.code).toBe('VALIDATION_FAILED');
+
+      // A role of another organization is 404, never 403 (ADR-029): the tenant scope is
+      // a route parameter, so a role id from tenant B simply does not exist here.
+      const idsB = await roleIdByKey(ownerBToken, orgBId);
+      const foreignRole = await replaceRole(ownerAToken, orgAId, idsB.manager as string, ['catalog.view']).expect(404);
+      expect(foreignRole.body.code).toBe('NOT_FOUND');
+
+      // The failed attempts left the Manager grant set untouched.
+      const listed = await listRoles(ownerAToken, orgAId).expect(200);
+      const manager = (listed.body.roles as RoleWire[]).find((role) => role.key === 'manager');
+      const managerPreset = ROLE_PRESETS.find((preset) => preset.key === 'manager');
+      if (managerPreset === undefined) {
+        throw new Error('the manager preset is missing from ROLE_PRESETS');
+      }
+      expect(manager?.permissions).toEqual([...managerPreset.permissions]);
+    });
+
+    it('AC-12: a role edit bumps permissions_version for every holder and makes their token TOKEN_STALE', async () => {
+      const ids = await roleIdByKey(ownerAToken, orgAId);
+
+      // The member holds the Manager preset, then we edit that preset.
+      await assignMembership(ownerAToken, orgAId, memberId, {
+        roleId: ids.manager as string,
+        allow: [],
+        deny: [],
+      }).expect(200);
+      const memberToken = await loginFresh(MEMBER_EMAIL);
+      const before = await versionOf(memberId);
+
+      const edited = await replaceRole(ownerAToken, orgAId, ids.manager as string, [
+        'sales.view',
+        'sales.create',
+        'catalog.view',
+      ]).expect(200);
+      // The response is in catalog order, not the order the request named them.
+      expect(edited.body.permissions).toEqual(['catalog.view', 'sales.view', 'sales.create']);
+
+      const after = await versionOf(memberId);
+      expect(after).toBe(before + 1);
+
+      const stale = await me(memberToken, orgAId).expect(401);
+      expect(stale.body.code).toBe('TOKEN_STALE');
+
+      // The Owner is not a holder of the edited role, so its token is untouched.
+      await me(ownerAToken, orgAId).expect(200);
+    });
+
+    it('AC-13: a membership change bumps only that user, atomically with the change', async () => {
+      const ids = await roleIdByKey(ownerAToken, orgAId);
+      const memberToken = await loginFresh(MEMBER_EMAIL);
+      const ownerBefore = await versionOf(ownerAId);
+      const before = await versionOf(memberId);
+
+      await assignMembership(ownerAToken, orgAId, memberId, {
+        roleId: ids.cashier as string,
+        allow: [],
+        deny: [],
+      }).expect(200);
+
+      const after = await versionOf(memberId);
+      expect(after).toBe(before + 1);
+      // The change and the bump are one transaction: the stored role is the new one.
+      const stored = await migrator.$queryRaw<{ role_id: string | null }[]>`
+        SELECT role_id FROM organization_memberships
+        WHERE organization_id = ${orgAId}::uuid AND user_id = ${memberId}::uuid`;
+      expect(stored[0]?.role_id).toBe(ids.cashier);
+
+      const stale = await me(memberToken, orgAId).expect(401);
+      expect(stale.body.code).toBe('TOKEN_STALE');
+      expect(await versionOf(ownerAId)).toBe(ownerBefore);
+    });
+
+    it('AC-08/AC-09: an ALLOW override grants, a DENY override removes, and a contradiction is refused', async () => {
+      const ids = await roleIdByKey(ownerAToken, orgAId);
+      const managerId = ids.manager as string;
+
+      // Manager already lacks `sales.viewAll`; an ALLOW adds it back.
+      await assignMembership(ownerAToken, orgAId, memberId, {
+        roleId: managerId,
+        allow: [{ permissionId: 'sales.viewAll', effect: 'ALLOW' }],
+        deny: [],
+      }).expect(200);
+      let resolved = await me(await loginFresh(MEMBER_EMAIL), orgAId).expect(200);
+      expect((resolved.body as MeWire).permissions).toContain('sales.viewAll');
+
+      // A DENY removes a role-granted permission; the ALLOW still holds.
+      await assignMembership(ownerAToken, orgAId, memberId, {
+        roleId: managerId,
+        allow: [{ permissionId: 'sales.viewAll', effect: 'ALLOW' }],
+        deny: [{ permissionId: 'sales.create', effect: 'DENY' }],
+      }).expect(200);
+      resolved = await me(await loginFresh(MEMBER_EMAIL), orgAId).expect(200);
+      const permissions = (resolved.body as MeWire).permissions;
+      expect(permissions).toContain('sales.viewAll');
+      expect(permissions).not.toContain('sales.create');
+
+      // A contradiction — the same id in both sets — is refused, and nothing changes.
+      const contradiction = await assignMembership(ownerAToken, orgAId, memberId, {
+        roleId: managerId,
+        allow: [{ permissionId: 'catalog.view', effect: 'ALLOW' }],
+        deny: [{ permissionId: 'catalog.view', effect: 'DENY' }],
+      }).expect(400);
+      expect(contradiction.body.code).toBe('VALIDATION_FAILED');
+    });
+
+    it('AC-23: a member without the required permission is refused PERMISSION_DENIED', async () => {
+      const ids = await roleIdByKey(ownerAToken, orgAId);
+      await assignMembership(ownerAToken, orgAId, memberId, {
+        roleId: ids.cashier as string,
+        allow: [],
+        deny: [],
+      }).expect(200);
+      const memberToken = await loginFresh(MEMBER_EMAIL);
+
+      // The Cashier preset holds neither `roles.manage` nor `users.manage`.
+      const deniedRoles = await listRoles(memberToken, orgAId).expect(403);
+      expect(deniedRoles.body.code).toBe('PERMISSION_DENIED');
+
+      const deniedAssign = await assignMembership(memberToken, orgAId, memberId, {
+        roleId: ids.manager as string,
+        allow: [],
+        deny: [],
+      }).expect(403);
+      expect(deniedAssign.body.code).toBe('PERMISSION_DENIED');
+    });
+
+    it('AC-10: an owner-exclusive ALLOW override is refused, and a DB-direct override is stripped by the resolver', async () => {
+      const ids = await roleIdByKey(ownerAToken, orgAId);
+      const refused = await assignMembership(ownerAToken, orgAId, memberId, {
+        roleId: ids.manager as string,
+        allow: [{ permissionId: 'accounting.journal.post', effect: 'ALLOW' }],
+        deny: [],
+      }).expect(400);
+      expect(refused.body.code).toBe('VALIDATION_FAILED');
+
+      // Bypass the service entirely: write the override straight through the
+      // application role. The resolver must still strip it (§11.2, §38.17).
+      await migrator.$executeRaw`
+        INSERT INTO permission_overrides (organization_id, user_id, permission_id, effect)
+        VALUES (${orgAId}::uuid, ${memberId}::uuid, ${'accounting.journal.post'}, 'ALLOW'::permission_effect)`;
+      try {
+        const resolved = await authz.resolveForMembership(orgAId, memberId);
+        expect(resolved.permissions).not.toContain('accounting.journal.post');
+        expect(resolved.permissions.every((id) => !OWNER_EXCLUSIVE_PERMISSION_IDS.includes(id))).toBe(true);
+      } finally {
+        await migrator.$executeRaw`
+          DELETE FROM permission_overrides
+          WHERE organization_id = ${orgAId}::uuid AND user_id = ${memberId}::uuid
+            AND permission_id = ${'accounting.journal.post'}`;
+      }
+    });
+
+    it('AC-15: a route organization outside the token is refused, and a missing membership is refused by the service', async () => {
+      const crossTenant = await me(ownerBToken, orgAId).expect(403);
+      expect(crossTenant.body.code).toBe('ORGANIZATION_FORBIDDEN');
+
+      // The token is valid for its own tenant.
+      await me(ownerBToken, orgBId).expect(200);
+
+      // A user with no membership in the requested organization is refused at the
+      // service boundary too, never defaulted to a permission.
+      await expect(authz.resolveForMembership(orgAId, ownerBId)).rejects.toMatchObject({
+        code: 'ORGANIZATION_FORBIDDEN',
+      });
+    });
+
+    it('AC-16: composite foreign keys refuse a role or override of one organization in another', async () => {
+      const idsB = await roleIdByKey(ownerBToken, orgBId);
+
+      // A grant whose role belongs to tenant B but whose organization_id says tenant A.
+      await expectDbRejects(
+        (tx) =>
+          tx.$executeRaw`INSERT INTO role_permissions (organization_id, role_id, permission_id)
+            VALUES (${orgAId}::uuid, ${idsB.manager as string}::uuid, ${'catalog.view'})`,
+      );
+
+      // An override tied to a membership that does not exist in that organization.
+      await expectDbRejects(
+        (tx) =>
+          tx.$executeRaw`INSERT INTO permission_overrides (organization_id, user_id, permission_id, effect)
+            VALUES (${orgBId}::uuid, ${memberId}::uuid, ${'catalog.view'}, 'ALLOW'::permission_effect)`,
+      );
+
+      // A membership pointed at another organization's role.
+      await expectDbRejects(
+        (tx) =>
+          tx.$executeRaw`UPDATE organization_memberships SET role_id = ${idsB.manager as string}::uuid
+            WHERE organization_id = ${orgAId}::uuid AND user_id = ${memberId}::uuid`,
+      );
+    });
+
+    it('AC-17/AC-21: a minted snapshot verifies, carries the effective set, and binds no device', async () => {
+      const minted = await mintSnapshot(ownerAToken, orgAId).expect(200);
+      const token = minted.body.snapshot as string;
+      expect(token.split('.')).toHaveLength(3);
+      expect(minted.body.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+      const service = createAuthorizationSnapshotService(config.identity);
+      const verified = service.verify(token);
+      expect(verified.userId).toBe(ownerAId);
+      expect(verified.organizationId).toBe(orgAId);
+      expect(verified.isOwner).toBe(true);
+      expect(verified.roleKey).toBe('owner');
+      expect(verified.catalogVersion).toBe(PERMISSION_CATALOG_VERSION);
+      expect(verified.permissions).toEqual(PERMISSION_IDS);
+      expect(verified.expiresAt.getTime()).toBeGreaterThan(verified.issuedAt.getTime());
+      // 72 h TTL, to the minute.
+      const ttlSeconds = Math.round((verified.expiresAt.getTime() - verified.issuedAt.getTime()) / 1000);
+      expect(ttlSeconds).toBe(AUTHORIZATION_SNAPSHOT_TTL_SECONDS);
+
+      // AC-21: the payload carries exactly the declared claims, and no device binding.
+      const payload = b64urlJson(token.split('.')[1] as string);
+      expect(Object.keys(payload).sort()).toEqual([
+        'aud',
+        'catalog_version',
+        'exp',
+        'iat',
+        'iss',
+        'org',
+        'owner',
+        'perms',
+        'perms_version',
+        'role_id',
+        'role_key',
+        'sub',
+      ]);
+      expect(Object.keys(payload).some((key) => key.toLowerCase().includes('device'))).toBe(false);
+    });
+
+    it('AC-18: verification refuses a tampered payload, a foreign signature, alg none/HS256, an expiry, and a wrong issuer', async () => {
+      const service = createAuthorizationSnapshotService(config.identity);
+      const token = (await mintSnapshot(ownerAToken, orgAId).expect(200)).body.snapshot as string;
+      const [header, payload, signature] = token.split('.') as [string, string, string];
+
+      // A tampered payload: flip `owner` to false but keep the signature.
+      const claims = b64urlJson(payload);
+      const tampered = b64url({ ...claims, owner: false });
+      expectSnapshotRejects(() => service.verify(`${header}.${tampered}.${signature}`));
+
+      // A foreign signature over the genuine header and payload.
+      const { privateKey: foreignKey } = generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      });
+      const foreignSignature = createSign('RSA-SHA256')
+        .update(`${header}.${payload}`)
+        .sign(foreignKey)
+        .toString('base64url');
+      expectSnapshotRejects(() => service.verify(`${header}.${payload}.${foreignSignature}`));
+
+      // A pinned algorithm: `none` and `HS256` are both refused.
+      for (const alg of ['none', 'HS256']) {
+        const forgedHeader = b64url({ alg, typ: 'JWT' });
+        expectSnapshotRejects(() => service.verify(`${forgedHeader}.${payload}.${signature}`));
+      }
+
+      // An expiry: minted four days ago under a 72 h TTL.
+      const expired = service.mint(
+        {
+          userId: ownerAId,
+          organizationId: orgAId,
+          roleId: null,
+          roleKey: 'owner',
+          isOwner: true,
+          permissions: PERMISSION_IDS,
+          permissionsVersion: 0,
+          issuedAtSeconds: 0,
+        },
+        new Date(Date.now() - 4 * 24 * 60 * 60 * 1000),
+      );
+      expectSnapshotRejects(() => service.verify(expired), ERROR_CODES.TOKEN_EXPIRED);
+
+      // A foreign issuer or audience.
+      const ownerClaims = {
+        userId: ownerAId,
+        organizationId: orgAId,
+        roleId: null,
+        roleKey: 'owner',
+        isOwner: true,
+        permissions: PERMISSION_IDS,
+        permissionsVersion: 0,
+        issuedAtSeconds: 0,
+      };
+      const wrongIssuer = createAuthorizationSnapshotService(config.identity, { issuer: 'not-my-shop' }).mint(
+        ownerClaims,
+      );
+      expectSnapshotRejects(() => service.verify(wrongIssuer));
+      const wrongAudience = createAuthorizationSnapshotService(config.identity, { audience: 'not-the-audience' }).mint(
+        ownerClaims,
+      );
+      expectSnapshotRejects(() => service.verify(wrongAudience));
+    });
+
+    it('AC-19: a snapshot minted under a different catalog version is refused', () => {
+      const service = createAuthorizationSnapshotService(config.identity);
+      const otherCatalog = createAuthorizationSnapshotService(config.identity, {
+        catalogVersion: PERMISSION_CATALOG_VERSION + 1,
+      });
+      const token = otherCatalog.mint({
+        userId: ownerAId,
+        organizationId: orgAId,
+        roleId: null,
+        roleKey: 'owner',
+        isOwner: true,
+        permissions: PERMISSION_IDS,
+        permissionsVersion: 0,
+        issuedAtSeconds: 0,
+      });
+      expectSnapshotRejects(() => service.verify(token));
+    });
+
+    it('AC-20: the issuer never mints an owner-exclusive permission for a non-owner, and verification refuses a hand-signed one', () => {
+      const service = createAuthorizationSnapshotService(config.identity);
+
+      // The issuer refuses to mint the combination at all.
+      expect(() =>
+        service.mint({
+          userId: memberId,
+          organizationId: orgAId,
+          roleId: null,
+          roleKey: 'manager',
+          isOwner: false,
+          permissions: ['accounting.journal.post'],
+          permissionsVersion: 0,
+          issuedAtSeconds: 0,
+        }),
+      ).toThrow();
+
+      // A hand-signed token that carries it — the signature is genuine, the structure
+      // is not — is refused at verification.
+      const header = b64url({ alg: 'RS256', typ: 'JWT' });
+      const now = Math.floor(Date.now() / 1000);
+      const payload = b64url({
+        sub: memberId,
+        org: orgAId,
+        role_id: null,
+        role_key: 'manager',
+        owner: false,
+        perms: ['accounting.journal.post'],
+        perms_version: 0,
+        catalog_version: PERMISSION_CATALOG_VERSION,
+        iss: SNAPSHOT_ISSUER,
+        aud: SNAPSHOT_AUDIENCE,
+        iat: now,
+        exp: now + 3_600,
+      });
+      const signature = createSign('RSA-SHA256')
+        .update(`${header}.${payload}`)
+        .sign(privateKeyPem)
+        .toString('base64url');
+      expectSnapshotRejects(() => service.verify(`${header}.${payload}.${signature}`));
+    });
+
+    it('AC-26: an organization created before 0007 is upgraded by idempotent application code', async () => {
+      const scratchName = 'my_shop_m2s3_upgrade';
+      const scratchMigrations = new URL(urls.migration);
+      scratchMigrations.pathname = `/${scratchName}`;
+      const scratchApplication = new URL(urls.application);
+      scratchApplication.pathname = `/${scratchName}`;
+      const scratchRoot = mkdtempSync(path.join(tmpdir(), 'my-shop-m2s3-'));
+      const scratchSchema = path.join(scratchRoot, 'schema.prisma');
+
+      await admin.$executeRawUnsafe(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`);
+      await admin.$executeRawUnsafe(`CREATE DATABASE ${scratchName}`);
+
+      const scratch = new PrismaClient({ datasourceUrl: scratchMigrations.toString() });
+      try {
+        dbScript('bootstrap', { env: { DATABASE_URL: scratchApplication.toString() } });
+
+        // A pre-0007 history: the schema the upgrade starts from, plus migrations
+        // through `0006`. Merged migrations are copied, never rewritten (§35.1).
+        cpSync(path.join(API_ROOT, 'prisma', 'schema.prisma'), scratchSchema);
+        mkdirSync(path.join(scratchRoot, 'migrations'), { recursive: true });
+        for (const migration of [
+          '0001_schema_skeleton',
+          '0002_mutation_ledger',
+          '0003_organizations',
+          '0004_bootstrap_key_shape',
+          '0005_identity_auth',
+          '0006_users_permissions_version',
+        ]) {
+          cpSync(
+            path.join(API_ROOT, 'prisma', 'migrations', migration),
+            path.join(scratchRoot, 'migrations', migration),
+            {
+              recursive: true,
+            },
+          );
+        }
+        dbScript('deploy', {
+          args: ['--schema', scratchSchema],
+          env: { MIGRATION_DATABASE_URL: scratchMigrations.toString() },
+        });
+
+        // An organization that predates the RBAC tables: inserted as raw SQL while the
+        // history ends at 0006, so its membership has no `role_id` column to point at.
+        // It is not created through `OrganizationBootstrapService` because the generated
+        // client is built from the current schema and would ask the pre-0007 database to
+        // RETURN a `role_id` column that does not exist yet.
+        await scratch.$connect();
+        const [preExisting] = await scratch.$queryRaw<{ organization_id: string; user_id: string }[]>`
+          WITH created_org AS (
+            INSERT INTO organizations (name, bootstrap_key)
+            VALUES ('Pre-existing Tenant', 'm2s3-upgrade-org')
+            RETURNING id
+          ), created_user AS (
+            INSERT INTO users (email) VALUES ('pre.m2s3@example.test')
+            RETURNING id
+          )
+          INSERT INTO organization_memberships (organization_id, user_id, is_owner)
+          SELECT created_org.id, created_user.id, true FROM created_org, created_user
+          RETURNING organization_id, user_id`;
+        if (preExisting === undefined) {
+          throw new Error('failed to insert the pre-0007 organization');
+        }
+
+        // The pre-0007 schema has no `role_id` at all — the column the upgrade adds.
+        const preRoleColumn = await scratch.$queryRaw<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM information_schema.columns
+          WHERE table_name = 'organization_memberships' AND column_name = 'role_id'`;
+        expect(preRoleColumn[0]?.n).toBe(0);
+
+        // The slice's migration now joins the in-use history.
+        cpSync(
+          path.join(API_ROOT, 'prisma', 'migrations', '0007_authorization_roles'),
+          path.join(scratchRoot, 'migrations', '0007_authorization_roles'),
+          { recursive: true },
+        );
+        dbScript('deploy', {
+          args: ['--schema', scratchSchema],
+          env: { MIGRATION_DATABASE_URL: scratchMigrations.toString() },
+        });
+
+        const migrations = await scratch.$queryRaw<MigrationRow[]>`
+          SELECT migration_name FROM _prisma_migrations ORDER BY migration_name`;
+        expect(migrations.map((row) => row.migration_name)).toContain('0007_authorization_roles');
+
+        // The migration transforms no data: the pre-existing membership still has a
+        // null role, and the organization is intact.
+        const afterMigration = await scratch.$queryRaw<{ role_id: string | null }[]>`
+          SELECT role_id FROM organization_memberships
+          WHERE organization_id = ${preExisting.organization_id}::uuid AND user_id = ${preExisting.user_id}::uuid`;
+        expect(afterMigration[0]?.role_id).toBeNull();
+        const emptyRoles = await scratch.$queryRaw<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM roles WHERE organization_id = ${preExisting.organization_id}::uuid`;
+        expect(emptyRoles[0]?.n).toBe(0);
+
+        // Idempotent application code — not a SQL data migration — materializes the
+        // presets and assigns the Owner role on the existing membership.
+        const upgradeAuthz = new AuthorizationService({ prisma: scratch });
+        await upgradeAuthz.ensureOrganizationRoles(preExisting.organization_id);
+
+        const seeded = await scratch.$queryRaw<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM roles WHERE organization_id = ${preExisting.organization_id}::uuid`;
+        expect(seeded[0]?.n).toBe(6);
+        const assigned = await scratch.$queryRaw<{ role_id: string | null }[]>`
+          SELECT role_id FROM organization_memberships
+          WHERE organization_id = ${preExisting.organization_id}::uuid AND user_id = ${preExisting.user_id}::uuid`;
+        expect(assigned[0]?.role_id).toMatch(UUID_PATTERN);
+
+        const resolved = await upgradeAuthz.resolveForMembership(preExisting.organization_id, preExisting.user_id);
+        expect(resolved.isOwner).toBe(true);
+        expect(resolved.permissions).toEqual(PERMISSION_IDS);
+      } finally {
+        await Promise.allSettled([scratch.$disconnect()]);
+        try {
+          await admin.$executeRawUnsafe(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`);
+        } catch {
+          /* best-effort cleanup; the fixed test database is untouched either way */
+        }
+        rmSync(scratchRoot, { recursive: true, force: true });
+      }
+    }, 300_000);
   });
 });
