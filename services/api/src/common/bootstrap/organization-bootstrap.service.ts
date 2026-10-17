@@ -48,7 +48,9 @@
  */
 
 import type { Organization, Prisma } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import type { Logger as PinoLogger } from 'pino';
+import { establishBootstrapKeyContext, establishTenantContext } from '../database/tenant-context';
 import {
   canonicalizeEmail,
   EmailShapeError,
@@ -195,28 +197,45 @@ export class OrganizationBootstrapService {
     }
   }
 
-  /** One interactive transaction: lock, classify-or-create, optional probe, commit. */
+  /** One interactive transaction: context, lock, classify-or-create, optional probe, commit. */
   private async runInTransaction(
     tx: Prisma.TransactionClient,
     request: NormalizedBootstrapRequest,
   ): Promise<BootstrapResult> {
+    // Decision D-B (§9, M2-S4): the §10.4 key is the credential that unlocks
+    // exactly its own tenant root. It is established before the lookup because
+    // `organizations` is now a policy-protected table: without the clause the
+    // identical-retry classification would see nothing and silently re-insert.
+    await establishBootstrapKeyContext(tx, request.bootstrapKey);
+
     // Before the lookup, not after: two racing identical requests serialize
     // here, so the second one classifies instead of inserting (AC-03).
+    //
+    // Fixed lock order — bootstrap_key (just taken), then the identity
+    // writer's per-email lock. Every bootstrap path acquires them in this
+    // order, so the waits form a chain and never a cycle.
     await acquireBootstrapKeyLock(tx, request.bootstrapKey);
 
     const stored = await findOrganizationByBootstrapKey(tx, request.bootstrapKey);
     if (stored !== null) {
+      // Re-scope from the bootstrap-key visibility to the stored tenant id: the
+      // id is now a server-derived fact from a row the §10.4 credential named,
+      // so the owner-membership read below (tenant-scoped by its own policy)
+      // can see exactly that tenant's edge and nothing else.
+      await establishTenantContext(tx, stored.id);
       return this.classify(tx, stored, request);
     }
 
-    // Fixed lock order — bootstrap_key (just taken), then the identity
-    // writer's per-email lock. Every bootstrap path acquires them in this
-    // order, so the waits form a chain and never a cycle.
     const { user } = await findOrCreateUserByEmail(tx, request.email);
 
-    // D-7: the tenancy context writes the organization and membership; the
-    // identity writer above wrote the user. Both share this transaction.
-    const { organization, membership } = await createOrganizationWithOwner(tx, {
+    // §8.2 / §5.8 of the M2-S4 record: the tenant root id is minted here —
+    // server-side, before any insert — and passed explicitly, because the
+    // `organizations` policy is `WITH CHECK (id = ctx OR bootstrap_key = key)`
+    // and no caller could otherwise satisfy the insert through the application
+    // role. Idempotent retries and races are unaffected (advisory lock + unique
+    // key + re-classification).
+    const { membership, organization } = await createOrganizationWithOwner(tx, {
+      organizationId: randomUUID(),
       name: request.name,
       bootstrapKey: request.bootstrapKey,
       ownerUserId: user.id,
@@ -286,6 +305,12 @@ export class OrganizationBootstrapService {
    * supposed to prevent (a lock namespace change, a future writer that skips
    * the lock): the key now names a committed row, and the honest answer is
    * the classification of that row — never a second insert.
+   *
+   * M2-S4: the read runs in its own transaction, because the violating one is
+   * already aborted. The same two contexts are established — the §10.4 key
+   * first (the credential that may name its tenant root), then the tenant id
+   * derived from the row the key unlocked — and the reads are the same
+   * statements the normal path makes.
    */
   private async classifyAfterUniqueViolation(
     request: NormalizedBootstrapRequest,
@@ -293,10 +318,13 @@ export class OrganizationBootstrapService {
   ): Promise<BootstrapResult | null> {
     if (!isUniqueConstraintViolation(error)) return null;
 
-    const stored = await findOrganizationByBootstrapKey(this.host.prisma, request.bootstrapKey);
-    if (stored === null) return null;
-
-    return this.classify(this.host.prisma, stored, request);
+    return this.host.prisma.$transaction(async (tx) => {
+      await establishBootstrapKeyContext(tx, request.bootstrapKey);
+      const stored = await findOrganizationByBootstrapKey(tx, request.bootstrapKey);
+      if (stored === null) return null;
+      await establishTenantContext(tx, stored.id);
+      return this.classify(tx, stored, request);
+    });
   }
 
   /** §13.1: a conflict is a security-relevant event; the log carries the key, never the values. */

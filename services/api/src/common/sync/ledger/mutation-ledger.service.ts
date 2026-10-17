@@ -22,6 +22,7 @@
 
 import type { Prisma, PrismaClient } from '@prisma/client';
 import type { Logger as PinoLogger } from 'pino';
+import { withTenantTransaction, type ContextClient } from '../../database/tenant-context';
 import { payloadHashOf } from './payload-hash';
 import { MutationContradictionError, MutationRejectedError } from './mutation-ledger.errors';
 
@@ -46,6 +47,16 @@ export interface MutationEffectResult {
   readonly resultHash: string;
 }
 
+/**
+ * The admission revalidation hook (Master Plan §9.4, §40.6 M2-S4): the current,
+ * server-side authorization check run inside the same transaction as the effect.
+ *
+ * Throw a `MutationRejectedError` to record a permanent per-mutation rejection; the
+ * ledger's rejection semantics (§38.13) then apply unchanged — the stored refusal is
+ * the replay answer, with no business effect and no change-log row.
+ */
+export type IngressRevalidation = (tx: Prisma.TransactionClient) => Promise<void>;
+
 export interface ApplyMutationRequest {
   /** Tenant scope, from the device binding (§38.16), never user input. */
   readonly organizationId: string;
@@ -64,6 +75,14 @@ export interface ApplyMutationRequest {
    * other throw rolls the whole transaction back and is propagated.
    */
   readonly apply: (tx: Prisma.TransactionClient) => Promise<MutationEffectResult>;
+  /**
+   * §9.4 / M2-S4: run before the effect, inside the same transaction, after the
+   * idempotency lookup. Order matters and is documented: a stored replay is
+   * answered from the record (no second effect, nothing re-authorized), while a
+   * first application is re-validated against **current** server state — live
+   * membership and effective permissions — never against a cached offline snapshot.
+   */
+  readonly validateIngress?: IngressRevalidation;
 }
 
 /** An APPLIED mutation response (§38.10.1). `serverSequence` is the §38.11.1 order. */
@@ -163,8 +182,15 @@ export class MutationLedgerService {
    */
   async applyMutation(request: ApplyMutationRequest): Promise<MutationOutcome> {
     const receivedPayloadHash = payloadHashOf(request.payload);
+    const validateIngress = request.validateIngress;
 
-    return this.host.prisma.$transaction(async (tx) => {
+    // §9.3 step 6 / §9.4 T-10 (M2-S4): the ledger's one transaction is now the trusted,
+    // tenant-scoped transaction. The organization id is the caller's already-verified
+    // trusted context, and `withTenantTransaction` establishes §8.2's transaction-local
+    // setting before the advisory lock — so the idempotency lookup, the revalidation
+    // read, the effect, the ledger row, the change-log row, and the cursor all run with
+    // the database policy enforcing the same tenant scope (§9.4 T-10/T-12).
+    return withTenantTransaction(this.host, request.organizationId, async (tx) => {
       // §38.9.2 / T-O5: two devices racing the same mutation are serialized here,
       // before the lookup, so the second waits and then replays instead of applying.
       // `pg_advisory_xact_lock` returns the Postgres type `void`, which `$queryRaw`
@@ -186,6 +212,23 @@ export class MutationLedgerService {
       }
 
       const receivedAt = new Date();
+
+      // §9.4 T-8/T-9 (M2-S4): the §9.4 re-validation runs here — after the
+      // idempotency lookup (a stored answer is replayed without a second
+      // authorization) and before the effect — inside the same transaction, so
+      // what the effect consumes is exactly what re-validation read. A recorded
+      // rejection follows the §38.13 path unchanged: the refusal becomes the
+      // row a later replay is answered from.
+      if (validateIngress !== undefined) {
+        try {
+          await validateIngress(tx);
+        } catch (error) {
+          if (error instanceof MutationRejectedError) {
+            return this.recordRejection(tx, request, receivedPayloadHash, receivedAt, error.code);
+          }
+          throw error;
+        }
+      }
 
       // The effect is the only code that may touch business tables; it runs with
       // the same transaction client so its writes commit or roll back with ours.
@@ -254,47 +297,54 @@ export class MutationLedgerService {
    * that success.
    */
   async pullChanges(request: PullChangesRequest): Promise<PullPage> {
-    const retentionFloor = await this.retentionFloor(request.organizationId, request.retentionDays);
+    // §9.4 T-10/T-12 (M2-S4): the feed read is tenant-owned data, so both reads —
+    // the retention floor and the page — run inside the trusted tenant
+    // transaction. The behaviour is unchanged from M1b-S6; only the scope in
+    // which the statements run is new (and additionally enforced by the
+    // `change_log` policy).
+    return withTenantTransaction(this.host, request.organizationId, async (tx) => {
+      const retentionFloor = await this.retentionFloor(tx, request.organizationId, request.retentionDays);
 
-    // §38.11.1: "a client whose cursor is older than retention performs a full
-    // re-baseline rather than a partial pull". The client is current when the
-    // next sequence it needs (`after + 1`) is at or above the floor.
-    const rebaselineRequired = retentionFloor !== null && request.after + 1n < retentionFloor;
-    if (rebaselineRequired) {
-      return {
-        changes: [],
-        nextAfter: request.after,
-        hasMore: false,
-        rebaselineRequired: true,
-        retentionFloor,
-      };
-    }
+      // §38.11.1: "a client whose cursor is older than retention performs a full
+      // re-baseline rather than a partial pull". The client is current when the
+      // next sequence it needs (`after + 1`) is at or above the floor.
+      const rebaselineRequired = retentionFloor !== null && request.after + 1n < retentionFloor;
+      if (rebaselineRequired) {
+        return {
+          changes: [],
+          nextAfter: request.after,
+          hasMore: false,
+          rebaselineRequired: true,
+          retentionFloor,
+        };
+      }
 
-    // Fetch one row beyond the page so `hasMore` is a fact, not a guess. Ordered
-    // ascending so `server_sequence` is the page's order (§38.11.2 "the server
-    // sequence guards application order").
-    const rows = await this.host.prisma.changeLog.findMany({
-      where: {
-        organizationId: request.organizationId,
-        serverSequence: { gt: request.after },
-      },
-      orderBy: { serverSequence: 'asc' },
-      take: request.limit + 1,
+      // Fetch one row beyond the page so `hasMore` is a fact, not a guess. Ordered
+      // ascending so `server_sequence` is the page's order (§38.11.2 "the server
+      // sequence guards application order").
+      const rows = await tx.changeLog.findMany({
+        where: {
+          organizationId: request.organizationId,
+          serverSequence: { gt: request.after },
+        },
+        orderBy: { serverSequence: 'asc' },
+        take: request.limit + 1,
+      });
+
+      const hasMore = rows.length > request.limit;
+      const page = hasMore ? rows.slice(0, request.limit) : rows;
+      const changes: PullChange[] = page.map((row) => ({
+        serverSequence: row.serverSequence,
+        entityType: row.entityType,
+        entityId: row.entityId,
+        mutationId: row.mutationId,
+        changedAt: row.changedAt,
+      }));
+      const last = changes[changes.length - 1];
+      const nextAfter = last === undefined ? request.after : last.serverSequence;
+
+      return { changes, nextAfter, hasMore, rebaselineRequired: false, retentionFloor };
     });
-
-    const hasMore = rows.length > request.limit;
-    const page = hasMore ? rows.slice(0, request.limit) : rows;
-    const changes: PullChange[] = page.map((row) => ({
-      serverSequence: row.serverSequence,
-      entityType: row.entityType,
-      entityId: row.entityId,
-      mutationId: row.mutationId,
-      changedAt: row.changedAt,
-    }));
-    const last = changes[changes.length - 1];
-    const nextAfter = last === undefined ? request.after : last.serverSequence;
-
-    return { changes, nextAfter, hasMore, rebaselineRequired: false, retentionFloor };
   }
 
   /**
@@ -306,8 +356,12 @@ export class MutationLedgerService {
    * boundary the endpoint enforces. A purge job is a later operational slice;
    * this definition does not change when one arrives.
    */
-  private async retentionFloor(organizationId: string, retentionDays: number): Promise<bigint | null> {
-    const rows = await this.host.prisma.$queryRaw<{ max_aged_out: unknown }[]>`
+  private async retentionFloor(
+    tx: Pick<ContextClient, '$queryRaw'>,
+    organizationId: string,
+    retentionDays: number,
+  ): Promise<bigint | null> {
+    const rows = await tx.$queryRaw<{ max_aged_out: unknown }[]>`
       SELECT max(server_sequence) AS max_aged_out
       FROM change_log
       WHERE organization_id = ${organizationId}::uuid

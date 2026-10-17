@@ -26,9 +26,16 @@ import { Module, type DynamicModule } from '@nestjs/common';
 import type { Logger as PinoLogger } from 'pino';
 import { APP_LOGGER, createAppLogger } from '../../../app.providers';
 import { APP_CONFIG, type AppConfigShape } from '../../config/app.config';
+import { AuthorizationModule } from '../../authorization/authorization.module';
+import { AuthorizationService } from '../../tenancy/authorization/authorization.service';
 import { LedgerModule } from '../ledger/mutation-ledger.module';
 import { MutationLedgerService } from '../ledger/mutation-ledger.service';
 import { FailClosedSyncAuthenticator, SYNC_AUTHENTICATOR } from './sync-auth';
+import {
+  MembershipPermissionRevalidator,
+  SYNC_INGRESS_REVALIDATOR,
+  type SyncIngressRevalidator,
+} from './ingress-revalidation';
 import { FailClosedMutationApplier, SYNC_MUTATION_APPLIER, type SyncMutationApplier } from './sync-mutation-applier';
 import { SyncAuthGuard } from './sync-push.guard';
 import { SyncPushController } from './sync-push.controller';
@@ -43,7 +50,15 @@ export class PushModule {
   static forRoot(config: AppConfigShape): DynamicModule {
     return {
       module: PushModule,
-      imports: [LedgerModule.forRoot(config)],
+      imports: [
+        LedgerModule.forRoot(config),
+        // §9.4 (M2-S4): the re-validator resolves through the same §11
+        // authorization context the routing controllers use — one resolver, one
+        // rule set. `AuthorizationModule.forRoot` re-exports the shared
+        // `IdentityModule`/`DatabaseModule.forRoot(config)` graph, deduplicated
+        // by the NestJS module system like every other composition here.
+        AuthorizationModule.forRoot(config),
+      ],
       controllers: [SyncPushController],
       providers: [
         { provide: APP_CONFIG, useValue: config },
@@ -58,12 +73,27 @@ export class PushModule {
         // §38.27 / §38.10.3: production supports no aggregate type yet, so every
         // mutation is a recorded per-mutation rejection. A test overrides this token.
         { provide: SYNC_MUTATION_APPLIER, useClass: FailClosedMutationApplier },
+        // §9.4 (M2-S4): production admission re-validates live membership and
+        // §11 effective permissions inside the acceptance transaction. It is
+        // only ever reached with a trusted context, which production does not
+        // yet issue — so the fail-closed posture is preserved end to end. A
+        // test overrides this token.
+        {
+          provide: SYNC_INGRESS_REVALIDATOR,
+          inject: [AuthorizationService],
+          useFactory: (authorization: AuthorizationService): SyncIngressRevalidator =>
+            new MembershipPermissionRevalidator(authorization),
+        },
         SyncAuthGuard,
         {
           provide: SyncPushService,
-          inject: [MutationLedgerService, SYNC_MUTATION_APPLIER, APP_LOGGER],
-          useFactory: (ledger: MutationLedgerService, applier: SyncMutationApplier, logger: PinoLogger) =>
-            new SyncPushService(ledger, applier, logger),
+          inject: [MutationLedgerService, SYNC_MUTATION_APPLIER, SYNC_INGRESS_REVALIDATOR, APP_LOGGER],
+          useFactory: (
+            ledger: MutationLedgerService,
+            applier: SyncMutationApplier,
+            ingressRevalidator: SyncIngressRevalidator,
+            logger: PinoLogger,
+          ) => new SyncPushService(ledger, applier, ingressRevalidator, logger),
         },
       ],
       exports: [SyncPushService],

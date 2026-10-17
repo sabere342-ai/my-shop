@@ -16,13 +16,16 @@
  */
 
 import type { Organization, OrganizationMembership, Prisma } from '@prisma/client';
+import { establishTenantContext } from '../database/tenant-context';
 
 /**
  * The tenancy surface a reader needs. Both `Prisma.TransactionClient` and the
  * root `PrismaClient` satisfy it, so the same classification code serves the
- * in-transaction lookup and the post-transaction retry read.
+ * in-transaction lookup and the post-transaction retry read. `$queryRaw` is
+ * included so the creation path can establish the tenant context between its
+ * two writes (§8.2, M2-S4).
  */
-export type TenancyReader = Pick<Prisma.TransactionClient, 'organization' | 'organizationMembership'>;
+export type TenancyReader = Pick<Prisma.TransactionClient, 'organization' | 'organizationMembership' | '$queryRaw'>;
 
 /** The placing of the §10.4 advisory lock needs only the raw-statement surface. */
 export type AdvisoryLockClient = Pick<Prisma.TransactionClient, '$executeRaw'>;
@@ -75,6 +78,14 @@ export async function findOwnerMembership(
 
 /** The three facts the §10.4 creation writes in one transaction. */
 export interface NewOrganizationWithOwner {
+  /**
+   * The tenant root id. Minted inside the transaction by the composition root
+   * and passed explicitly (§8.2 `WITH CHECK (id = ctx)`): the tenant root's own policy is
+   * satisfied by the caller-established bootstrap-key clause, and this is the
+   * value the same transaction's membership write is scoped by. The column
+   * default `gen_random_uuid()` stays for a writer that has no policy.
+   */
+  readonly organizationId: string;
   readonly name: string;
   /** The §10.4 idempotency key; `organizations.bootstrap_key` is UNIQUE. */
   readonly bootstrapKey: string;
@@ -91,13 +102,30 @@ export interface NewOrganizationWithOwner {
  * first, then this, so both writes commit or roll back together (§31.2) while
  * each context still writes only its own tables (D-7).
  */
+/**
+ * Creates the tenant root and its owner membership in the caller's
+ * transaction.
+ *
+ * Split from the identity write on purpose: this function never touches
+ * `users`. The composition service calls the identity writer for the user id
+ * first, then this, so both writes commit or roll back together (§31.2) while
+ * each context still writes only its own tables (D-7).
+ *
+ * M2-S4 (§8.2): between the two writes the transaction is re-scoped — the
+ * `organizations` insert has already passed its `WITH CHECK` through the
+ * caller-established bootstrap-key clause, and the membership write needs the
+ * `organization_id = ctx` clause, so the tenant context is established from
+ * the id the caller minted *inside* this transaction (a server-derived fact
+ * before any membership row exists), never from request input.
+ */
 export async function createOrganizationWithOwner(
   tx: TenancyReader,
   input: NewOrganizationWithOwner,
 ): Promise<{ organization: Organization; membership: OrganizationMembership }> {
   const organization = await tx.organization.create({
-    data: { name: input.name, bootstrapKey: input.bootstrapKey },
+    data: { id: input.organizationId, name: input.name, bootstrapKey: input.bootstrapKey },
   });
+  await establishTenantContext(tx, organization.id);
   const membership = await tx.organizationMembership.create({
     data: { organizationId: organization.id, userId: input.ownerUserId, isOwner: true },
   });

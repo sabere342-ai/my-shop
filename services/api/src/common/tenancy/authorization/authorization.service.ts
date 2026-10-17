@@ -33,6 +33,7 @@ import { PermissionEffect, type Prisma, type PrismaClient } from '@prisma/client
 
 import { DomainError } from '../../errors/domain.error';
 import { ERROR_CODES } from '../../errors/problem';
+import { withTenantTransaction } from '../../database/tenant-context';
 import { isOwnerExclusivePermission, isPermissionId, type PermissionId } from './permission-catalog';
 import { orderPermissionIds, resolveEffectivePermissions } from './effective-permissions';
 import { OWNER_ROLE_KEY, ROLE_PRESETS, ROLE_PRESET_KEYS } from './role-presets';
@@ -147,7 +148,7 @@ export class AuthorizationService {
    * resolution and administration paths call the same seeding transactionally.
    */
   async ensureOrganizationRoles(organizationId: string): Promise<void> {
-    await this.host.prisma.$transaction((tx) => this.seedRoles(tx, organizationId));
+    return withTenantTransaction(this.host, organizationId, (tx) => this.seedRoles(tx, organizationId));
   }
 
   /**
@@ -157,17 +158,37 @@ export class AuthorizationService {
    * grants, and its overrides, and resolves. A missing membership is refused
    * `ORGANIZATION_FORBIDDEN` — the caller's guard turns that into the §9.3 response
    * and records the security event; this context has no logger bound to it.
+   *
+   * M2-S4: the whole read runs inside the trusted tenant transaction (§8.2),
+   * so a role or grant of any other tenant is invisible even if the resolver
+   * were fed a cross-tenant id — the database, not only the guard, refuses it.
    */
   async resolveForMembership(organizationId: string, userId: string): Promise<EffectiveAuthorization> {
-    return this.host.prisma.$transaction(async (tx) => {
+    return withTenantTransaction(this.host, organizationId, async (tx) => {
       await this.seedRoles(tx, organizationId);
       return this.readEffective(tx, organizationId, userId);
     });
   }
 
+  /**
+   * The transaction-scoped half of the resolver (Master Plan §9.4, M2-S4): the
+   * same §11 resolution rules as `resolveForMembership`, run inside **a caller's
+   * transaction** instead of opening one.
+   *
+   * This is what the offline-mutation ingress validator uses, so the
+   * membership-and-permission read and the mutation's effect share exactly one
+   * transaction and cannot disagree. No seeding happens here: the caller's
+   * transaction is the mutation's ledger transaction, and the lazy seed for the
+   * organization ran (or runs) at its authorization touch; an unseeded tenant
+   * yields an empty permission set, which fails closed (§9.4).
+   */
+  readEffectiveInTransaction(tx: Tx, organizationId: string, userId: string): Promise<EffectiveAuthorization> {
+    return this.readEffective(tx, organizationId, userId);
+  }
+
   /** Lists an organization's roles with their stored grants, in catalog order. */
   async listRoles(organizationId: string): Promise<readonly RoleView[]> {
-    return this.host.prisma.$transaction(async (tx) => {
+    return withTenantTransaction(this.host, organizationId, async (tx) => {
       await this.seedRoles(tx, organizationId);
       const roles = await tx.role.findMany({
         where: { organizationId },
@@ -202,7 +223,7 @@ export class AuthorizationService {
    * in the same transaction (AC-12).
    */
   async replaceRolePermissions(input: ReplaceRolePermissionsInput): Promise<RoleView> {
-    return this.host.prisma.$transaction(async (tx) => {
+    return withTenantTransaction(this.host, input.organizationId, async (tx) => {
       await this.seedRoles(tx, input.organizationId);
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${roleLockKey(input.roleId)}, 0))`;
 
@@ -267,7 +288,7 @@ export class AuthorizationService {
    * appears in both `allow` and `deny` is refused as a contradiction.
    */
   async assignMembershipAuthorization(input: AssignMembershipAuthorizationInput): Promise<EffectiveAuthorization> {
-    return this.host.prisma.$transaction(async (tx) => {
+    return withTenantTransaction(this.host, input.organizationId, async (tx) => {
       await this.seedRoles(tx, input.organizationId);
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${membershipLockKey(
         input.organizationId,

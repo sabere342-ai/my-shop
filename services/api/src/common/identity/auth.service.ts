@@ -46,6 +46,7 @@ import { ERROR_CODES } from '../errors/problem';
 import type { AccessTokenService } from './access-token';
 import type { TokenResponse } from './auth.contract';
 import type { AuthThrottle } from './auth-throttle';
+import { establishUserContext, withIdentityTransaction } from '../database/tenant-context';
 import { createPasswordHasher, type PasswordHasher } from './password';
 import { canonicalizeEmail } from './user-provisioning';
 import { generateRefreshToken, hashRefreshToken } from './refresh-token';
@@ -175,12 +176,19 @@ export class AuthService {
       throw unauthenticated('login refused: the password did not verify');
     }
 
-    const organizations = await this.membershipsOf(account.id, this.host.prisma);
+    // M2-S4 (decision D-A): the membership read is tenant-owned data, and it is
+    // the §9.3 mirror of the token's own claim — so it is read inside the
+    // identity transaction, where `app.current_user_id` makes exactly the
+    // caller's own membership edges visible, across organizations (T-4), and
+    // the session write shares that transaction.
+    const accountId = account.id;
+    const storedPasswordHash = account.credential.passwordHash;
+    const tokens = await withIdentityTransaction(this.host, accountId, async (tx) => {
+      const memberships = await this.membershipsOf(account.id, tx);
 
-    // The session and the access token are written together: if signing fails
-    // (identity unconfigured, for instance) the session is rolled back rather than
-    // left as an active family whose refresh token no client ever received.
-    const tokens = await this.host.prisma.$transaction(async (tx) => {
+      // The session and the access token are written together: if signing fails
+      // (identity unconfigured, for instance) the session is rolled back rather than
+      // left as an active family whose refresh token no client ever received.
       const refreshToken = generateRefreshToken();
       const session = await tx.session.create({
         data: {
@@ -202,7 +210,7 @@ export class AuthService {
       const accessToken = this.options.accessToken.sign(
         {
           userId: account.id,
-          organizations,
+          organizations: memberships,
           sessionId: session.id,
           permissionsVersion: account.permissionsVersion,
         },
@@ -217,11 +225,11 @@ export class AuthService {
     // Opportunistic re-hash: a credential stored under older parameters is upgraded
     // on a successful login. A failure here must never fail the login the password
     // just earned, so it is best-effort; M2-S6's durable sink will record it.
-    if (this.options.password.needsRehash(account.credential.passwordHash)) {
+    if (this.options.password.needsRehash(storedPasswordHash)) {
       try {
         const rehashed = await this.options.password.hash(input.password);
         await this.host.prisma.userCredential.update({
-          where: { userId: account.id },
+          where: { userId: accountId },
           data: { passwordHash: rehashed, passwordUpdatedAt: now },
         });
       } catch {
@@ -229,7 +237,7 @@ export class AuthService {
       }
     }
 
-    this.options.sink.record({ type: 'LOGIN_SUCCEEDED', userId: account.id });
+    this.options.sink.record({ type: 'LOGIN_SUCCEEDED', userId: accountId });
 
     return tokens;
   }
@@ -303,6 +311,12 @@ export class AuthService {
         where: { id: session.userId },
         select: { permissionsVersion: true },
       });
+
+      // Decision D-A (M2-S4 §9): the membership read is policy-protected; the
+      // caller's own edges become visible from the server-resolved session's
+      // user id — the same verified identity the token claims — never a request
+      // field.
+      await establishUserContext(tx, session.userId);
       const organizations = await this.membershipsOf(session.userId, tx);
 
       const accessToken = this.options.accessToken.sign(

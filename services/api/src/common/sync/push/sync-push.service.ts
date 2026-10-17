@@ -36,12 +36,15 @@ import {
   type PushMutationOutcome,
 } from './push.contract';
 import type { SyncMutationApplier } from './sync-mutation-applier';
+import type { SyncIngressRevalidator } from './ingress-revalidation';
 import type { SyncTrustedContext } from './sync-auth';
 
 export class SyncPushService {
   constructor(
     private readonly ledger: MutationLedgerService,
     private readonly applier: SyncMutationApplier,
+    /** §9.4 (M2-S4): the acceptance re-validator. Bound in the module wiring; test-overridable. */
+    private readonly ingressRevalidator: SyncIngressRevalidator,
     private readonly logger?: PinoLogger,
   ) {}
 
@@ -178,6 +181,11 @@ export class SyncPushService {
         // than a misread replay.
         payload: mutationFingerprint(mutation),
         apply: this.applier.effectFor(mutation, context),
+        // §9.4 T-8/T-9 (M2-S4): current re-validation runs inside the ledger's
+        // transaction — after its idempotency lookup (a stored replay is
+        // answered from the record) and before the effect. The ledger turns a
+        // refusal here into the durable per-mutation REJECTED row of §38.13.
+        validateIngress: (tx) => this.ingressRevalidator.revalidate(tx, context, mutation),
       });
     } catch (error) {
       if (error instanceof MutationContradictionError) {

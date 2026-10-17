@@ -28,14 +28,23 @@ import { ERROR_CODES } from '../../errors/problem';
 export const SYNC_AUTHENTICATOR = Symbol('SYNC_AUTHENTICATOR');
 
 /**
- * The authenticated facts a push is allowed to rely on (§38.16.3). Both values are
- * server-established; neither is read from the request body.
+ * The authenticated facts a push is allowed to rely on (§38.16.3). All three values are
+ * server-established; none is read from the request body.
  */
 export interface SyncTrustedContext {
   /** §38.8.1 `organization_id`: the tenant the authenticated device belongs to. */
   readonly organizationId: string;
   /** §38.8.1 `device_id`: the registered installation the credential is bound to. */
   readonly deviceId: string;
+  /**
+   * §9.4 (M2-S4): the verified actor the §11 effective-permission re-validation runs
+   * against. M2-S2 resolves it from the access-token claim; M2-S5's device binding
+   * (§38.16.2) will make the device→actor link server-authoritative. It is **optional**
+   * until then exactly because production has no verified device yet — and a missing
+   * actor fails closed at admission (the ingress validator refuses the mutation), never
+   * by defaulting to a request-body assertion.
+   */
+  readonly actorUserId?: string;
 }
 
 /** What the authenticator may read: the raw `Authorization` header value, if any. */

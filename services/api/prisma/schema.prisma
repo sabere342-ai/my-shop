@@ -23,6 +23,21 @@
 // schema migration); the database only stores the grant edges and constrains
 // their shape.
 //
+// M2-S4 turns the tenancy boundary into a database fact (section 40.6 row M2-S4;
+// section 8.1–8.3). Every tenant-owned table named in this file — including the
+// sync infrastructure tables of M1b-S4 — now carries ENABLE + FORCE row-level
+// security with the one `tenant_isolation` policy of migration
+// `0008_tenant_row_level_security`, whose predicates read the transaction-local
+// trusted context (`app.current_organization_id`, and the two documented
+// exceptions: `app.current_user_id` for identity's own membership edges, and
+// `app.current_bootstrap_key` for the §10.4 operator classification read).
+// The Prisma datamodel cannot express policies, so the migration file — and the
+// table-inventory acceptance test — carry the authoritative posture; nothing in
+// this file changes beyond this comment. The explicitly global identity tables
+// (`users`, `user_credentials`, `sessions`, `refresh_tokens`,
+// `auth_throttles`) intentionally receive no policy: they carry no tenant
+// column and are classified per-identity, not per-tenant.
+//
 // The datasource URL is read from `DATABASE_URL`, which the application role owns.
 // The migration wrapper (`scripts/db.mjs`) runs the Prisma CLI with `DATABASE_URL`
 // rebound to `MIGRATION_DATABASE_URL`, so the migrator role is selected by the
