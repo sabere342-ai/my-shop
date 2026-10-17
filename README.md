@@ -187,6 +187,57 @@ fixed database named `my_shop_test`. It therefore requires `DATABASE_URL`,
 database** (the maintenance URL must name another); anything else is refused before
 anything is touched (Master Plan §36.1 T-5 — no silent skips).
 
+### Authorization surface (§11)
+
+Roles, permissions, and per-user overrides are the first `tenancy`-owned
+authorization surface (Master Plan §11, slice M2-S3):
+
+- **The permission catalog lives in code, not in the database** (§11.2). It is a
+  versioned table of 36 permission ids across nine categories, each with a
+  description and an `ownerExclusive` flag. Exactly one id is owner-exclusive
+  (`accounting.journal.post`): it can never be granted to a non-owner — not by a role
+  edit, not by an override, not at snapshot verification.
+- **Roles are data, not an enum** (§11.3). Every organization is seeded, by
+  idempotent application code and **never by a SQL data migration** (§35.4), with the
+  six built-in presets: Owner, Manager, Cashier, Salesperson, Stockkeeper, and
+  Accountant. The Owner role alone holds every catalog permission (including the
+  owner-exclusive id) and cannot be edited. Seeding runs **lazily** on the first
+  authorization touch of an organization, which is also the upgrade path for an
+  organization created before migration `0007`. The Manager preset deliberately lacks
+  `sales.viewAll` (§42.1 O-8).
+- **Overrides are per-user `ALLOW`/`DENY` rows evaluated after the role** (§11.4).
+  `DENY` removes a role grant and beats a same-permission `ALLOW`; `ALLOW` never
+  confers an owner-exclusive permission on a non-owner; an unknown permission id is
+  ignored — resolution fails closed.
+
+The organization-scoped routes, each under
+`/api/v1/organizations/:organizationId`:
+
+| Method | Path                          | Required permission | Purpose                                                     |
+| ------ | ----------------------------- | ------------------- | ----------------------------------------------------------- |
+| `GET`  | `/authorization/me`           | —                   | The caller's effective permissions in this organization.    |
+| `POST` | `/authorization/snapshot`     | —                   | Mint a signed authorization snapshot for the offline path.  |
+| `GET`  | `/roles`                      | `roles.manage`      | List the roles and their stored grants.                     |
+| `PUT`  | `/roles/:roleId/permissions`  | `roles.manage`      | Replace a role's grant set.                                 |
+| `PUT`  | `/memberships/:userId/authorization` | `users.manage` | Assign a member's role and `ALLOW`/`DENY` overrides.        |
+
+The organization comes from the **route parameter** and is checked against the access
+token's membership set (§9.3); a request body never names a tenant, and a foreign
+organization is refused `403 ORGANIZATION_FORBIDDEN` **and** recorded as a security
+event. A caller without the required permission is refused `PERMISSION_DENIED`.
+
+Every committed authorization change — a role edit or a membership change — bumps
+`users.permissions_version` **in the same transaction** (§10.3), so every outstanding
+access token carrying the stale value is refused `TOKEN_STALE` until its holder
+re-authenticates.
+
+The snapshot is a compact RS256 JWS (72-hour validity) over the effective permission
+set, `permissions_version`, the catalog version, the organization id, and `iat`/`exp`.
+It carries **no device id** — device binding is M2-S5 — and verification refuses a
+tampered payload, a foreign signature, an algorithm downgrade, an expired or
+wrong-issuer snapshot, an unknown catalog version, and any non-owner snapshot that
+names an owner-exclusive permission (§38.16.3, §38.17).
+
 ### Running the backend
 
 The API reads its configuration from the environment and **refuses to start** on invalid
