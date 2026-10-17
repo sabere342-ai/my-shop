@@ -5,6 +5,24 @@
  * (Master Plan §7.1 G-7, ADR-001).
  */
 
+/** OpenAPI schema `AssignMembershipAuthorizationRequest` (Master Plan §7.1, ADR-001). */
+export interface AssignMembershipAuthorizationRequest {
+  readonly roleId: string;
+  readonly allow: readonly PermissionOverrideWire[];
+  readonly deny: readonly PermissionOverrideWire[];
+}
+
+/** OpenAPI schema `AuthorizationMeResponse` (Master Plan §7.1, ADR-001). */
+export interface AuthorizationMeResponse {
+  readonly permissionsVersion: number;
+  readonly permissions: readonly string[];
+  readonly organizationId: string;
+  readonly userId: string;
+  readonly isOwner: boolean;
+  readonly roleId: string;
+  readonly roleKey: string;
+}
+
 /** OpenAPI schema `LivenessReport` (Master Plan §7.1, ADR-001). */
 export interface LivenessReport {
   readonly status: 'ok';
@@ -49,6 +67,12 @@ export interface MutationPayload {
   readonly deviceLocalSequence: number;
   readonly localCreatedAt: string;
   readonly deviceIdempotencyKey: string;
+}
+
+/** OpenAPI schema `PermissionOverrideWire` (Master Plan §7.1, ADR-001). */
+export interface PermissionOverrideWire {
+  readonly permissionId: string;
+  readonly effect: 'ALLOW' | 'DENY';
 }
 
 /** OpenAPI schema `ProblemDocument` (Master Plan §7.1, ADR-001). */
@@ -151,6 +175,37 @@ export interface ReadinessReport {
 /** OpenAPI schema `RefreshRequest` (Master Plan §7.1, ADR-001). */
 export interface RefreshRequest {
   readonly refreshToken: string;
+}
+
+/** OpenAPI schema `ReplaceRolePermissionsRequest` (Master Plan §7.1, ADR-001). */
+export interface ReplaceRolePermissionsRequest {
+  readonly permissions: readonly RolePermissionAssignment[];
+}
+
+/** OpenAPI schema `RolePermissionAssignment` (Master Plan §7.1, ADR-001). */
+export interface RolePermissionAssignment {
+  readonly permissionId: string;
+}
+
+/** OpenAPI schema `RoleResponse` (Master Plan §7.1, ADR-001). */
+export interface RoleResponse {
+  readonly id: string;
+  readonly key: string;
+  readonly name: string;
+  readonly isSystem?: boolean;
+  readonly isOwner?: boolean;
+  readonly permissions: readonly string[];
+}
+
+/** OpenAPI schema `RolesListResponse` (Master Plan §7.1, ADR-001). */
+export interface RolesListResponse {
+  readonly roles: readonly RoleResponse[];
+}
+
+/** OpenAPI schema `SnapshotResponse` (Master Plan §7.1, ADR-001). */
+export interface SnapshotResponse {
+  readonly snapshot: string;
+  readonly expiresAt: string;
 }
 
 /** OpenAPI schema `SyncState` (Master Plan §7.1, ADR-001). */

@@ -29,6 +29,7 @@ import { LedgerModule } from './common/sync/ledger/mutation-ledger.module';
 import { PullModule } from './common/sync/pull/sync-pull.module';
 import { PushModule } from './common/sync/push/sync-push.module';
 import { IdentityModule } from './common/identity/identity.module';
+import { AuthorizationModule } from './common/authorization/authorization.module';
 import { ProblemDetailsFilter } from './common/errors/problem.filter';
 import { createValidationPipe } from './common/pipes/validation.pipe';
 import { APP_LOGGER, createAppLogger } from './app.providers';
@@ -82,6 +83,7 @@ export class AppModule {
         PushModule.forRoot(config),
         PullModule.forRoot(config),
         IdentityModule.forRoot(config),
+        AuthorizationModule.forRoot(config),
       ],
       providers: coreProviders(config),
       exports: [APP_CONFIG, APP_LOGGER],
