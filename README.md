@@ -238,6 +238,52 @@ tampered payload, a foreign signature, an algorithm downgrade, an expired or
 wrong-issuer snapshot, an unknown catalog version, and any non-owner snapshot that
 names an owner-exclusive permission (§38.16.3, §38.17).
 
+### Database-enforced tenancy and ingress re-validation (§8–§9.4, slice M2-S4)
+
+Tenancy enforcement now ends at the **database predicate**, not at a guard:
+
+- **Every tenant-owned table** (the tenant root plus the eight
+  `organization_id` tables: memberships, roles, grants, overrides, the
+  mutation ledger, the change feed, the device cursors, and the per-tenant
+  sequence) carries `ENABLE` + `FORCE` row-level security with one
+  `tenant_isolation` policy (migration `0008`). The five identity tables —
+  users, credentials, sessions, refresh tokens, throttles — are classified
+  explicitly global: no RLS, on purpose, pinned by the table-inventory test.
+  The exact inventory lives in [`docs/rls-inventory.md`](docs/rls-inventory.md).
+- **One trusted transaction context** (`src/common/database/tenant-context.ts`)
+  is the only code that names a tenant to the database: `set_config(...,
+  is_local => true)` inside the transaction it guards, always from a value the
+  caller already verified — never from a request body. The setting is
+  transaction-local: gone at commit, gone at rollback, carried by no pooled
+  connection. A deleted context is a `NULL` predicate, and `NULL` filters the
+  row out exactly like `false` — "no context" is "no rows", for any session,
+  including an operator `psql`.
+- `FORCE` extends the policy to the table owner (the migrator role), so no
+  application code, present or future, reads tenant rows outside a scoped
+  transaction. Role attributes, grants, single-owner indexes, and composite
+  foreign keys are untouched: RLS is a scope on visibility, not a replacement.
+
+Two narrowly-scoped decisions — **D-A** (a verified user reads exactly their
+own membership edges across organizations, in `USING` only, from a
+server-resolved account id) and **D-B** (the §10.4 operator bootstrap key
+sees exactly its own stored tenant root) — are documented in the slice record
+and the architecture page, and each is pinned by a direct-SQL proof.
+
+**Offline mutations are re-validated at acceptance.** A signed token proves
+who was online when it was minted; it does not prove what is true days later.
+Before a mutation's effect runs, the sync ingress re-validator re-reads the
+actor's live membership and current effective permissions **inside the same
+transaction the effect commits in**: no verified actor → `UNAUTHENTICATED`;
+no live membership → `ORGANIZATION_FORBIDDEN`; a stale or stripped effective
+set → `PERMISSION_DENIED`. Refusals are recorded as per-mutation REJECTED
+ledger rows, commit nothing, and never block the rest of the batch. What the
+validator proved is exactly what the ledger applied.
+
+Production sync remains **fail-closed**: `FailClosedSyncAuthenticator` admits
+nothing this slice — device registration and binding is M2-S5. The depth of
+this posture, its honest boundaries, and the failure codes are documented in
+[`docs/security-architecture.md`](docs/security-architecture.md).
+
 ### Running the backend
 
 The API reads its configuration from the environment and **refuses to start** on invalid
