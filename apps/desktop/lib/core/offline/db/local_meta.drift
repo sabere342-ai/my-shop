@@ -1,0 +1,6 @@
+CREATE TABLE local_meta (
+  key TEXT NOT NULL PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+INSERT INTO local_meta (key, value) VALUES ('local_schema_version', '1');

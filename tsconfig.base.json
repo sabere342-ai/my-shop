@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "display": "My Shop base",
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+
+    /* Master Plan §7.1 — strict TypeScript is not optional, and these three
+       additions are the ones that actually catch real defects at this layer:
+       noUncheckedIndexedAccess   removes the "index may be undefined" class
+       exactOptionalPropertyTypes prevents an explicit undefined from silently
+                                  widening an optional field
+       noImplicitOverride         stops a subclass from quietly inheriting a
+                                  method it meant to replace */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+
+    /* Correctness */
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noPropertyAccessFromIndexSignature": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "useUnknownInCatchVariables": true,
+
+    /* Interop and emit */
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "removeComments": false,
+    "newLine": "lf",
+
+    /* Monorepo composition. Each package is a composite project and refers to
+       its workspace dependencies, so `tsc --build` emits them in dependency
+       order and cross-package types resolve from declarations rather than from
+       compiled JavaScript. Master Plan §7.1 makes contract drift a compile-time
+       failure (ADR-001), and references are what make that structural. */
+    "composite": true,
+    "incremental": true,
+
+    "skipLibCheck": true
+  }
+}

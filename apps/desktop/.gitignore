@@ -1,0 +1,34 @@
+name: my_shop_desktop
+
+# Flutter/Dart generated and platform-local material. The repository root
+# .gitignore covers the general rules; this file pins the app-level specifics so
+# the exclusions are visible from the app.
+
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+
+# pubspec.lock IS committed. This is an application, not a package: a locked
+# dependency set is what makes a release build reproducible, and Master Plan
+# section 37 treats deterministic dependencies as a security control.
+
+# Generated sources ARE committed (Master Plan section 6.7) so CI needs no codegen
+# step to analyse the tree. That includes the plugin registrant, which the Flutter
+# tool rewrites whenever a plugin is added: committing it makes an accidental
+# dependency change visible in the diff rather than only in a build log.
+
+# Platform-local
+android/local.properties
+android/.gradle/
+android/app/debug/
+android/app/profile/
+android/app/release/
+windows/flutter/ephemeral/
+
+# Never a device database in source. Master Plan §42.6 treats an exported local
+# database as sensitive business data because it may hold unsynced sales.
+*.sqlite
+*.sqlite3
+*.db

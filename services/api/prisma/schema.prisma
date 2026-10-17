@@ -1,0 +1,393 @@
+// My Shop — Prisma schema (Master Plan section 40.4, slices M1-S3, M1b-S4,
+// M2-S1, M2-S2 and M2-S3).
+//
+// section 8.3 makes `prisma migrate deploy` the only migration command permitted
+// outside a developer machine, and section 35 keeps migrations forward-only: this
+// file is the single source of truth the migration workflow diffs against.
+//
+// M1-S3 deliberately defines **no models**. A table exists only for a capability
+// whose slice authorized it (section 39.5), and domain tables arrive with their
+// owning slices.
+//
+// M1b-S4 adds the server mutation ledger (section 40.5 row M1b-S4): the four
+// infrastructure tables of the `sync` context (section 8.4) that make every offline
+// mutation idempotently replayable (section 38.9) and produce the per-organization
+// convergence feed (section 38.11). They are convergence artefacts, never business
+// tables (section 39.4, D-8), and none of them is posted to the accounting ledger.
+//
+// M2-S3 adds the RBAC surface (section 40.6 row M2-S3; section 11): the three
+// `tenancy`-owned authorization tables — `roles`, `role_permissions`, and
+// `permission_overrides` — plus the additive `organization_memberships.role_id`
+// column. The permission ids themselves are **not** a table or an enum (section
+// 11.2: strings in a versioned catalog in code, so the catalog grows without a
+// schema migration); the database only stores the grant edges and constrains
+// their shape.
+//
+// M2-S4 turns the tenancy boundary into a database fact (section 40.6 row M2-S4;
+// section 8.1–8.3). Every tenant-owned table named in this file — including the
+// sync infrastructure tables of M1b-S4 — now carries ENABLE + FORCE row-level
+// security with the one `tenant_isolation` policy of migration
+// `0008_tenant_row_level_security`, whose predicates read the transaction-local
+// trusted context (`app.current_organization_id`, and the two documented
+// exceptions: `app.current_user_id` for identity's own membership edges, and
+// `app.current_bootstrap_key` for the §10.4 operator classification read).
+// The Prisma datamodel cannot express policies, so the migration file — and the
+// table-inventory acceptance test — carry the authoritative posture; nothing in
+// this file changes beyond this comment. The explicitly global identity tables
+// (`users`, `user_credentials`, `sessions`, `refresh_tokens`,
+// `auth_throttles`) intentionally receive no policy: they carry no tenant
+// column and are classified per-identity, not per-tenant.
+//
+// The datasource URL is read from `DATABASE_URL`, which the application role owns.
+// The migration wrapper (`scripts/db.mjs`) runs the Prisma CLI with `DATABASE_URL`
+// rebound to `MIGRATION_DATABASE_URL`, so the migrator role is selected by the
+// process environment rather than by a second block in this file — one datasource
+// block, one schema, and no ambient way for a migration to run as the application.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// section 38.9.1: the append-only per-mutation record. One row per
+/// (organization_id, mutation_id); a pushed mutation is never applied twice.
+/// Mapped to the snake_case type the migration creates (§8.3 name discipline);
+/// without this Prisma would look for a quoted "MutationLedgerStatus" type.
+enum MutationLedgerStatus {
+  APPLIED
+  REJECTED
+
+  @@map("mutation_ledger_status")
+}
+
+/// section 38.9.1: the server mutation ledger. The primary key IS the idempotency
+/// key: identical (organization_id, mutation_id) makes `REPLAY` or
+/// `MUTATION_CONTRADICTION` a lookup, never a second effect (section 38.9.2).
+/// `payload_hash` is SHA-256 over the canonical payload; `result_hash` over the
+/// resulting state, so a genuine contradiction is distinguishable from a replay.
+model MutationLedger {
+  organizationId String               @map("organization_id") @db.Uuid
+  mutationId     String               @map("mutation_id") @db.Uuid
+  deviceId       String               @map("device_id") @db.Uuid
+  receivedAt     DateTime             @map("received_at") @db.Timestamptz(6)
+  payloadHash    String               @map("payload_hash") @db.VarChar(64)
+  resultRef      String?              @map("result_ref")
+  resultHash     String?              @map("result_hash") @db.VarChar(64)
+  serverSequence BigInt?              @map("server_sequence")
+  status         MutationLedgerStatus
+  rejectionCode  String?              @map("rejection_code")
+
+  @@id([organizationId, mutationId])
+  @@index([organizationId, deviceId])
+  @@index([organizationId, receivedAt])
+  @@map("mutation_ledger")
+}
+
+/// section 38.11.1: the per-organization change feed, written in the same
+/// transaction as the business change. Cursor-based pull pages on
+/// server_sequence (section 38.11.2); `entity_type`/`entity_id` carry the
+/// aggregate the change touched so the feed stays generic (section 39.5).
+model ChangeLog {
+  organizationId String   @map("organization_id") @db.Uuid
+  serverSequence BigInt   @map("server_sequence")
+  mutationId     String?  @map("mutation_id") @db.Uuid
+  entityType     String   @map("entity_type")
+  entityId       String   @map("entity_id")
+  changedAt      DateTime @map("changed_at") @db.Timestamptz(6)
+
+  @@id([organizationId, serverSequence])
+  @@index([organizationId, entityType, entityId])
+  @@map("change_log")
+}
+
+/// section 40.5 M1b-S4: per-device sync cursors. `last_push` tracks the highest
+/// server sequence this device's mutations reached at acceptance (never moved
+/// backwards); `last_pull` is the pull-resume cursor (section 38.11.2), advanced
+/// only after a batch is applied locally.
+model DeviceSyncCursor {
+  organizationId           String   @map("organization_id") @db.Uuid
+  deviceId                 String   @map("device_id") @db.Uuid
+  lastPushedServerSequence BigInt?  @map("last_pushed_server_sequence")
+  lastPullServerSequence   BigInt   @default(0) @map("last_pull_server_sequence")
+  updatedAt                DateTime @map("updated_at") @db.Timestamptz(6)
+
+  @@id([organizationId, deviceId])
+  @@map("device_sync_cursors")
+}
+
+/// implementation of section 38.11.1's single monotonic per-organization
+/// server sequence. Gaps are expected and harmless (section 38.11.1).
+model SyncSequence {
+  organizationId String @map("organization_id") @db.Uuid
+  lastSequence   BigInt @map("last_sequence")
+
+  @@id([organizationId])
+  @@map("sync_sequences")
+}
+
+/// section 40.6 M2-S1: lifecycle state of a tenant root aggregate. A closed
+/// vocabulary (§35.1): adding a value is a new forward-only migration.
+/// The deactivation *workflow* is out of scope here — only the state exists.
+enum OrganizationStatus {
+  ACTIVE
+  DEACTIVATED
+
+  @@map("organization_status")
+}
+
+/// section 11.4 / section 40.6 M2-S3: the closed vocabulary of a per-user override.
+/// A string is stored, not a boolean pair, so "no override" (no row) and "an explicit
+/// DENY" are distinct states (section 11.4). Mapped to the snake_case type the migration
+/// creates (§8.3 name discipline), exactly as `mutation_ledger_status`.
+enum PermissionEffect {
+  ALLOW
+  DENY
+
+  @@map("permission_effect")
+}
+
+/// section 40.6 M2-S1, §9.2 T-1/T-6: the tenant root aggregate — the boundary
+/// every organization-scoped table inherits.
+///
+/// `bootstrap_key` is the DB-enforced idempotency key (§10.4) of the
+/// operator-only bootstrap command: one row may ever carry a key, so an
+/// identical retry is classified from the stored row and a conflicting retry
+/// fails on the unique constraint instead of being adopted or overwritten.
+/// It is never read from a request body (§39.2: no client-supplied tenant or
+/// idempotency identifiers).
+///
+/// `name` is intentionally **not** globally unique (§9.2 T-7): a global name
+/// unique would later leak another tenant's existence through a uniqueness
+/// violation. Uniqueness lives only where it is operationally required.
+///
+/// Ownership is expressed solely by `organization_memberships.is_owner`
+/// (partial unique index) — one source of truth, no dual owner columns.
+model Organization {
+  id           String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name         String             @db.VarChar(200)
+  status       OrganizationStatus @default(ACTIVE)
+  bootstrapKey String             @unique @map("bootstrap_key") @db.VarChar(64)
+  createdAt    DateTime           @default(now()) @map("created_at") @db.Timestamp(3)
+
+  memberships OrganizationMembership[]
+  roles       Role[]
+
+  @@map("organizations")
+}
+
+/// section 40.6 M2-S1 identity foundation, §8.4: credential-free on purpose.
+/// Email is stored canonicalized (trim + lowercase) — the natural key, and the
+/// narrow seam M2-S2 will reuse for login. Password material, sessions, tokens,
+/// and roles arrive with M2-S2/M2-S3 in their own migrations, never here.
+model User {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email     String   @unique @db.VarChar(320)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+
+  /// Master Plan §10.3 / §11: bumped whenever a user's effective permissions
+  /// change, so a stale access token is detectable (`TOKEN_STALE`). M2-S2 carries
+  /// the claim and compares it; M2-S3 owns the writer.
+  permissionsVersion Int @default(0) @map("permissions_version")
+
+  memberships OrganizationMembership[]
+  credential   UserCredential?
+  sessions     Session[]
+
+  @@map("users")
+}
+
+/// §9.2 T-2/T-5 (one owner) and T-4 (multi-org membership): the membership
+/// edge. The partial unique index `uq_organizations_single_owner
+/// (organization_id) WHERE is_owner` is the single ownership source of truth —
+/// a second owner row fails in PostgreSQL no matter what the caller believes.
+///
+/// `ON DELETE RESTRICT` keeps tenant history referential: an organization or
+/// user that still has memberships can never be deleted out from under them.
+/// Cross-slice `organization_id` columns (sync tables) intentionally carry no
+/// FK — merged migrations are immutable (§35.1) and FK-free sync writes stay
+/// available during bootstrap.
+model OrganizationMembership {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  isOwner        Boolean  @default(false) @map("is_owner")
+  /// §11.3/M2-S3: the single role the membership holds, or NULL for a pre-`0007`
+  /// membership the idempotent seeding has not yet classified. The composite
+  /// foreign key `(role_id, organization_id) -> roles (id, organization_id)` is what
+  /// makes a role of organization A structurally unappliable to a membership of
+  /// organization B (§9.2, AC-16). Nullable on purpose: an upgrade adds the column
+  /// before any role exists (§35.2 expand/contract).
+  roleId         String?  @map("role_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  role         Role?        @relation(fields: [roleId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
+
+  overrides PermissionOverride[]
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@index([roleId])
+  @@map("organization_memberships")
+}
+
+/// section 40.6 M2-S2, section 10.2: the password credential, 1:1 with `users`.
+/// Only the Argon2id PHC string is ever stored — never plaintext and never a
+/// reversible form. The database CHECK
+/// `chk_user_credentials_password_hash_argon2id` restates the algorithm prefix,
+/// so a writer that bypasses the service cannot store a foreign scheme (the same
+/// F-3 discipline M2-S1's migration 0004 applied to the bootstrap key).
+///
+/// A missing row means "this user has no password set" and is a refusal, never an
+/// empty credential.
+model UserCredential {
+  userId            String   @id @map("user_id") @db.Uuid
+  passwordHash      String   @map("password_hash")
+  passwordUpdatedAt DateTime @default(now()) @map("password_updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("user_credentials")
+}
+
+/// section 40.6 M2-S2, section 10.3: the server-side session. One row is one
+/// refresh-token **family**: every token minted from a single login belongs to
+/// it, so reuse detection revokes the whole family by revoking this one row.
+///
+/// `revoked_at IS NULL` means active. Revocation is permanent: a new login opens
+/// a new session rather than un-revoking an old one. `revoked_reason` is a closed
+/// vocabulary enforced by a CHECK (the database is the last line of defence).
+model Session {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt        DateTime  @default(now()) @map("last_used_at") @db.Timestamptz(6)
+  absoluteExpiresAt DateTime  @map("absolute_expires_at") @db.Timestamptz(6)
+  revokedAt         DateTime? @map("revoked_at") @db.Timestamptz(6)
+  revokedReason     String?   @map("revoked_reason")
+
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  tokens RefreshToken[]
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+/// section 40.6 M2-S2, section 10.3: one rotating opaque refresh token. Only the
+/// SHA-256 hex digest is persisted (`token_hash`); the token itself exists only in
+/// the response body and is never logged or stored in clear.
+///
+/// `consumed_at` + `successor_id` is the rotation chain: consuming a token marks
+/// it used and links the replacement that replaced it. Presenting a token that is
+/// already consumed is a **reuse** signal, and the service revokes the family.
+/// The CHECK `chk_refresh_tokens_consumed_has_successor` makes "consumed implies a
+/// successor" a database fact.
+model RefreshToken {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId     String    @map("session_id") @db.Uuid
+  tokenHash     String    @unique @map("token_hash") @db.Char(64)
+  issuedAt      DateTime  @default(now()) @map("issued_at") @db.Timestamptz(6)
+  idleExpiresAt DateTime  @map("idle_expires_at") @db.Timestamptz(6)
+  consumedAt    DateTime? @map("consumed_at") @db.Timestamptz(6)
+  successorId   String?   @unique @map("successor_id") @db.Uuid
+
+  session     Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  successor   RefreshToken? @relation("RefreshTokenSuccessor", fields: [successorId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  predecessor RefreshToken? @relation("RefreshTokenSuccessor")
+
+  @@index([sessionId])
+  @@map("refresh_tokens")
+}
+
+/// section 40.6 M2-S2, section 10.2: bounded failed-attempt backoff. The key is a
+/// caller-derived scope (the canonical email for account lockout, and separately
+/// the client address) so one primitive throttles both. `blocked_until` is always
+/// bounded in the future by the service, so a lockout is never permanent and an
+/// administrative unlock is possible by deleting the row.
+model AuthThrottle {
+  key            String    @id
+  failureCount   Int       @map("failure_count")
+  firstFailureAt DateTime  @map("first_failure_at") @db.Timestamptz(6)
+  lastFailureAt  DateTime  @map("last_failure_at") @db.Timestamptz(6)
+  blockedUntil   DateTime? @map("blocked_until") @db.Timestamptz(6)
+
+  @@map("auth_throttles")
+}
+
+/// section 11.3 / section 40.6 M2-S3: a role is **data**, not an enum — a named set
+/// of permission ids scoped to one organization. The six built-in presets are seeded
+/// by idempotent application code (§35.4), never by a SQL data migration.
+///
+/// `is_owner` marks the built-in Owner role; the partial unique index
+/// `uq_roles_single_owner (organization_id) WHERE is_owner` makes it unique per
+/// organization in PostgreSQL, mirroring `uq_organizations_single_owner`. The Owner
+/// role always holds every catalog permission — a property the resolver enforces and
+/// the `role_permissions` rows record.
+///
+/// `(organization_id, key)` is unique so seeding is idempotent; `(id,
+/// organization_id)` is the composite target the org-scoped foreign keys from
+/// `role_permissions` and `organization_memberships.role_id` point at, which is what
+/// makes a role of one organization structurally unusable in another.
+model Role {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  key            String   @db.VarChar(64)
+  name           String   @db.VarChar(100)
+  isSystem       Boolean  @default(false) @map("is_system")
+  isOwner        Boolean  @default(false) @map("is_owner")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  permissions RolePermission[]
+  memberships OrganizationMembership[]
+
+  @@unique([organizationId, key])
+  @@unique([id, organizationId])
+  @@index([organizationId])
+  @@map("roles")
+}
+
+/// section 11.3 / section 40.6 M2-S3: the permission ids a role grants. The primary
+/// key `(role_id, permission_id)` makes a duplicate grant impossible; the composite
+/// foreign key `(role_id, organization_id) -> roles (id, organization_id)` keeps the
+/// grant inside the role's tenant. `permission_id` is TEXT, not an enum (section 11.2:
+/// the catalog lives in code), and a CHECK restates the id grammar so a writer that
+/// bypasses the service cannot store a malformed id.
+model RolePermission {
+  organizationId String @map("organization_id") @db.Uuid
+  roleId         String @map("role_id") @db.Uuid
+  permissionId   String @map("permission_id") @db.VarChar(100)
+
+  role Role @relation(fields: [roleId, organizationId], references: [id, organizationId], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([organizationId])
+  @@map("role_permissions")
+}
+
+/// section 11.4 / section 40.6 M2-S3: per-user `allow`/`deny` overrides, evaluated
+/// **after** the role. One row per (organization, user, permission); the absence of a
+/// row means "no override". The composite foreign key
+/// `(organization_id, user_id) -> organization_memberships (organization_id, user_id)`
+/// ties an override to a real membership of the same tenant — an override cannot exist
+/// for a non-member, and deleting the membership removes its overrides.
+model PermissionOverride {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String           @map("organization_id") @db.Uuid
+  userId         String           @map("user_id") @db.Uuid
+  permissionId   String           @map("permission_id") @db.VarChar(100)
+  effect         PermissionEffect
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamp(3)
+
+  membership OrganizationMembership @relation(fields: [organizationId, userId], references: [organizationId, userId], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([organizationId, userId, permissionId])
+  @@index([organizationId])
+  @@map("permission_overrides")
+}

@@ -1,0 +1,40 @@
+﻿{
+  "name": "@my-shop/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Generated API contract types - the single source of truth shared by the backend and the Flutter client.",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "clean": "tsc --build --clean",
+    "typecheck": "tsc --build",
+    "typecheck:solo": "tsc --noEmit",
+    "lint": "eslint \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "test": "jest --passWithNoTests"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@types/jest": "30.0.0",
+    "@types/node": "22.20.5",
+    "eslint": "9.39.5",
+    "jest": "30.5.2",
+    "prettier": "3.9.9",
+    "ts-jest": "29.4.14",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.0"
+  }
+}

@@ -1,0 +1,11 @@
+# Toolchain pin for My Shop.
+#
+# R-5 (Master Plan §42.2) recorded a stale Flutter on the development host.
+# These pins are the resolution: the newer SDK is selected per-invocation by
+# tool/flutterw, with no global upgrade and no PATH mutation.
+#
+# Verified on this host with `flutter doctor`: no issues found.
+
+nodejs 22.22.3
+dart 3.13.4
+flutter 3.47.5

@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // The test tree is type-checked but never emitted: `tsconfig.json` owns the build
+    // output, and a compiled test tree would end up in `dist/` and be reachable by the
+    // shipped process. Integration tests run through ts-jest against sources.
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "incremental": false,
+    "noEmit": true,
+
+    // The default `rootDir` is `./src`, and `test/` sits outside it. Widening it here
+    // rather than in the build config keeps the emitted layout unchanged.
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

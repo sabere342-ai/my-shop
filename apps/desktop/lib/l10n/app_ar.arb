@@ -1,0 +1,9 @@
+{
+  "@@locale": "ar",
+  "appTitle": "My Shop",
+  "shellTitle": "الأساس الجاهز",
+  "shellBody": "لا توجد شاشات عمل في هذه النسخة.",
+  "notFoundTitle": "الصفحة غير موجودة",
+  "notFoundBody": "ربما حُذف الرابط أو تغيّر.",
+  "backToHome": "العودة إلى البداية"
+}

@@ -1,0 +1,7 @@
+# Code owners — §37.3 gate G-3 (owner review required, no self-merge of
+# unreviewed work) and §43.1 G-12 (owner-only merge).
+#
+# Every path has exactly one owner. The owner account is the repository's
+# administrator, so a required review can only come from that account, and
+# `enforce_admins` on `main` keeps the administrator inside the same rule.
+* @sabere342-ai

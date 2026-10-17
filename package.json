@@ -1,0 +1,50 @@
+{
+  "name": "my-shop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "My Shop — Arabic-first point-of-sale and back-office system for a small independent retail business.",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": "22.22.3",
+    "npm": ">=10.9.0 <11"
+  },
+  "workspaces": [
+    "services/api",
+    "packages/contracts",
+    "packages/testkit"
+  ],
+  "scripts": {
+    "toolchain:verify": "node ./tool/verify-toolchain.mjs",
+    "toolchain:sdk": "node ./tool/pinned-sdk.mjs",
+    "flutter:analyze": "node ./tool/flutterw.mjs analyze --fatal-infos",
+    "flutter:test": "node ./tool/flutterw.mjs test",
+    "flutter:doctor": "node ./tool/flutterw.mjs doctor",
+    "contracts:generate": "node ./tool/contract/generate.mjs",
+    "contracts:check": "node ./tool/contract/generate.mjs --check",
+    "contracts:typecheck": "npm run typecheck --workspace @my-shop/contracts",
+    "testkit:typecheck": "npm run typecheck --workspace @my-shop/testkit",
+    "api:typecheck": "npm run typecheck --workspace @my-shop/api",
+    "typecheck": "npm run contracts:typecheck && npm run testkit:typecheck && npm run api:typecheck",
+    "lint": "npm run lint --workspaces --if-present",
+    "format:check": "npm run format:check --workspaces --if-present",
+    "format": "npm run format --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspace @my-shop/contracts && npm run build --workspace @my-shop/testkit && npm run build --workspace @my-shop/api",
+    "db:bootstrap": "npm run db:bootstrap --workspace @my-shop/api",
+    "db:migrate": "npm run db:migrate --workspace @my-shop/api --",
+    "bootstrap:org": "npm run bootstrap:org --workspace @my-shop/api --",
+    "gate:secret-scan": "node ./tool/ci/secret-scan.mjs",
+    "gate:markdown": "node ./tool/ci/markdown-check.mjs",
+    "gate:import-boundary": "node ./tool/ci/import-boundary.mjs",
+    "gate:vocabulary": "node ./tool/ci/vocabulary-ban.mjs",
+    "gate:localization": "node ./tool/ci/localization-check.mjs",
+    "gate:design-system": "node ./tool/ci/design-system-check.mjs",
+    "gate:immutability": "node ./tool/ci/immutability-check.mjs",
+    "gate:offline": "node ./tool/ci/offline-guards.mjs",
+    "gate:migrations": "node ./tool/ci/migration-immutability.mjs",
+    "gates": "npm run gate:secret-scan && npm run gate:markdown && npm run gate:import-boundary && npm run gate:vocabulary && npm run gate:localization && npm run gate:design-system && npm run gate:immutability && npm run gate:offline && npm run gate:migrations",
+    "verify": "npm run toolchain:verify && npm run gates && npm run format:check && npm run lint && npm run typecheck && npm run contracts:check && npm run test && npm run flutter:analyze && npm run flutter:test",
+    "verify:node": "npm run toolchain:verify && npm run gates && npm run format:check && npm run lint && npm run typecheck && npm run contracts:check && npm run test",
+    "verify:flutter": "npm run flutter:analyze && npm run flutter:test"
+  }
+}
