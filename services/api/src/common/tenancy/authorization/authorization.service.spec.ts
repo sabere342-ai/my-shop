@@ -74,6 +74,9 @@ class FakeDb {
 
   $executeRaw = (): Promise<number> => Promise.resolve(1);
 
+  /** The `set_config` statements of the trusted tenant context (M2-S4); no-ops here. */
+  $queryRaw = (): Promise<unknown[]> => Promise.resolve([]);
+
   $transaction = <T>(run: (tx: FakeDb) => Promise<T>): Promise<T> => run(this);
 
   role = {

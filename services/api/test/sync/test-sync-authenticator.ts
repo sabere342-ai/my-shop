@@ -25,6 +25,24 @@ export class FixedSyncAuthenticator implements SyncAuthenticator {
   }
 }
 
+/**
+ * Answers every request with the context currently held by the shared cell, so
+ * one harness can drive several identity scenarios without a rebuild. The cell
+ * is test-owned state: `undefined` context values are caller errors and the
+ * authenticator still never reads anything from the request.
+ */
+export class MutableSyncAuthenticator implements SyncAuthenticator {
+  constructor(private readonly cell: { context: SyncTrustedContext }) {}
+
+  authenticate(): Promise<SyncTrustedContext> {
+    const { context } = this.cell;
+    if (context === undefined) {
+      return Promise.reject(new Error('the mutable test authenticator has no context installed'));
+    }
+    return Promise.resolve(context);
+  }
+}
+
 /** Refuses every request with the production `UNAUTHENTICATED` code. */
 export class RefusingSyncAuthenticator implements SyncAuthenticator {
   authenticate(): Promise<SyncTrustedContext> {

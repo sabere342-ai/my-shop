@@ -117,7 +117,7 @@ function loggerStub(): PinoLogger & { warn: jest.Mock } {
 }
 
 describe('MutationLedgerService', () => {
-  const ORGANIZATION_ID = 'organization-1';
+  const ORGANIZATION_ID = '11111111-1111-4111-8111-111111111111';
   const MUTATION_ID = 'mutation-1';
   const DEVICE_ID = 'device-1';
 
@@ -184,13 +184,12 @@ describe('MutationLedgerService', () => {
       }),
     });
 
-    // §38.9.2 / T-O5: competing requests are serialized before the lookup, and
-    // the cursor advance is part of the same transaction. The lock and cursor
-    // advance are statements (`$executeRaw`); the counter allocation is a
-    // `$queryRaw` reading `last_sequence`.
+    // The trusted transaction context (`set_config`, M2-S4) and the §38.11.1
+    // counter allocation are `$queryRaw`; the advisory lock and the cursor
+    // advance are statements (`$executeRaw`).
     expect(tx.calls).toEqual(['advisory-lock', 'cursor-upsert']);
     expect(tx.tx.$executeRaw).toHaveBeenCalledTimes(2);
-    expect(tx.tx.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(tx.tx.$queryRaw).toHaveBeenCalledTimes(2);
   });
 
   it('an identical replay returns the stored response and applies nothing (§38.9.2)', async () => {
@@ -275,10 +274,11 @@ describe('MutationLedgerService', () => {
     });
     expect(tx.tx.changeLog.create).not.toHaveBeenCalled();
     // The advisory lock is a statement (`$executeRaw`) and the only one: the
-    // counter was never allocated (`$queryRaw` untouched), and no cursor upsert.
+    // counter was never allocated, and no cursor upsert. The one `$queryRaw`
+    // call is the trusted tenant context establishment (M2-S4).
     expect(tx.tx.$executeRaw).toHaveBeenCalledTimes(1);
     expect(tx.calls).toEqual(['advisory-lock']);
-    expect(tx.tx.$queryRaw).not.toHaveBeenCalled();
+    expect(tx.tx.$queryRaw).toHaveBeenCalledTimes(1);
   });
 
   it('an identical replay of a stored rejection returns the stored rejection (§38.13)', async () => {
@@ -323,6 +323,160 @@ describe('MutationLedgerService', () => {
 });
 
 /**
+ * The §9.4 ingress re-validation hook (Master Plan §40.6, M2-S4).
+ *
+ * The real re-validator's authorization rules are proven by the authorization
+ * suites and the RLS acceptance suite; this suite pins the **contract the
+ * ledger owes the hook**: it runs inside the ledger's transaction, after the
+ * idempotency lookup and before the effect (`§9.4` order); a
+ * `MutationRejectedError` becomes the durable §38.13 rejection row; a replay is
+ * answered from the stored record without a second authorization; and any
+ * other error propagates as the server fault it is.
+ */
+describe('MutationLedgerService ingress re-validation hook (M2-S4)', () => {
+  const ORGANIZATION_ID = '11111111-1111-4111-8111-111111111111';
+  const MUTATION_ID = '33333333-3333-4333-8333-333333333333';
+  const DEVICE_ID = '22222222-2222-4222-8222-222222222222';
+
+  interface Captured {
+    readonly calls: string[];
+    rejected: MutationRejectedError | null;
+  }
+
+  function requestWith(
+    reconcile: { readonly calls: string[]; rejected: MutationRejectedError | null },
+    effect: ApplyMutationRequest['apply'],
+  ): ApplyMutationRequest {
+    return {
+      organizationId: ORGANIZATION_ID,
+      mutationId: MUTATION_ID,
+      deviceId: DEVICE_ID,
+      payload: { sale: { totalMinor: 1000 } },
+      apply: async (tx: Prisma.TransactionClient) => {
+        reconcile.calls.push('effect');
+        return effect(tx);
+      },
+      validateIngress: (tx: Prisma.TransactionClient) => {
+        reconcile.calls.push('ingress');
+        if (reconcile.rejected !== null) throw reconcile.rejected;
+        void tx;
+        return Promise.resolve();
+      },
+    };
+  }
+
+  function credited(): ApplyMutationRequest['apply'] {
+    return () =>
+      Promise.resolve({
+        entityType: 'SALE',
+        entityId: 'sale-1',
+        resultRef: 'sales/1',
+        resultHash: 'result-hash-1',
+      });
+  }
+
+  it('runs the re-validation after the idempotency lookup and before the effect (§9.4 order)', async () => {
+    const state: Captured = { calls: [], rejected: null };
+    const tx = fakeTransaction();
+    const service = new MutationLedgerService({
+      prisma: { $transaction: (fn: (tx: Prisma.TransactionClient) => Promise<unknown>) => fn(tx.tx) },
+    } as unknown as PrismaHost);
+
+    const outcome = await service.applyMutation(requestWith(state, credited()));
+
+    expect(outcome).toMatchObject({ status: 'APPLIED', isReplay: false });
+    expect(state.calls).toEqual(['ingress', 'effect']);
+  });
+
+  it('a rejected re-validation is a recorded per-mutation rejection with no effect (§38.13)', async () => {
+    const refusal = new MutationRejectedError(ERROR_CODES.ORGANIZATION_FORBIDDEN);
+    const state: Captured = { calls: [], rejected: refusal };
+    const tx = fakeTransaction();
+    const service = new MutationLedgerService({
+      prisma: { $transaction: (fn: (tx: Prisma.TransactionClient) => Promise<unknown>) => fn(tx.tx) },
+    } as unknown as PrismaHost);
+
+    const outcome = await service.applyMutation(requestWith(state, credited()));
+
+    expect(outcome).toMatchObject({
+      status: 'REJECTED',
+      isReplay: false,
+      rejectionCode: ERROR_CODES.ORGANIZATION_FORBIDDEN,
+    });
+    expect(state.calls).toEqual(['ingress']);
+    expect(tx.store).toHaveLength(1);
+    expect(tx.store[0]).toMatchObject({ status: 'REJECTED', rejectionCode: ERROR_CODES.ORGANIZATION_FORBIDDEN });
+    // No sequence, no feed row, no cursor — the §38.13 invariants hold for the
+    // admission path exactly as they do for the effect path.
+    expect(tx.tx.changeLog.create).not.toHaveBeenCalled();
+    expect(tx.calls).toEqual(['advisory-lock']);
+  });
+
+  it('a replay answers from the stored record without calling the hook again', async () => {
+    const refusal = new MutationRejectedError(ERROR_CODES.PERMISSION_DENIED);
+    const state: Captured = { calls: [], rejected: refusal };
+    const tx = fakeTransaction();
+    const service = new MutationLedgerService({
+      prisma: { $transaction: (fn: (tx: Prisma.TransactionClient) => Promise<unknown>) => fn(tx.tx) },
+    } as unknown as PrismaHost);
+    const request = requestWith(state, credited());
+
+    const first = await service.applyMutation(request);
+    state.rejected = null; // even an actor who since recovered is replay-answered
+    const second = await service.applyMutation(request);
+
+    expect(first).toMatchObject({ status: 'REJECTED', rejectionCode: ERROR_CODES.PERMISSION_DENIED });
+    expect(second).toMatchObject({ status: 'REJECTED', isReplay: true });
+    expect(second).toMatchObject({ receivedAt: (first as MutationRejectedOutcome).receivedAt });
+    expect(state.calls).toEqual(['ingress']);
+    expect(tx.store).toHaveLength(1);
+  });
+
+  it('a non-rejection re-validation failure propagates as a server fault and records nothing', async () => {
+    const tx = fakeTransaction();
+    const service = new MutationLedgerService({
+      prisma: { $transaction: (fn: (tx: Prisma.TransactionClient) => Promise<unknown>) => fn(tx.tx) },
+    } as unknown as PrismaHost);
+    const request = {
+      ...requestWith({ calls: [], rejected: null }, credited()),
+      validateIngress: (): Promise<void> => Promise.reject(new Error('resolver exploded')),
+    };
+
+    await expect(service.applyMutation(request)).rejects.toThrow('resolver exploded');
+    expect(tx.store).toHaveLength(0);
+    expect(tx.tx.mutationLedger.create).not.toHaveBeenCalled();
+  });
+
+  it('the hook receives the ledger’s transaction client', async () => {
+    const state: Captured = { calls: [], rejected: null };
+    let seen: Prisma.TransactionClient | null = null;
+    const tx = fakeTransaction();
+    const service = new MutationLedgerService({
+      prisma: { $transaction: (fn: (tx: Prisma.TransactionClient) => Promise<unknown>) => fn(tx.tx) },
+    } as unknown as PrismaHost);
+    const request = requestWith(state, credited());
+    const effect = request.apply;
+    const instrumented = {
+      ...request,
+      validateIngress: (provided: Prisma.TransactionClient): Promise<void> => {
+        seen = provided;
+        state.calls.push('ingress');
+        return Promise.resolve();
+      },
+      // Effect and hook run in one transaction; the effect asserts they saw the
+      // same client, so the re-validation read and the effect cannot disagree
+      // about server state (§9.4).
+      apply: async (provided: Prisma.TransactionClient) => {
+        expect(provided).toBe(seen);
+        return effect(provided);
+      },
+    };
+
+    await service.applyMutation(instrumented);
+  });
+});
+
+/**
  * The change-feed read (§38.11.1, §38.11.2).
  *
  * `pullChanges` is the one ledger method that reads rather than writes, and it is
@@ -360,6 +514,11 @@ describe('MutationLedgerService change feed (M1b-S6)', () => {
    * `$queryRaw`, and an interactive `changeLog.findMany` that faithfully filters,
    * orders, and takes — so the page mapping above it is exercised, not stubbed.
    * The write surface is present but must stay untouched (T-O6).
+   *
+   * M2-S4: the read runs inside the trusted tenant transaction, so the host
+   * also fulfils `withTenantTransaction` — `$transaction` runs synchronously
+   * over the same client, and the first `$queryRaw` call it receives is the
+   * `set_config` context establishment.
    */
   function feedHost(
     rows: readonly FeedRow[],
@@ -384,18 +543,36 @@ describe('MutationLedgerService change feed (M1b-S6)', () => {
         return Promise.resolve(page);
       },
     );
-    const queryRaw = jest.fn(() => Promise.resolve([{ max_aged_out: agedOutMax }]));
+    const queryRaw = jest.fn((strings: TemplateStringsArray) => {
+      if (strings.join('|').includes('set_config')) return Promise.resolve([]);
+      return Promise.resolve([{ max_aged_out: agedOutMax }]);
+    });
     const cursorWrite = jest.fn(() => Promise.resolve(1));
+    const tenantClient = {
+      changeLog: { findMany },
+      $queryRaw: queryRaw,
+    };
     const host = {
       prisma: {
         changeLog: { findMany },
         $queryRaw: queryRaw,
         $executeRaw: cursorWrite,
         deviceSyncCursor: { upsert: cursorWrite },
+        $transaction: jest.fn((run: (tx: unknown) => Promise<unknown>) => run(tenantClient)),
       },
     } as unknown as PrismaHost;
     return { host, findMany, queryRaw, cursorWrite };
   }
+
+  it('establishes the trusted tenant context as the transaction’s first statement (§8.2, M2-S4)', async () => {
+    const { host, queryRaw } = feedHost([feedRow(1n)], null);
+    const service = new MutationLedgerService(host);
+
+    await service.pullChanges({ organizationId: ORGANIZATION_ID, after: 0n, limit: 200, retentionDays: 90 });
+
+    const firstStatement = (queryRaw.mock.calls[0]?.[0] as TemplateStringsArray).join('|');
+    expect(firstStatement).toContain('set_config');
+  });
 
   it('returns an empty page from the beginning when nothing is retained', async () => {
     const { host } = feedHost([], null);
@@ -526,7 +703,9 @@ describe('MutationLedgerService change feed (M1b-S6)', () => {
     });
 
     expect(page.retentionFloor).toBeNull();
-    expect(queryRaw).toHaveBeenCalledTimes(1);
+    // Two raw statements inside the tenant transaction: the `set_config`
+    // context establishment (M2-S4), then the §38.11.1 floor probe.
+    expect(queryRaw).toHaveBeenCalledTimes(2);
   });
 
   it('normalizes a decimal-string aged-out maximum to a bigint floor', async () => {

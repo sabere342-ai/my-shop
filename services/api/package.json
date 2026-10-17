@@ -20,7 +20,7 @@
     "test": "jest",
     "test:unit": "jest --selectProjects unit",
     "test:integration": "jest --selectProjects integration",
-    "test:database": "jest --selectProjects database",
+    "test:database": "jest --selectProjects database --runInBand",
     "test:cov": "jest --coverage",
     "db:migrate": "node scripts/db.mjs",
     "db:bootstrap": "node scripts/db.mjs bootstrap",

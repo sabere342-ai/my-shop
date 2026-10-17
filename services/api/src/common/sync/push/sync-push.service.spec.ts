@@ -3,13 +3,15 @@
  *
  * The service is the thin layer between the HTTP boundary and the M1b-S4 ledger:
  * it owns the schema gate (§38.7.2), identity verification (§38.16), ordering
- * (§38.10.2), and the per-mutation outcome mapping (§38.10.3). The ledger is
+ * (§38.10.2), per-mutation outcome mapping (§38.10.3), and — since M2-S4 — the
+ * §9.4 ingress re-validation hook it passes to the ledger. The ledger is
  * substituted with a recording double here because its own contract is proven
  * against real PostgreSQL in `postgres.db-spec.ts`; these tests assert what this
  * layer alone decides.
  */
 
 import type { Logger as PinoLogger } from 'pino';
+import type { Prisma } from '@prisma/client';
 import { DomainError } from '../../errors/domain.error';
 import { ERROR_CODES } from '../../errors/problem';
 import { MutationContradictionError } from '../ledger/mutation-ledger.errors';
@@ -18,6 +20,7 @@ import { type MutationAppliedOutcome, type MutationOutcome } from '../ledger/mut
 import type { MutationPayload } from '../sync.contract';
 import { MIN_SUPPORTED_LOCAL_SCHEMA_VERSION, type PushBatchRequest } from './push.contract';
 import type { SyncMutationApplier, SyncMutationEffect } from './sync-mutation-applier';
+import type { SyncIngressRevalidator } from './ingress-revalidation';
 import { SyncPushService, mutationFingerprint } from './sync-push.service';
 import type { SyncTrustedContext } from './sync-auth';
 
@@ -70,22 +73,35 @@ function applied(mutationId: string, isReplay: boolean, sequence: bigint): Mutat
 /** A ledger double that records each `applyMutation` request and answers a scripted outcome. */
 function ledgerDouble(answers: readonly (MutationOutcome | Error)[]): {
   ledger: MutationLedgerService;
-  calls: { organizationId: string; deviceId: string; mutationId: string; payload: Record<string, unknown> }[];
+  calls: {
+    organizationId: string;
+    deviceId: string;
+    mutationId: string;
+    payload: Record<string, unknown>;
+    validateIngress?: unknown;
+  }[];
 } {
-  const calls: { organizationId: string; deviceId: string; mutationId: string; payload: Record<string, unknown> }[] =
-    [];
+  const calls: {
+    organizationId: string;
+    deviceId: string;
+    mutationId: string;
+    payload: Record<string, unknown>;
+    validateIngress?: unknown;
+  }[] = [];
   let index = 0;
   const applyMutation = (input: {
     organizationId: string;
     deviceId: string;
     mutationId: string;
     payload: Record<string, unknown>;
+    validateIngress?: unknown;
   }): Promise<MutationOutcome> => {
     calls.push({
       organizationId: input.organizationId,
       deviceId: input.deviceId,
       mutationId: input.mutationId,
       payload: input.payload,
+      ...(input.validateIngress === undefined ? {} : { validateIngress: input.validateIngress }),
     });
     const answer = answers[index] ?? answers[answers.length - 1];
     index += 1;
@@ -100,8 +116,27 @@ const inertApplier: SyncMutationApplier = {
   effectFor: (): SyncMutationEffect => () => Promise.reject(new Error('the applier must not run in this test')),
 };
 
-function serviceWith(ledger: MutationLedgerService, logger?: PinoLogger): SyncPushService {
-  return new SyncPushService(ledger, inertApplier, logger);
+/** An ingress re-validator double that records its inputs and refuses nothing. */
+function revalidatorDouble(): {
+  revalidator: SyncIngressRevalidator;
+  calls: { tx: Prisma.TransactionClient; context: SyncTrustedContext; mutation: MutationPayload }[];
+} {
+  const calls: { tx: Prisma.TransactionClient; context: SyncTrustedContext; mutation: MutationPayload }[] = [];
+  const revalidator: SyncIngressRevalidator = {
+    revalidate: (tx: Prisma.TransactionClient, context: SyncTrustedContext, mutation: MutationPayload) => {
+      calls.push({ tx, context, mutation });
+      return Promise.resolve();
+    },
+  };
+  return { revalidator, calls };
+}
+
+function serviceWith(
+  ledger: MutationLedgerService,
+  revalidator: SyncIngressRevalidator = revalidatorDouble().revalidator,
+  logger?: PinoLogger,
+): SyncPushService {
+  return new SyncPushService(ledger, inertApplier, revalidator, logger);
 }
 
 describe('SyncPushService', () => {
@@ -315,6 +350,25 @@ describe('SyncPushService', () => {
         second.mutationId,
         third.mutationId,
       ]);
+    });
+  });
+
+  describe('ingress re-validation wiring (§9.4, M2-S4)', () => {
+    it('hands the ledger one validateIngress hook bound to the trusted context and the mutation', async () => {
+      const { ledger, calls } = ledgerDouble([applied(mutation(1).mutationId, false, 1n)]);
+      const { revalidator, calls: revalidated } = revalidatorDouble();
+      const service = serviceWith(ledger, revalidator);
+
+      await service.pushBatch(request([mutation(1)]), CONTEXT);
+
+      const hook = calls[0]?.validateIngress as ((tx: Prisma.TransactionClient) => Promise<void>) | undefined;
+      expect(typeof hook).toBe('function');
+
+      const ledgerTx = {} as Prisma.TransactionClient;
+      await expect(hook?.(ledgerTx)).resolves.toBeUndefined();
+      // The hook carries exactly the trusted context — never the body's actor
+      // or organization assertions — and the mutation it validates.
+      expect(revalidated).toEqual([{ tx: ledgerTx, context: CONTEXT, mutation: mutation(1) }]);
     });
   });
 

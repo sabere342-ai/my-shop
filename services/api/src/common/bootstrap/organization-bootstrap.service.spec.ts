@@ -57,6 +57,9 @@ interface StoredMembershipRow {
 
 const CREATED_AT = new Date('2026-01-01T00:00:00.000Z');
 
+/** Canonical UUID shape the trusted tenant context accepts (§9.3, M2-S4). */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 interface FakeStore {
   organizations: StoredOrganizationRow[];
   users: StoredUserRow[];
@@ -98,6 +101,9 @@ function fakeBootstrap(
     memberships: [...(options.seed?.memberships ?? [])],
   };
   const calls: string[] = [];
+  // See `findOrganizationInTransaction`: `transactionReads: false` blinds the
+  // first transaction only; the classification retry transaction sees the seed.
+  let transactionSequence = 0;
   let sequence = 0;
 
   const nextId = (prefix: string): string => {
@@ -111,9 +117,15 @@ function fakeBootstrap(
     return Promise.resolve(organization ?? null);
   });
 
-  /** The transaction's own view; it can be blinded so the write path is reached. */
+  /**
+   * The transaction's own view; it can be blinded so the write path is reached.
+   * M2-S4: the post-unique-violation classification runs in its **own**
+   * transaction, which in PostgreSQL would see the committed state again — so
+   * the blinding is scoped to the first transaction only, not to the host.
+   */
   const findOrganizationInTransaction = jest.fn((args: { where: { bootstrapKey: string } }): Promise<unknown> => {
-    if (options.transactionReads === false) return Promise.resolve(null);
+    const blinded = options.transactionReads === false && transactionSequence <= 1;
+    if (blinded) return Promise.resolve(null);
     return findOrganization(args);
   });
 
@@ -134,10 +146,10 @@ function fakeBootstrap(
     return Promise.resolve(user ?? null);
   });
 
-  const organizationCreate = jest.fn((args: { data: { name: string; bootstrapKey: string } }) => {
+  const organizationCreate = jest.fn((args: { data: { id: string; name: string; bootstrapKey: string } }) => {
     if (options.failOrganizationCreate !== undefined) return Promise.reject(options.failOrganizationCreate);
     const organization: StoredOrganizationRow = {
-      id: nextId('org'),
+      id: args.data.id,
       name: args.data.name,
       status: 'ACTIVE',
       bootstrapKey: args.data.bootstrapKey,
@@ -166,6 +178,16 @@ function fakeBootstrap(
   });
 
   const tx = {
+    // M2-S4: the trusted-context `set_config` statements (bootstrap key first,
+    // tenant id on creation/classification), recorded so ordering proofs can
+    // name them.
+    $queryRaw: jest.fn((strings: TemplateStringsArray, ...values: readonly unknown[]) => {
+      const sql = strings.join('|').toLowerCase();
+      if (sql.includes('set_config')) {
+        calls.push(`context:${String(values[0])}=${String(values[1])}`);
+      }
+      return Promise.resolve([]);
+    }),
     $executeRaw: jest.fn((strings: TemplateStringsArray, ...values: readonly unknown[]) => {
       const sql = strings.join('|').toLowerCase();
       if (sql.includes('pg_advisory_xact_lock')) {
@@ -180,6 +202,7 @@ function fakeBootstrap(
 
   /** Snapshot/restore is the fake's rollback: the property PostgreSQL provides. */
   const transaction = jest.fn(async (run: (client: Prisma.TransactionClient) => Promise<unknown>) => {
+    transactionSequence += 1;
     const snapshot: FakeStore = {
       organizations: [...store.organizations],
       users: [...store.users],
@@ -219,14 +242,20 @@ function request(overrides: Partial<BootstrapRequest> = {}): BootstrapRequest {
 function seededIdentical(bootstrapKey = 'main-shop') {
   return {
     organizations: [
-      { id: 'org-existing', name: 'Main Shop', status: 'ACTIVE' as const, bootstrapKey, createdAt: CREATED_AT },
+      {
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        name: 'Main Shop',
+        status: 'ACTIVE' as const,
+        bootstrapKey,
+        createdAt: CREATED_AT,
+      },
     ],
-    users: [{ id: 'user-existing', email: 'owner@example.com', createdAt: CREATED_AT }],
+    users: [{ id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', email: 'owner@example.com', createdAt: CREATED_AT }],
     memberships: [
       {
-        id: 'membership-existing',
-        organizationId: 'org-existing',
-        userId: 'user-existing',
+        id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        organizationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        userId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
         isOwner: true,
         createdAt: CREATED_AT,
       },
@@ -256,12 +285,20 @@ describe('OrganizationBootstrapService', () => {
     expect(store.users).toHaveLength(1);
     expect(store.memberships).toHaveLength(1);
     expect(store.memberships[0]).toMatchObject({ isOwner: true });
-    expect(mocks.organizationCreate).toHaveBeenCalledWith({ data: { name: 'Main Shop', bootstrapKey: 'main-shop' } });
+    expect(mocks.organizationCreate).toHaveBeenCalledWith({
+      data: { id: expect.stringMatching(UUID_SHAPE), name: 'Main Shop', bootstrapKey: 'main-shop' },
+    });
     expect(mocks.transaction).toHaveBeenCalledTimes(1);
-    // Lock order is fixed: the bootstrap key, then the identity writer's
-    // per-email lock. A cycle would require the reverse, so the order is the
-    // deadlock-freedom argument.
-    expect(calls).toEqual(['lock:tenancy:bootstrap-key:main-shop', 'lock:identity:user-email:owner@example.com']);
+    // Fixed order (M2-S4): the §10.4 key establishes the bootstrap context
+    // before the keyed lookup, then the two advisory locks are taken, and the
+    // tenant context is established from the minted id only after the insert —
+    // exactly what `createOrganizationWithOwner` reruns between its two writes.
+    expect(calls[0]).toBe('context:app.current_bootstrap_key=main-shop');
+    expect(calls.slice(1, 3)).toEqual([
+      'lock:tenancy:bootstrap-key:main-shop',
+      'lock:identity:user-email:owner@example.com',
+    ]);
+    expect(calls[3]).toMatch(/^context:app\.current_organization_id=[0-9a-f-]{36}$/);
   });
 
   it('trims the name and canonicalizes the email before writing them', async () => {
@@ -276,7 +313,7 @@ describe('OrganizationBootstrapService', () => {
   });
 
   it('answers an identical retry ALREADY_BOOTSTRAPPED with the stored ids and no second write (AC-02)', async () => {
-    const { host, store, mocks } = fakeBootstrap({ seed: seededIdentical() });
+    const { host, store, mocks, calls } = fakeBootstrap({ seed: seededIdentical() });
 
     const first = await new OrganizationBootstrapService(host).bootstrap(request());
     const second = await new OrganizationBootstrapService(host).bootstrap(request());
@@ -284,9 +321,9 @@ describe('OrganizationBootstrapService', () => {
     expect(first).toEqual({
       status: 'ALREADY_BOOTSTRAPPED',
       bootstrapKey: 'main-shop',
-      organizationId: 'org-existing',
-      userId: 'user-existing',
-      membershipId: 'membership-existing',
+      organizationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      userId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      membershipId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
     });
     expect(second).toEqual(first);
     expect(store.organizations).toHaveLength(1);
@@ -295,6 +332,12 @@ describe('OrganizationBootstrapService', () => {
     expect(mocks.organizationCreate).not.toHaveBeenCalled();
     expect(mocks.userCreate).not.toHaveBeenCalled();
     expect(mocks.membershipCreate).not.toHaveBeenCalled();
+    // M2-S4 order on the classification path: the §10.4 credential unlocks the
+    // tenant-root read, and the read's server-derived tenant id re-scopes the
+    // transaction before the owner-membership read — never the reverse.
+    expect(calls[0]).toBe('context:app.current_bootstrap_key=main-shop');
+    expect(calls).toContain('lock:tenancy:bootstrap-key:main-shop');
+    expect(calls).toContain('context:app.current_organization_id=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
   });
 
   it('refuses a retry whose name differs, without adopting or overwriting anything (AC-04)', async () => {
@@ -396,7 +439,10 @@ describe('OrganizationBootstrapService', () => {
 
     const result = await new OrganizationBootstrapService(host).bootstrap(request());
 
-    expect(result).toMatchObject({ status: 'ALREADY_BOOTSTRAPPED', organizationId: 'org-existing' });
+    expect(result).toMatchObject({
+      status: 'ALREADY_BOOTSTRAPPED',
+      organizationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
   });
 
   it('classifies a unique violation as a conflict when the stored parameters differ', async () => {

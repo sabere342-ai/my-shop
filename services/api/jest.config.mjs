@@ -84,10 +84,15 @@ export default {
       // against a real server needs more than the default, and every attempt here
       // is a genuine network round trip.
       testTimeout: 120_000,
-      // The suite owns one fixed test database (`my_shop_test`) and must not race
-      // itself, so there is deliberately one file; jest still isolates each suite
-      // in its own worker, which is exactly the separation wanted for the
-      // readiness cases that boot full applications.
+      // The suites share one fixed test database (`my_shop_test`), which none of
+      // them may race itself: M2-S4 adds the tenant-RLS acceptance suite beside
+      // the M1-S3 database suite, so the database project must run serially.
+      // `maxWorkers` is a root-level Jest option only, so the serialization is
+      // enforced on the project's entry script (`test:database`) with
+      // `--runInBand` — the same discipline CI applies (§11's resource budget).
+      // Jest still isolates each suite in its own worker-style test
+      // environment, which keeps the file-level separation the readiness cases
+      // rely on.
     },
   ],
   // Off by default so `npm test` stays fast; `npm run test:cov` turns it on. §36.2 makes

@@ -42,7 +42,14 @@ import {
   type MutationEffectResult,
   MutationLedgerService,
 } from '../../src/common/sync/ledger/mutation-ledger.service';
+import {
+  establishBootstrapKeyContext,
+  establishTenantContext,
+  establishUserContext,
+  withTenantTransaction,
+} from '../../src/common/database/tenant-context';
 import { MIN_SUPPORTED_LOCAL_SCHEMA_VERSION } from '../../src/common/sync/push/push.contract';
+import { SYNC_INGRESS_REVALIDATOR } from '../../src/common/sync/push/ingress-revalidation';
 import { SYNC_MUTATION_APPLIER } from '../../src/common/sync/push/sync-mutation-applier';
 import { SYNC_AUTHENTICATOR, type SyncTrustedContext } from '../../src/common/sync/push/sync-auth';
 import { SYNC_AUTHENTICATOR as PULL_SYNC_AUTHENTICATOR } from '../../src/common/sync/pull/sync-auth';
@@ -66,7 +73,8 @@ import {
   type BootstrapResult,
 } from '../../src/common/bootstrap/organization-bootstrap.service';
 import { createOverriddenTestHarness, createTestHarness, destroyTestHarness, type TestHarness } from '../harness';
-import { FixedSyncAuthenticator } from '../sync/test-sync-authenticator';
+import { PermitAllIngressRevalidator } from '../sync/test-ingress-revalidator';
+import { FixedSyncAuthenticator, MutableSyncAuthenticator } from '../sync/test-sync-authenticator';
 import { ScriptedMutationApplier, probeDirective } from '../sync/scripted-mutation-applier';
 import { AuthorizationService } from '../../src/common/tenancy/authorization/authorization.service';
 import {
@@ -271,6 +279,44 @@ describe('database acceptance (real PostgreSQL)', () => {
     }
   }, 120_000);
 
+  /**
+   * The M2-S4 ripple on this suite (§8.2): `0008` puts ENABLE + FORCE row-level
+   * security with a `tenant_isolation` policy on every tenant-owned table, so a
+   * verification read or probe write that names one of those tables is invisible
+   * — refused — outside the trusted transaction context. The helpers below are
+   * the suite's own re-scopes: exactly the same statements, now inside the
+   * context the production code uses, one `set_config`: per transaction.
+   */
+
+  /** A tenant-scoped verification statement against one role connection (§9.3). */
+  async function inTenant<T>(
+    client: PrismaClient,
+    organizationId: string,
+    work: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    return withTenantTransaction({ prisma: client }, organizationId, work);
+  }
+
+  /** The decision D-A identity scope: exactly one verified account's membership edges. */
+  async function inIdentityScope<T>(userId: string, work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+    return migrator.$transaction(async (tx) => {
+      await establishUserContext(tx, userId);
+      return work(tx);
+    });
+  }
+
+  /** The decision D-B bootstrap scope: the §10.4 key's own tenant root. */
+  async function underBootstrapKey<T>(
+    client: PrismaClient,
+    bootstrapKey: string,
+    work: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    return client.$transaction(async (tx) => {
+      await establishBootstrapKeyContext(tx, bootstrapKey);
+      return work(tx);
+    });
+  }
+
   describe('migration workflow from an empty database', () => {
     it('applies every migration and records exactly one applied row each', async () => {
       const rows = await migrator.$queryRaw<MigrationRow[]>`
@@ -281,7 +327,8 @@ describe('database acceptance (real PostgreSQL)', () => {
       // M1b-S4 adds the sync ledger migrations to M1-S3's skeleton; M2-S1 adds
       // `0003_organizations`, and its hardening adds `0004_bootstrap_key_shape`;
       // M2-S2 adds `0005_identity_auth` and `0006_users_permissions_version`;
-      // M2-S3 adds `0007_authorization_roles`.
+      // M2-S3 adds `0007_authorization_roles`; M2-S4 adds the §8.2 RLS
+      // migration `0008_tenant_row_level_security` (policies only, no table).
       // Every applied migration must be finished and never rolled back
       // (migration history is append-only, Master Plan §44.1).
       expect(rows.map((row) => row.migration_name)).toEqual([
@@ -292,6 +339,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         '0005_identity_auth',
         '0006_users_permissions_version',
         '0007_authorization_roles',
+        '0008_tenant_row_level_security',
       ]);
       for (const row of rows) {
         expect(row.finished_at).not.toBeNull();
@@ -341,7 +389,7 @@ describe('database acceptance (real PostgreSQL)', () => {
       dbScript('deploy');
 
       const rows = await migrator.$queryRaw<MigrationRow[]>`SELECT migration_name FROM _prisma_migrations`;
-      expect(rows).toHaveLength(7);
+      expect(rows).toHaveLength(8);
     });
   });
 
@@ -560,17 +608,27 @@ describe('database acceptance (real PostgreSQL)', () => {
       expect(await probeRowCount(org)).toBe(1);
 
       // §38.11.1: one change-log row at server_sequence 1, with the entity stamp.
-      const feed = await app.$queryRaw<{ server_sequence: string; entity_type: string }[]>`
-        SELECT server_sequence::text AS server_sequence, entity_type
-        FROM change_log WHERE organization_id = ${org}::uuid
-      `;
+      const feed = await inTenant(
+        app,
+        org,
+        (tx) =>
+          tx.$queryRaw<{ server_sequence: string; entity_type: string }[]>`
+          SELECT server_sequence::text AS server_sequence, entity_type
+          FROM change_log WHERE organization_id = ${org}::uuid
+        `,
+      );
       expect(feed).toEqual([{ server_sequence: '1', entity_type: 'PROBE' }]);
 
       // §40.5: one cursor, exactly at the sequence that was applied.
-      const cursors = await app.$queryRaw<{ device_id: string; seq: string }[]>`
-        SELECT device_id, last_pushed_server_sequence::text AS seq
-        FROM device_sync_cursors WHERE organization_id = ${org}::uuid
-      `;
+      const cursors = await inTenant(
+        app,
+        org,
+        (tx) =>
+          tx.$queryRaw<{ device_id: string; seq: string }[]>`
+          SELECT device_id, last_pushed_server_sequence::text AS seq
+          FROM device_sync_cursors WHERE organization_id = ${org}::uuid
+        `,
+      );
       expect(cursors).toEqual([{ device_id: deviceId, seq: '1' }]);
     });
 
@@ -594,10 +652,15 @@ describe('database acceptance (real PostgreSQL)', () => {
       expect(counter.n).toBe(1);
       expect(await probeRowCount(org)).toBe(1);
 
-      const [row] = await app.$queryRaw<{ status: string; payload_hash: string }[]>`
-        SELECT status, payload_hash FROM mutation_ledger
-        WHERE organization_id = ${org}::uuid AND mutation_id = ${mutationId}::uuid
-      `;
+      const [row] = await inTenant(
+        app,
+        org,
+        (tx) =>
+          tx.$queryRaw<{ status: string; payload_hash: string }[]>`
+          SELECT status, payload_hash FROM mutation_ledger
+          WHERE organization_id = ${org}::uuid AND mutation_id = ${mutationId}::uuid
+        `,
+      );
       expect(row).toMatchObject({ status: 'APPLIED' });
       expect(row?.payload_hash).toBe(payloadHashOf({ probe: { note: 'version-a' } }));
     });
@@ -621,28 +684,48 @@ describe('database acceptance (real PostgreSQL)', () => {
         rejectionCode: ERROR_CODES.INSUFFICIENT_STOCK,
       });
 
-      const [ledger] = await app.$queryRaw<{ status: string; rejection_code: string | null }[]>`
-        SELECT status, rejection_code FROM mutation_ledger
-        WHERE organization_id = ${org}::uuid AND mutation_id = ${mutationId}::uuid
-      `;
+      const [ledger] = await inTenant(
+        app,
+        org,
+        (tx) =>
+          tx.$queryRaw<{ status: string; rejection_code: string | null }[]>`
+          SELECT status, rejection_code FROM mutation_ledger
+          WHERE organization_id = ${org}::uuid AND mutation_id = ${mutationId}::uuid
+        `,
+      );
       expect(ledger).toEqual({ status: 'REJECTED', rejection_code: ERROR_CODES.INSUFFICIENT_STOCK });
 
       // A rejected mutation consumes no sequence, writes no change-log row, and
       // leaves no cursor behind.
       expect(
-        await app.$queryRaw<
-          { last_sequence: string }[]
-        >`SELECT last_sequence::text AS last_sequence FROM sync_sequences WHERE organization_id = ${org}::uuid`,
+        await inTenant(
+          app,
+          org,
+          (tx) =>
+            tx.$queryRaw<
+              { last_sequence: string }[]
+            >`SELECT last_sequence::text AS last_sequence FROM sync_sequences WHERE organization_id = ${org}::uuid`,
+        ),
       ).toEqual([]);
       expect(
-        await app.$queryRaw<
-          { entity_type: string }[]
-        >`SELECT entity_type FROM change_log WHERE organization_id = ${org}::uuid`,
+        await inTenant(
+          app,
+          org,
+          (tx) =>
+            tx.$queryRaw<
+              { entity_type: string }[]
+            >`SELECT entity_type FROM change_log WHERE organization_id = ${org}::uuid`,
+        ),
       ).toEqual([]);
       expect(
-        await app.$queryRaw<
-          { device_id: string }[]
-        >`SELECT device_id FROM device_sync_cursors WHERE organization_id = ${org}::uuid`,
+        await inTenant(
+          app,
+          org,
+          (tx) =>
+            tx.$queryRaw<
+              { device_id: string }[]
+            >`SELECT device_id FROM device_sync_cursors WHERE organization_id = ${org}::uuid`,
+        ),
       ).toEqual([]);
 
       // A resend must not re-run the rejecting effect: the stored rejection IS
@@ -675,14 +758,22 @@ describe('database acceptance (real PostgreSQL)', () => {
       expect(counter.n).toBe(1);
       expect(await probeRowCount(org)).toBe(0);
       expect(
-        await app.$queryRaw<
-          { status: string }[]
-        >`SELECT status FROM mutation_ledger WHERE organization_id = ${org}::uuid`,
+        await inTenant(
+          app,
+          org,
+          (tx) =>
+            tx.$queryRaw<{ status: string }[]>`SELECT status FROM mutation_ledger WHERE organization_id = ${org}::uuid`,
+        ),
       ).toEqual([]);
       expect(
-        await app.$queryRaw<
-          { last_sequence: string }[]
-        >`SELECT last_sequence::text AS last_sequence FROM sync_sequences WHERE organization_id = ${org}::uuid`,
+        await inTenant(
+          app,
+          org,
+          (tx) =>
+            tx.$queryRaw<
+              { last_sequence: string }[]
+            >`SELECT last_sequence::text AS last_sequence FROM sync_sequences WHERE organization_id = ${org}::uuid`,
+        ),
       ).toEqual([]);
     });
 
@@ -735,10 +826,15 @@ describe('database acceptance (real PostgreSQL)', () => {
       );
       expect(replay).toMatchObject({ isReplay: true, serverSequence: BigInt(1) });
 
-      const cursorA2 = await app.$queryRaw<{ seq: string }[]>`
-        SELECT last_pushed_server_sequence::text AS seq FROM device_sync_cursors
-        WHERE organization_id = ${orgA}::uuid AND device_id = ${deviceA2}::uuid
-      `;
+      const cursorA2 = await inTenant(
+        app,
+        orgA,
+        (tx) =>
+          tx.$queryRaw<{ seq: string }[]>`
+          SELECT last_pushed_server_sequence::text AS seq FROM device_sync_cursors
+          WHERE organization_id = ${orgA}::uuid AND device_id = ${deviceA2}::uuid
+        `,
+      );
       expect(cursorA2).toEqual([{ seq: '2' }]);
 
       const counterB = { n: 0 };
@@ -816,6 +912,12 @@ describe('database acceptance (real PostgreSQL)', () => {
       harness = await createOverriddenTestHarness(config, (builder) => {
         builder.overrideProvider(SYNC_AUTHENTICATOR).useValue(new FixedSyncAuthenticator(PUSH_CONTEXT));
         builder.overrideProvider(SYNC_MUTATION_APPLIER).useValue(applier);
+        // M2-S4: the authorized push path of this block is the *boundary*
+        // acceptance (§38.16 + §38.9); its re-validation is accepted separately
+        // in the ingress describe below. The permissive substitution lives in
+        // `test/`, so the production graph still re-validates live membership
+        // and §11 permissions before every effect.
+        builder.overrideProvider(SYNC_INGRESS_REVALIDATOR).useValue(new PermitAllIngressRevalidator());
       });
     }, 60_000);
 
@@ -870,10 +972,15 @@ describe('database acceptance (real PostgreSQL)', () => {
     async function ledgerRow(
       mutationId: string,
     ): Promise<{ status: string; rejection_code: string | null } | undefined> {
-      const [row] = await app.$queryRaw<{ status: string; rejection_code: string | null }[]>`
-        SELECT status, rejection_code FROM mutation_ledger
-        WHERE organization_id = ${PUSH_ORG}::uuid AND mutation_id = ${mutationId}::uuid
-      `;
+      const [row] = await inTenant(
+        app,
+        PUSH_ORG,
+        (tx) =>
+          tx.$queryRaw<{ status: string; rejection_code: string | null }[]>`
+          SELECT status, rejection_code FROM mutation_ledger
+          WHERE organization_id = ${PUSH_ORG}::uuid AND mutation_id = ${mutationId}::uuid
+        `,
+      );
       return row;
     }
 
@@ -895,17 +1002,27 @@ describe('database acceptance (real PostgreSQL)', () => {
       expect(await ledgerRow(mutation['mutationId'] as string)).toMatchObject({ status: 'APPLIED' });
 
       // §38.11.1: the change feed carries the effect at the returned server sequence.
-      const feed = await app.$queryRaw<{ entity_type: string }[]>`
-        SELECT entity_type FROM change_log
-        WHERE organization_id = ${PUSH_ORG}::uuid AND server_sequence = ${BigInt(outcome?.serverSequence ?? '0')}
-      `;
+      const feed = await inTenant(
+        app,
+        PUSH_ORG,
+        (tx) =>
+          tx.$queryRaw<{ entity_type: string }[]>`
+          SELECT entity_type FROM change_log
+          WHERE organization_id = ${PUSH_ORG}::uuid AND server_sequence = ${BigInt(outcome?.serverSequence ?? '0')}
+        `,
+      );
       expect(feed).toEqual([{ entity_type: 'PUSH_PROBE' }]);
 
       // §40.5: the device cursor records the accepted sequence, never behind it.
-      const cursor = await app.$queryRaw<{ seq: string }[]>`
-        SELECT last_pushed_server_sequence::text AS seq FROM device_sync_cursors
-        WHERE organization_id = ${PUSH_ORG}::uuid AND device_id = ${PUSH_DEVICE}::uuid
-      `;
+      const cursor = await inTenant(
+        app,
+        PUSH_ORG,
+        (tx) =>
+          tx.$queryRaw<{ seq: string }[]>`
+          SELECT last_pushed_server_sequence::text AS seq FROM device_sync_cursors
+          WHERE organization_id = ${PUSH_ORG}::uuid AND device_id = ${PUSH_DEVICE}::uuid
+        `,
+      );
       expect(Number(cursor[0]?.seq)).toBeGreaterThanOrEqual(Number(outcome?.serverSequence));
     });
 
@@ -1050,6 +1167,258 @@ describe('database acceptance (real PostgreSQL)', () => {
       expect(await probeCount(note)).toBe(0);
       expect(await ledgerRow(mutation['mutationId'] as string)).toBeUndefined();
     });
+
+    /**
+     * M2-S4 — the §9.4 ingress re-validation against real PostgreSQL (T-8…T-12).
+     *
+     * These cases bind the **production** graph with no re-validator override:
+     * `MembershipPermissionRevalidator` runs inside the ledger's tenant
+     * transaction and re-proves the actor, the live membership, and the §11
+     * effective permissions before the effect. The trusted context is a cell
+     * the cases mutate — identity is still never read from a request.
+     */
+    describe('ingress re-validation (M2-S4)', () => {
+      const INGRESS_KEY = 'm2s4-ingress-tenant';
+      const INGRESS_DEVICE = randomUUID();
+
+      let harness: TestHarness | undefined;
+      let organizationId: string;
+      let ownerUserId: string;
+      let ledgerlessMemberId: string;
+
+      /**
+       * The started harness. `beforeAll` always completes before any `it`
+       * runs, so the only way this is undefined is an aborted suite — a named
+       * failure, not a non-null assertion the discipline forbids.
+       */
+      function startedHarness(): TestHarness {
+        if (harness === undefined) {
+          throw new Error('the ingress acceptance harness did not start');
+        }
+        return harness;
+      }
+
+      /** The mutable trusted context: each case installs exactly the identity it is about. */
+      const actorCell: { context: SyncTrustedContext } = {
+        context: { organizationId: '00000000-0000-0000-0000-000000000000', deviceId: INGRESS_DEVICE },
+      };
+
+      interface OutcomeWire {
+        status: string;
+        rejectionCode?: string;
+      }
+
+      beforeAll(async () => {
+        // A real tenant whose owner membership the lazy §35.4 seed upgrades to
+        // the Owner role — the actor identity of the happy case.
+        const bootstrapped = await new OrganizationBootstrapService({ prisma: migrator }).bootstrap({
+          bootstrapKey: INGRESS_KEY,
+          organizationName: 'Ingress Tenant',
+          ownerEmail: 'owner.m2s4@example.test',
+        });
+        organizationId = bootstrapped.organizationId;
+        ownerUserId = bootstrapped.userId;
+        await new AuthorizationService({ prisma: app }).ensureOrganizationRoles(organizationId);
+
+        // A member whose membership carries no role at all: the §11 reader
+        // resolves an empty permission set — re-validation must refuse `sales.create`.
+        const members = await migrator.$queryRaw<{ id: string }[]>`
+          INSERT INTO users (email) VALUES ('member.m2s4@example.test') RETURNING id`;
+        ledgerlessMemberId = members[0]?.id ?? '';
+        await inTenant(
+          app,
+          organizationId,
+          (tx) =>
+            tx.$executeRaw`
+            INSERT INTO organization_memberships (organization_id, user_id, is_owner)
+            VALUES (${organizationId}::uuid, ${ledgerlessMemberId}::uuid, false)`,
+        );
+
+        const config = loadConfig({
+          NODE_ENV: 'test',
+          LOG_LEVEL: 'silent',
+          LOG_PRETTY: 'false',
+          DATABASE_URL: urls.application,
+        });
+        const applier = new ScriptedMutationApplier(async (mutation, context, tx) => {
+          const note = probeDirective(mutation).note ?? mutation.mutationId;
+          await tx.$executeRaw`
+            INSERT INTO push_acceptance_probe (org_tag, effect_note)
+            VALUES (${context.organizationId}::uuid, ${note})
+          `;
+          return {
+            entityType: 'PUSH_PROBE',
+            entityId: `push:${note}`,
+            resultRef: `push/${note}`,
+            resultHash: 'e'.repeat(64),
+          };
+        });
+
+        harness = await createOverriddenTestHarness(config, (builder) => {
+          builder.overrideProvider(SYNC_AUTHENTICATOR).useValue(new MutableSyncAuthenticator(actorCell));
+          builder.overrideProvider(SYNC_MUTATION_APPLIER).useValue(applier);
+          // The re-validator stays production. So does AuthorizationModule.
+        });
+      }, 90_000);
+
+      afterAll(async () => {
+        if (harness !== undefined) {
+          await destroyTestHarness(harness);
+        }
+      });
+
+      /** One §38.8.1 SALE mutation for the ingress tenant. */
+      function ingressMutation(sequence: number, actorAssertion: string): Record<string, unknown> {
+        const mutationId = randomUUID();
+        return {
+          mutationId,
+          organizationId,
+          deviceId: INGRESS_DEVICE,
+          actorUserId: actorAssertion,
+          actorRoleSnapshot: { permissions: ['sales.create'] },
+          aggregateType: 'SALE',
+          aggregateId: randomUUID(),
+          operationType: 'CREATE',
+          payload: { probe: { note: mutationId } },
+          payloadVersion: 1,
+          deviceLocalSequence: sequence,
+          localCreatedAt: '2026-01-01T00:00:00.000Z',
+          deviceIdempotencyKey: mutationId,
+        };
+      }
+
+      function ingressEnvelope(mutations: readonly Record<string, unknown>[]): Record<string, unknown> {
+        return {
+          deviceId: INGRESS_DEVICE,
+          syncBatchId: randomUUID(),
+          localSchemaVersion: MIN_SUPPORTED_LOCAL_SCHEMA_VERSION,
+          mutations: [...mutations],
+        };
+      }
+
+      /** The durable REJECTED record the §38.13 ledger keeps for one mutation. */
+      async function ingressLedgerRow(mutationId: string): Promise<{ status: string; rejection_code: string | null }> {
+        const [row] = await inTenant(
+          app,
+          organizationId,
+          (tx) =>
+            tx.$queryRaw<{ status: string; rejection_code: string | null }[]>`
+            SELECT status, rejection_code FROM mutation_ledger
+            WHERE organization_id = ${organizationId}::uuid AND mutation_id = ${mutationId}::uuid
+          `,
+        );
+        if (row === undefined) {
+          throw new Error(`no ledger row for ${mutationId}`);
+        }
+        return row;
+      }
+
+      async function ingressProbeCount(note: string): Promise<number> {
+        const rows = await app.$queryRaw<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM push_acceptance_probe
+          WHERE org_tag = ${organizationId}::uuid AND effect_note = ${note}
+        `;
+        return rows[0]?.n ?? 0;
+      }
+
+      it('T-12: the seeded owner is admitted, and their permission is re-proven inside the effect transaction', async () => {
+        actorCell.context = { organizationId, deviceId: INGRESS_DEVICE, actorUserId: ownerUserId };
+        const mutation = ingressMutation(1, ownerUserId);
+
+        const response = await startedHarness()
+          .http.post('/api/v1/sync/push')
+          .send(ingressEnvelope([mutation]))
+          .expect(200);
+
+        expect((response.body['outcomes'] as unknown[])[0]).toMatchObject({ status: 'APPLIED' });
+        expect(await ingressProbeCount(mutation['mutationId'] as string)).toBe(1);
+        expect(await ingressLedgerRow(mutation['mutationId'] as string)).toMatchObject({ status: 'APPLIED' });
+      }, 60_000);
+
+      it('T-8: a verified context without an actor is refused UNAUTHENTICATED per mutation, and the refusal is recorded', async () => {
+        actorCell.context = { organizationId, deviceId: INGRESS_DEVICE };
+        const mutation = ingressMutation(1, ownerUserId);
+
+        const response = await startedHarness()
+          .http.post('/api/v1/sync/push')
+          .send(ingressEnvelope([mutation]))
+          .expect(200);
+
+        // The batch moves (§38.10.3); the admission of its one mutation is the
+        // durable refusal the client can replay against.
+        expect((response.body['outcomes'] as OutcomeWire[])[0]).toMatchObject({
+          status: 'REJECTED',
+          rejectionCode: 'UNAUTHENTICATED',
+        });
+        expect(await ingressProbeCount(mutation['mutationId'] as string)).toBe(0);
+        expect(await ingressLedgerRow(mutation['mutationId'] as string)).toEqual({
+          status: 'REJECTED',
+          rejection_code: 'UNAUTHENTICATED',
+        });
+      }, 60_000);
+
+      it('T-9: an actor with no live membership in the trusted organization is refused ORGANIZATION_FORBIDDEN', async () => {
+        actorCell.context = { organizationId, deviceId: INGRESS_DEVICE, actorUserId: randomUUID() };
+        const mutation = ingressMutation(1, ownerUserId);
+
+        const response = await startedHarness()
+          .http.post('/api/v1/sync/push')
+          .send(ingressEnvelope([mutation]))
+          .expect(200);
+
+        expect((response.body['outcomes'] as OutcomeWire[])[0]).toMatchObject({
+          status: 'REJECTED',
+          rejectionCode: 'ORGANIZATION_FORBIDDEN',
+        });
+        expect(await ingressProbeCount(mutation['mutationId'] as string)).toBe(0);
+        expect(await ingressLedgerRow(mutation['mutationId'] as string)).toEqual({
+          status: 'REJECTED',
+          rejection_code: 'ORGANIZATION_FORBIDDEN',
+        });
+      }, 60_000);
+
+      it('T-10: an actor whose live membership holds no such permission is refused PERMISSION_DENIED', async () => {
+        // The membership exists but carries no role: the §11 effective set is empty.
+        actorCell.context = { organizationId, deviceId: INGRESS_DEVICE, actorUserId: ledgerlessMemberId };
+        const mutation = ingressMutation(1, ownerUserId);
+
+        const response = await startedHarness()
+          .http.post('/api/v1/sync/push')
+          .send(ingressEnvelope([mutation]))
+          .expect(200);
+
+        expect((response.body['outcomes'] as OutcomeWire[])[0]).toMatchObject({
+          status: 'REJECTED',
+          rejectionCode: 'PERMISSION_DENIED',
+        });
+        expect(await ingressProbeCount(mutation['mutationId'] as string)).toBe(0);
+        expect(await ingressLedgerRow(mutation['mutationId'] as string)).toEqual({
+          status: 'REJECTED',
+          rejection_code: 'PERMISSION_DENIED',
+        });
+      }, 60_000);
+
+      it('T-11: the admission is re-proven at acceptance, not from the snapshot the body asserts', async () => {
+        // The §38.8.1 actorRoleSnapshot claims the permission; the live §11 facts
+        // (a roleless membership) decide. The assertion never substitutes authority.
+        actorCell.context = { organizationId, deviceId: INGRESS_DEVICE, actorUserId: ledgerlessMemberId };
+        const mutation = { ...ingressMutation(1, ledgerlessMemberId) };
+        (mutation as { actorRoleSnapshot: Record<string, unknown> }).actorRoleSnapshot = {
+          permissions: PERMISSION_IDS,
+        };
+
+        const response = await startedHarness()
+          .http.post('/api/v1/sync/push')
+          .send(ingressEnvelope([mutation]))
+          .expect(200);
+
+        expect((response.body['outcomes'] as OutcomeWire[])[0]).toMatchObject({
+          status: 'REJECTED',
+          rejectionCode: 'PERMISSION_DENIED',
+        });
+        expect(await ingressProbeCount(mutation['mutationId'] as string)).toBe(0);
+      }, 60_000);
+    });
   });
 
   /**
@@ -1110,17 +1479,21 @@ describe('database acceptance (real PostgreSQL)', () => {
       const entityType = options.entityType ?? 'PULL_PROBE';
       const entityId = options.entityId ?? `pull-${String(sequence)}`;
       const changedAt = options.changedAt ?? new Date();
-      if (options.mutationId === undefined) {
-        await app.$executeRaw`
-          INSERT INTO change_log (organization_id, server_sequence, mutation_id, entity_type, entity_id, changed_at)
-          VALUES (${organizationId}::uuid, ${sequence}, NULL, ${entityType}, ${entityId}, ${changedAt})
-        `;
-      } else {
-        await app.$executeRaw`
-          INSERT INTO change_log (organization_id, server_sequence, mutation_id, entity_type, entity_id, changed_at)
-          VALUES (${organizationId}::uuid, ${sequence}, ${options.mutationId}::uuid, ${entityType}, ${entityId}, ${changedAt})
-        `;
-      }
+      // §8.2: the change feed is tenant-owned, so the seed runs inside the
+      // tenant's trusted transaction — the tenant the read will be scoped to.
+      await inTenant(app, organizationId, async (tx) => {
+        if (options.mutationId === undefined) {
+          await tx.$executeRaw`
+            INSERT INTO change_log (organization_id, server_sequence, mutation_id, entity_type, entity_id, changed_at)
+            VALUES (${organizationId}::uuid, ${sequence}, NULL, ${entityType}, ${entityId}, ${changedAt})
+          `;
+        } else {
+          await tx.$executeRaw`
+            INSERT INTO change_log (organization_id, server_sequence, mutation_id, entity_type, entity_id, changed_at)
+            VALUES (${organizationId}::uuid, ${sequence}, ${options.mutationId}::uuid, ${entityType}, ${entityId}, ${changedAt})
+          `;
+        }
+      });
     }
 
     const OWN_ECHO_MUTATION_ID = randomUUID();
@@ -1215,18 +1588,28 @@ describe('database acceptance (real PostgreSQL)', () => {
         // A cursor row that must not move: §38.11.2 makes the client store the cursor
         // only after the page is applied locally, so the server cannot observe that
         // success and must not write on a read.
-        await app.$executeRaw`
-        INSERT INTO device_sync_cursors
-          (organization_id, device_id, last_pushed_server_sequence, last_pull_server_sequence, updated_at)
-        VALUES (${org}::uuid, ${device}::uuid, NULL, 7, ${sentinelUpdatedAt})
-      `;
+        await inTenant(
+          app,
+          org,
+          (tx) =>
+            tx.$executeRaw`
+          INSERT INTO device_sync_cursors
+            (organization_id, device_id, last_pushed_server_sequence, last_pull_server_sequence, updated_at)
+          VALUES (${org}::uuid, ${device}::uuid, NULL, 7, ${sentinelUpdatedAt})
+        `,
+        );
 
         await harness.http.get(PULL_PATH).query({ after: '0' }).expect(200);
 
-        const rows = await app.$queryRaw<{ seq: string; updated_at: Date }[]>`
-        SELECT last_pull_server_sequence::text AS seq, updated_at FROM device_sync_cursors
-        WHERE organization_id = ${org}::uuid AND device_id = ${device}::uuid
-      `;
+        const rows = await inTenant(
+          app,
+          org,
+          (tx) =>
+            tx.$queryRaw<{ seq: string; updated_at: Date }[]>`
+          SELECT last_pull_server_sequence::text AS seq, updated_at FROM device_sync_cursors
+          WHERE organization_id = ${org}::uuid AND device_id = ${device}::uuid
+        `,
+        );
         expect(rows).toEqual([{ seq: '7', updated_at: sentinelUpdatedAt }]);
       });
     });
@@ -1383,21 +1766,48 @@ describe('database acceptance (real PostgreSQL)', () => {
       stderr: string[];
     }
 
-    /** Durable row counts for one (key, email) pair — the acceptance unit of "no duplicates". */
+    /**
+     * Durable row counts for one (key, email) pair — the acceptance unit of "no duplicates".
+     *
+     * Each count is re-scoped per §8.2's three settings: the organization root
+     * is visible through its bootstrap key (D-B), the membership edges through
+     * the account's D-A identity scope, and `users` is global by classification.
+     */
     const countsFor = async (
       bootstrapKey: string,
       email: string,
     ): Promise<{ orgs: number; users: number; memberships: number }> => {
       const [orgs, users, memberships] = await Promise.all([
-        migrator.$queryRaw<
-          CountRow[]
-        >`SELECT count(*)::int AS n FROM organizations WHERE bootstrap_key = ${bootstrapKey}`,
+        underBootstrapKey(
+          migrator,
+          bootstrapKey,
+          (tx) =>
+            tx.$queryRaw<
+              CountRow[]
+            >`SELECT count(*)::int AS n FROM organizations WHERE bootstrap_key = ${bootstrapKey}`,
+        ),
         migrator.$queryRaw<CountRow[]>`SELECT count(*)::int AS n FROM users WHERE email = ${email}`,
-        migrator.$queryRaw<CountRow[]>`
-          SELECT count(*)::int AS n FROM organization_memberships m
-          JOIN users u ON u.id = m.user_id WHERE u.email = ${email}`,
+        membershipsByEmail(email),
       ]);
       return { orgs: orgs[0]?.n ?? 0, users: users[0]?.n ?? 0, memberships: memberships[0]?.n ?? 0 };
+    };
+
+    /**
+     * The membership edges of one account across all organizations (T-4): the
+     * D-A setting makes exactly those rows visible, and `users` is global.
+     */
+    const membershipsByEmail = async (email: string): Promise<CountRow[]> => {
+      const [user] = await migrator.$queryRaw<{ id: string }[]>`SELECT id FROM users WHERE email = ${email}`;
+      if (user === undefined) {
+        return [{ n: 0 }];
+      }
+      return inIdentityScope(
+        user.id,
+        (tx) =>
+          tx.$queryRaw<CountRow[]>`
+          SELECT count(*)::int AS n FROM organization_memberships m
+          JOIN users u ON u.id = m.user_id WHERE u.email = ${email}`,
+      );
     };
 
     const captureIo = (): { io: BootstrapCliIo; captured: CapturedIo } => {
@@ -1476,9 +1886,14 @@ describe('database acceptance (real PostgreSQL)', () => {
       expect(result.membershipId).toMatch(UUID_PATTERN);
 
       // The stored organization, not the returned message (§36.1 T-2).
-      const organizations = await migrator.$queryRaw<OrgRow[]>`
-        SELECT id, name, status::text AS status, bootstrap_key
-        FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`;
+      const organizations = await underBootstrapKey(
+        migrator,
+        FIRST_KEY,
+        (tx) =>
+          tx.$queryRaw<OrgRow[]>`
+          SELECT id, name, status::text AS status, bootstrap_key
+          FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`,
+      );
       expect(organizations).toHaveLength(1);
       expect(organizations[0]).toMatchObject({
         id: result.organizationId,
@@ -1490,9 +1905,14 @@ describe('database acceptance (real PostgreSQL)', () => {
       const users = await migrator.$queryRaw<UserRow[]>`SELECT id, email FROM users WHERE email = ${FIRST_EMAIL}`;
       expect(users.map((user) => user.id)).toEqual([result.userId]);
 
-      const memberships = await migrator.$queryRaw<MembershipRow[]>`
-        SELECT id, organization_id, user_id, is_owner
-        FROM organization_memberships WHERE organization_id = ${result.organizationId}::uuid`;
+      const memberships = await inTenant(
+        migrator,
+        result.organizationId,
+        (tx) =>
+          tx.$queryRaw<MembershipRow[]>`
+          SELECT id, organization_id, user_id, is_owner
+          FROM organization_memberships WHERE organization_id = ${result.organizationId}::uuid`,
+      );
       expect(memberships).toEqual([
         { id: result.membershipId, organization_id: result.organizationId, user_id: result.userId, is_owner: true },
       ]);
@@ -1513,9 +1933,14 @@ describe('database acceptance (real PostgreSQL)', () => {
       expect(retry.status).toBe('ALREADY_BOOTSTRAPPED');
       expect(retry.organizationId).toMatch(UUID_PATTERN);
 
-      const organizations = await migrator.$queryRaw<OrgRow[]>`
-        SELECT id, name, status::text AS status, bootstrap_key
-        FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`;
+      const organizations = await underBootstrapKey(
+        migrator,
+        FIRST_KEY,
+        (tx) =>
+          tx.$queryRaw<OrgRow[]>`
+          SELECT id, name, status::text AS status, bootstrap_key
+          FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`,
+      );
       expect(organizations).toHaveLength(1);
       expect(retry.organizationId).toBe(organizations[0]?.id);
       expect(await countsFor(FIRST_KEY, FIRST_EMAIL)).toEqual({ orgs: 1, users: 1, memberships: 1 });
@@ -1562,9 +1987,14 @@ describe('database acceptance (real PostgreSQL)', () => {
       expect((wrongEmail as BootstrapConflictError).reason).toBe('OWNER_EMAIL_MISMATCH');
 
       // Nothing was adopted, overwritten, or repaired: the stored row is untouched.
-      const stored = await migrator.$queryRaw<OrgRow[]>`
-        SELECT id, name, status::text AS status, bootstrap_key
-        FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`;
+      const stored = await underBootstrapKey(
+        migrator,
+        FIRST_KEY,
+        (tx) =>
+          tx.$queryRaw<OrgRow[]>`
+          SELECT id, name, status::text AS status, bootstrap_key
+          FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`,
+      );
       expect(stored).toHaveLength(1);
       expect(stored[0]).toMatchObject({ name: FIRST_NAME, status: 'ACTIVE' });
       expect(await countsFor(FIRST_KEY, FIRST_EMAIL)).toEqual({ orgs: 1, users: 1, memberships: 1 });
@@ -1658,10 +2088,26 @@ describe('database acceptance (real PostgreSQL)', () => {
     });
 
     it('AC-09: the database refuses a second membership for the same organization and user', async () => {
+      // §8.2: the tenant root is visible through its bootstrap key (D-B), the
+      // edges inside the tenant scope, and the duplicate attempt runs *inside*
+      // that tenant context so the unique violation — not the RLS policy — is
+      // what rejects it.
+      const [organizationRow] = await underBootstrapKey(
+        migrator,
+        FIRST_KEY,
+        (tx) => tx.$queryRaw<{ id: string }[]>`SELECT id FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`,
+      );
+      const organizationId = firstOf(organizationRow === undefined ? [] : [organizationRow], 'organization').id;
+      expect(organizationId).toMatch(UUID_PATTERN);
+
       const membershipCount = async (): Promise<number> => {
-        const rows = await migrator.$queryRaw<CountRow[]>`
-          SELECT count(*)::int AS n FROM organization_memberships
-          WHERE organization_id = (SELECT id FROM organizations WHERE bootstrap_key = ${FIRST_KEY})`;
+        const rows = await inTenant(
+          migrator,
+          organizationId,
+          (tx) =>
+            tx.$queryRaw<CountRow[]>`
+            SELECT count(*)::int AS n FROM organization_memberships WHERE organization_id = ${organizationId}::uuid`,
+        );
         return rows[0]?.n ?? 0;
       };
 
@@ -1670,11 +2116,15 @@ describe('database acceptance (real PostgreSQL)', () => {
 
       // The application role is the writer that could ever duplicate a row, so
       // the attempt goes through it — same organization, same user, new row.
-      const duplicate = await app.$executeRaw`
+      const duplicate = await inTenant(
+        app,
+        organizationId,
+        (tx) =>
+          tx.$executeRaw`
           INSERT INTO organization_memberships (organization_id, user_id, is_owner)
           SELECT organization_id, user_id, false FROM organization_memberships
-          WHERE organization_id = (SELECT id FROM organizations WHERE bootstrap_key = ${FIRST_KEY})
-          LIMIT 1`.catch((error: unknown) => error);
+          LIMIT 1`,
+      ).catch((error: unknown) => error);
 
       expect(duplicate).toBeInstanceOf(Error);
       expect(sqlStateOf(duplicate)).toBe('23505');
@@ -1695,9 +2145,15 @@ describe('database acceptance (real PostgreSQL)', () => {
       expect(users.map((user) => user.id)).toEqual([result.userId]);
       expect(await countsFor(secondKey, FIRST_EMAIL)).toEqual({ orgs: 1, users: 1, memberships: 2 });
 
-      const memberships = await migrator.$queryRaw<MembershipRow[]>`
-        SELECT m.organization_id, m.is_owner FROM organization_memberships m
-        JOIN users u ON u.id = m.user_id WHERE u.email = ${FIRST_EMAIL}`;
+      // The edges of one account across both tenants (T-4): D-A's identity
+      // scope makes exactly that account's memberships visible.
+      const memberships = await inIdentityScope(
+        result.userId,
+        (tx) =>
+          tx.$queryRaw<MembershipRow[]>`
+          SELECT m.organization_id, m.is_owner FROM organization_memberships m
+          JOIN users u ON u.id = m.user_id WHERE u.email = ${FIRST_EMAIL}`,
+      );
       expect(new Set(memberships.map((membership) => membership.organization_id)).size).toBe(2);
       expect(memberships.every((membership) => membership.is_owner)).toBe(true);
     });
@@ -1708,44 +2164,86 @@ describe('database acceptance (real PostgreSQL)', () => {
         INSERT INTO users (email) VALUES ('member.m2s1@example.test') RETURNING id`;
       const memberId = firstOf(inserted, 'member identity').id;
 
-      const organizations = await migrator.$queryRaw<{ id: string }[]>`
-        SELECT id FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`;
-      const organizationId = firstOf(organizations, 'organization').id;
+      const [organizationRow] = await underBootstrapKey(
+        migrator,
+        FIRST_KEY,
+        (tx) => tx.$queryRaw<{ id: string }[]>`SELECT id FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`,
+      );
+      const organizationId = firstOf(organizationRow === undefined ? [] : [organizationRow], 'organization').id;
 
-      // A second owner row is refused by PostgreSQL whatever the caller believes.
-      const secondOwner = await app.$executeRaw`
+      // A second owner row is refused by PostgreSQL whatever the caller believes:
+      // inside the tenant context, the partial unique index is what fires.
+      const secondOwner = await inTenant(
+        app,
+        organizationId,
+        (tx) =>
+          tx.$executeRaw`
           INSERT INTO organization_memberships (organization_id, user_id, is_owner)
-          VALUES (${organizationId}::uuid, ${memberId}::uuid, true)`.catch((error: unknown) => error);
+          VALUES (${organizationId}::uuid, ${memberId}::uuid, true)`,
+      ).catch((error: unknown) => error);
       expect(secondOwner).toBeInstanceOf(Error);
       expect(sqlStateOf(secondOwner)).toBe('23505');
 
       // A non-owner membership for the same pair is a different row and is accepted.
-      await expect(app.$executeRaw`
-        INSERT INTO organization_memberships (organization_id, user_id, is_owner)
-        VALUES (${organizationId}::uuid, ${memberId}::uuid, false)`).resolves.toBe(1);
+      await expect(
+        inTenant(
+          app,
+          organizationId,
+          (tx) =>
+            tx.$executeRaw`
+          INSERT INTO organization_memberships (organization_id, user_id, is_owner)
+          VALUES (${organizationId}::uuid, ${memberId}::uuid, false)`,
+        ),
+      ).resolves.toBe(1);
 
-      const owners = await migrator.$queryRaw<CountRow[]>`
-        SELECT count(*)::int AS n FROM organization_memberships
-        WHERE organization_id = ${organizationId}::uuid AND is_owner`;
+      const owners = await inTenant(
+        migrator,
+        organizationId,
+        (tx) =>
+          tx.$queryRaw<CountRow[]>`
+          SELECT count(*)::int AS n FROM organization_memberships
+          WHERE organization_id = ${organizationId}::uuid AND is_owner`,
+      );
       expect(owners[0]?.n ?? 0).toBe(1);
     });
 
     it('AC-12: foreign keys reject memberships that reference no organization or no user', async () => {
-      const organizations = await migrator.$queryRaw<{ id: string }[]>`
-        SELECT id FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`;
+      const [organizationRow] = await underBootstrapKey(
+        migrator,
+        FIRST_KEY,
+        (tx) => tx.$queryRaw<{ id: string }[]>`SELECT id FROM organizations WHERE bootstrap_key = ${FIRST_KEY}`,
+      );
+      const organizationId = firstOf(organizationRow === undefined ? [] : [organizationRow], 'organization').id;
       const users = await migrator.$queryRaw<{ id: string }[]>`SELECT id FROM users WHERE email = ${FIRST_EMAIL}`;
-      const organizationId = firstOf(organizations, 'organization').id;
       const userId = firstOf(users, 'user').id;
 
-      const missingOrganization = await app.$executeRaw`
+      // §8.2: the foreign key is the boundary this case asserts, so each probe
+      // runs inside the matching tenant context — the RLS policy of the
+      // referenced tenant (or, for the unknown id, the minted scope matching
+      // the row being written) must never be the reason a statement fails.
+      // The unknown-organization probe therefore mints one id and uses it for
+      // *both* the transaction's scope and the inserted row: only the missing
+      // foreign key remains to reject the row (23503), never the policy.
+      const unknownTenantId = randomUUID();
+      const missingOrganization = await inTenant(
+        app,
+        unknownTenantId,
+        (tx) =>
+          tx.$executeRaw`
           INSERT INTO organization_memberships (organization_id, user_id, is_owner)
-          VALUES (${randomUUID()}::uuid, ${userId}::uuid, false)`.catch((error: unknown) => error);
+          VALUES (${unknownTenantId}::uuid, ${userId}::uuid, false)`,
+      ).catch((error: unknown) => error);
       expect(missingOrganization).toBeInstanceOf(Error);
       expect(sqlStateOf(missingOrganization)).toBe('23503');
 
-      const missingUser = await app.$executeRaw`
+      const missingUser = await inTenant(
+        app,
+        organizationId,
+        (tx) =>
+          tx.$executeRaw`
           INSERT INTO organization_memberships (organization_id, user_id, is_owner)
-          VALUES (${organizationId}::uuid, ${randomUUID()}::uuid, false)`.catch((error: unknown) => error);
+          VALUES (${organizationId}::uuid, ${randomUUID()}::uuid, false)`,
+      ).catch((error: unknown) => error);
       expect(missingUser).toBeInstanceOf(Error);
       expect(sqlStateOf(missingUser)).toBe('23503');
     });
@@ -1796,7 +2294,13 @@ describe('database acceptance (real PostgreSQL)', () => {
         'name',
         'status',
       ]);
-      const readable = await migrator.$queryRaw<CountRow[]>`SELECT count(*)::int AS n FROM organizations`;
+      // The tenant root stays readable — through its decision D-B bootstrap key,
+      // which is exactly the visibility the §10.4 classification needs.
+      const readable = await underBootstrapKey(
+        migrator,
+        FIRST_KEY,
+        (tx) => tx.$queryRaw<CountRow[]>`SELECT count(*)::int AS n FROM organizations`,
+      );
       expect(readable[0]?.n ?? -1).toBeGreaterThan(0);
     });
 
@@ -1816,9 +2320,21 @@ describe('database acceptance (real PostgreSQL)', () => {
         organizationName: 'Anomaly Tenant',
         ownerEmail: 'anomaly.m2s1@example.test',
       });
-      await migrator.$executeRaw`
-        DELETE FROM organization_memberships
-        WHERE organization_id = (SELECT id FROM organizations WHERE bootstrap_key = ${ANOMALY_KEY})`;
+      // The out-of-band anomaly, written exactly as an operator's SQL would:
+      // the root is found through its D-B bootstrap key, the edge deleted
+      // inside that tenant's trusted scope (§8.2).
+      const [anomalyOrg] = await underBootstrapKey(
+        migrator,
+        ANOMALY_KEY,
+        (tx) => tx.$queryRaw<{ id: string }[]>`SELECT id FROM organizations WHERE bootstrap_key = ${ANOMALY_KEY}`,
+      );
+      if (anomalyOrg !== undefined) {
+        await inTenant(
+          migrator,
+          anomalyOrg.id,
+          (tx) => tx.$executeRaw`DELETE FROM organization_memberships WHERE organization_id = ${anomalyOrg.id}::uuid`,
+        );
+      }
 
       // 1. Success — a real connection carrying the canary password (trust auth).
       expect(
@@ -1894,14 +2410,24 @@ describe('database acceptance (real PostgreSQL)', () => {
         WHERE t.typname = 'organization_status' ORDER BY e.enumsortorder`;
       expect(labels.map((label) => label.enumlabel)).toEqual(['ACTIVE', 'DEACTIVATED']);
 
-      const blankName =
-        await app.$executeRaw`INSERT INTO organizations (name, bootstrap_key) VALUES ('   ', 'm2s1-blank-name-probe')`.catch(
-          (error: unknown) => error,
-        );
+      // §8.2: the CHECK constraint is the boundary here, so the probe insert
+      // runs under the D-B scope of exactly the key it claims — the RLS policy
+      // must never be the rejection this case is about.
+      const blankName = await underBootstrapKey(
+        app,
+        'm2s1-blank-name-probe',
+        (tx) => tx.$executeRaw`INSERT INTO organizations (name, bootstrap_key) VALUES ('   ', 'm2s1-blank-name-probe')`,
+      ).catch((error: unknown) => error);
       expect(blankName).toBeInstanceOf(Error);
       expect(sqlStateOf(blankName)).toBe('23514');
-      const blankRows = await migrator.$queryRaw<CountRow[]>`
-        SELECT count(*)::int AS n FROM organizations WHERE bootstrap_key = 'm2s1-blank-name-probe'`;
+      const blankRows = await underBootstrapKey(
+        migrator,
+        'm2s1-blank-name-probe',
+        (tx) =>
+          tx.$queryRaw<
+            CountRow[]
+          >`SELECT count(*)::int AS n FROM organizations WHERE bootstrap_key = 'm2s1-blank-name-probe'`,
+      );
       expect(blankRows[0]?.n ?? -1).toBe(0);
 
       const mixedCase = await app.$executeRaw`INSERT INTO users (email) VALUES ('Mixed.Case@Example.test')`.catch(
@@ -1948,11 +2474,23 @@ describe('database acceptance (real PostgreSQL)', () => {
           AND conname = 'chk_organizations_bootstrap_key_kebab'`;
       expect(constraints).toEqual([{ conname: 'chk_organizations_bootstrap_key_kebab', contype: 'c' }]);
 
-      /** Inserts a key directly as the application role and returns the error, if any. */
-      const insertKey = async (key: string): Promise<unknown> =>
-        app.$executeRaw`INSERT INTO organizations (name, bootstrap_key) VALUES ('Kebab Probe', ${key})`.catch(
-          (error: unknown) => error,
-        );
+      /**
+       * Inserts a key through the application role and returns the error, if any.
+       *
+       * §8.2: the probe mints its own tenant id server-side and writes inside
+       * that scope (the policy's `id` clause — the same move the bootstrap
+       * composition root makes), so the grammar CHECK — never the RLS policy —
+       * is what rejects a malformed key.
+       */
+      const insertKey = async (key: string): Promise<unknown> => {
+        const probeId = randomUUID();
+        return withTenantTransaction(
+          { prisma: app },
+          probeId,
+          (tx) =>
+            tx.$executeRaw`INSERT INTO organizations (id, name, bootstrap_key) VALUES (${probeId}::uuid, 'Kebab Probe', ${key})`,
+        ).catch((error: unknown) => error);
+      };
 
       // Shapes the 0003 constraint allows (length in range, already trimmed)
       // but the grammar forbids; each names the exact constraint so the test
@@ -1962,6 +2500,15 @@ describe('database acceptance (real PostgreSQL)', () => {
         expect(error).toBeInstanceOf(Error);
         expect(sqlStateOf(error)).toBe('23514');
         expect((error as Error).message).toContain('chk_organizations_bootstrap_key_kebab');
+
+        // Not one of the rejected shapes was stored — proven inside that key's
+        // own decision D-B scope, which is the visibility of exactly this key.
+        const rejected = await underBootstrapKey(
+          migrator,
+          key,
+          (tx) => tx.$queryRaw<CountRow[]>`SELECT count(*)::int AS n FROM organizations WHERE bootstrap_key = ${key}`,
+        );
+        expect(rejected[0]?.n ?? -1).toBe(0);
       }
 
       // The 3..64 bound holds too, through two different database mechanisms:
@@ -1972,18 +2519,25 @@ describe('database acceptance (real PostgreSQL)', () => {
       const tooLong = await insertKey('a'.repeat(65));
       expect(sqlStateOf(tooLong)).toBe('22001');
 
-      // Not one of the rejected shapes was stored.
-      const stored = await migrator.$queryRaw<CountRow[]>`
-        SELECT count(*)::int AS n FROM organizations WHERE name = 'Kebab Probe'`;
-      expect(stored[0]?.n ?? -1).toBe(0);
-
-      // A compliant key is still accepted at both boundaries (3 and 64).
-      await expect(
-        app.$executeRaw`INSERT INTO organizations (name, bootstrap_key) VALUES ('Kebab Probe', 'ok-3')`,
-      ).resolves.toBe(1);
-      await expect(
-        app.$executeRaw`INSERT INTO organizations (name, bootstrap_key) VALUES ('Kebab Probe', ${'a'.repeat(64)})`,
-      ).resolves.toBe(1);
+      // A compliant key is still accepted at both boundaries (3 and 64), and
+      // each is verifiable exactly through its own bootstrap-key scope.
+      for (const key of ['ok-3', 'a'.repeat(64)]) {
+        const probeId = randomUUID();
+        await expect(
+          withTenantTransaction(
+            { prisma: app },
+            probeId,
+            (tx) =>
+              tx.$executeRaw`INSERT INTO organizations (id, name, bootstrap_key) VALUES (${probeId}::uuid, 'Kebab Probe', ${key})`,
+          ),
+        ).resolves.toBe(1);
+        const stored = await underBootstrapKey(
+          migrator,
+          key,
+          (tx) => tx.$queryRaw<CountRow[]>`SELECT count(*)::int AS n FROM organizations WHERE bootstrap_key = ${key}`,
+        );
+        expect(stored[0]?.n ?? 0).toBe(1);
+      }
     });
 
     it('AC-16: upgrading a database that already runs 0001+0002 with M1b rows preserves every row', async () => {
@@ -2729,12 +3283,21 @@ describe('database acceptance (real PostgreSQL)', () => {
 
     /**
      * Asserts a statement is *rejected* by the database; the transaction always rolls
-     * back, so a broken constraint leaves nothing behind for the next case.
+     * back, so a broken constraint leaves nothing behind for the next case. A
+     * case asserting a tenant-table constraint names the organization to run
+     * inside (§8.2), so the constraint — never the RLS policy — is the
+     * rejection being proven.
      */
-    const expectDbRejects = async (run: (tx: Prisma.TransactionClient) => Promise<unknown>): Promise<void> => {
+    const expectDbRejects = async (
+      run: (tx: Prisma.TransactionClient) => Promise<unknown>,
+      organizationId?: string,
+    ): Promise<void> => {
       let rejected = false;
       try {
         await migrator.$transaction(async (tx) => {
+          if (organizationId !== undefined) {
+            await establishTenantContext(tx, organizationId);
+          }
           try {
             await run(tx);
           } catch (error) {
@@ -2802,9 +3365,15 @@ describe('database acceptance (real PostgreSQL)', () => {
         INSERT INTO users (email) VALUES (${MEMBER_EMAIL}) RETURNING id`;
       memberId = inserted[0]?.id ?? '';
       expect(memberId).toMatch(UUID_PATTERN);
-      await app.$executeRaw`
+      // §8.2: the edge write runs inside the tenant scope it belongs to.
+      await inTenant(
+        app,
+        orgAId,
+        (tx) =>
+          tx.$executeRaw`
         INSERT INTO organization_memberships (organization_id, user_id, is_owner)
-        VALUES (${orgAId}::uuid, ${memberId}::uuid, false)`;
+        VALUES (${orgAId}::uuid, ${memberId}::uuid, false)`,
+      );
       await provision(MEMBER_EMAIL);
 
       // 4. The application graph with a per-run key pair, and a low Argon2id cost so
@@ -2889,9 +3458,14 @@ describe('database acceptance (real PostgreSQL)', () => {
       }
 
       // The owner membership now carries the seeded Owner role.
-      const stored = await migrator.$queryRaw<{ role_id: string | null; is_owner: boolean }[]>`
-        SELECT role_id, is_owner FROM organization_memberships
-        WHERE organization_id = ${orgAId}::uuid AND user_id = ${ownerAId}::uuid`;
+      const stored = await inTenant(
+        migrator,
+        orgAId,
+        (tx) =>
+          tx.$queryRaw<{ role_id: string | null; is_owner: boolean }[]>`
+          SELECT role_id, is_owner FROM organization_memberships
+          WHERE organization_id = ${orgAId}::uuid AND user_id = ${ownerAId}::uuid`,
+      );
       expect(stored[0]?.is_owner).toBe(true);
       expect(stored[0]?.role_id).toMatch(UUID_PATTERN);
     });
@@ -2901,6 +3475,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         (tx) =>
           tx.$executeRaw`INSERT INTO roles (organization_id, key, name, is_system, is_owner)
             VALUES (${orgAId}::uuid, ${'owner_again'}, ${'Owner Again'}, true, true)`,
+        orgAId,
       );
     });
 
@@ -2923,14 +3498,28 @@ describe('database acceptance (real PostgreSQL)', () => {
       await expect(app.$executeRaw`ALTER TABLE roles ADD COLUMN probe text`).rejects.toThrow();
 
       const expectedGrants = ROLE_PRESETS.reduce((total, preset) => total + preset.permissions.length, 0);
-      const rolesBefore = await migrator.$queryRaw<{ n: number }[]>`
-        SELECT count(*)::int AS n FROM roles WHERE organization_id = ${orgAId}::uuid`;
+      const rolesBefore = await inTenant(
+        migrator,
+        orgAId,
+        (tx) =>
+          tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM roles WHERE organization_id = ${orgAId}::uuid`,
+      );
       await authz.resolveForMembership(orgAId, ownerAId);
       await authz.ensureOrganizationRoles(orgAId);
-      const rolesAfter = await migrator.$queryRaw<{ n: number }[]>`
-        SELECT count(*)::int AS n FROM roles WHERE organization_id = ${orgAId}::uuid`;
-      const grants = await migrator.$queryRaw<{ n: number }[]>`
-        SELECT count(*)::int AS n FROM role_permissions WHERE organization_id = ${orgAId}::uuid`;
+      const rolesAfter = await inTenant(
+        migrator,
+        orgAId,
+        (tx) =>
+          tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM roles WHERE organization_id = ${orgAId}::uuid`,
+      );
+      const grants = await inTenant(
+        migrator,
+        orgAId,
+        (tx) =>
+          tx.$queryRaw<
+            { n: number }[]
+          >`SELECT count(*)::int AS n FROM role_permissions WHERE organization_id = ${orgAId}::uuid`,
+      );
       expect(rolesBefore[0]?.n).toBe(6);
       expect(rolesAfter[0]?.n).toBe(6);
       expect(grants[0]?.n).toBe(expectedGrants);
@@ -3011,9 +3600,14 @@ describe('database acceptance (real PostgreSQL)', () => {
       const after = await versionOf(memberId);
       expect(after).toBe(before + 1);
       // The change and the bump are one transaction: the stored role is the new one.
-      const stored = await migrator.$queryRaw<{ role_id: string | null }[]>`
-        SELECT role_id FROM organization_memberships
-        WHERE organization_id = ${orgAId}::uuid AND user_id = ${memberId}::uuid`;
+      const stored = await inTenant(
+        migrator,
+        orgAId,
+        (tx) =>
+          tx.$queryRaw<{ role_id: string | null }[]>`
+          SELECT role_id FROM organization_memberships
+          WHERE organization_id = ${orgAId}::uuid AND user_id = ${memberId}::uuid`,
+      );
       expect(stored[0]?.role_id).toBe(ids.cashier);
 
       const stale = await me(memberToken, orgAId).expect(401);
@@ -3086,18 +3680,28 @@ describe('database acceptance (real PostgreSQL)', () => {
 
       // Bypass the service entirely: write the override straight through the
       // application role. The resolver must still strip it (§11.2, §38.17).
-      await migrator.$executeRaw`
-        INSERT INTO permission_overrides (organization_id, user_id, permission_id, effect)
-        VALUES (${orgAId}::uuid, ${memberId}::uuid, ${'accounting.journal.post'}, 'ALLOW'::permission_effect)`;
+      await inTenant(
+        migrator,
+        orgAId,
+        (tx) =>
+          tx.$executeRaw`
+          INSERT INTO permission_overrides (organization_id, user_id, permission_id, effect)
+          VALUES (${orgAId}::uuid, ${memberId}::uuid, ${'accounting.journal.post'}, 'ALLOW'::permission_effect)`,
+      );
       try {
         const resolved = await authz.resolveForMembership(orgAId, memberId);
         expect(resolved.permissions).not.toContain('accounting.journal.post');
         expect(resolved.permissions.every((id) => !OWNER_EXCLUSIVE_PERMISSION_IDS.includes(id))).toBe(true);
       } finally {
-        await migrator.$executeRaw`
-          DELETE FROM permission_overrides
-          WHERE organization_id = ${orgAId}::uuid AND user_id = ${memberId}::uuid
-            AND permission_id = ${'accounting.journal.post'}`;
+        await inTenant(
+          migrator,
+          orgAId,
+          (tx) =>
+            tx.$executeRaw`
+            DELETE FROM permission_overrides
+            WHERE organization_id = ${orgAId}::uuid AND user_id = ${memberId}::uuid
+              AND permission_id = ${'accounting.journal.post'}`,
+        );
       }
     });
 
@@ -3123,6 +3727,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         (tx) =>
           tx.$executeRaw`INSERT INTO role_permissions (organization_id, role_id, permission_id)
             VALUES (${orgAId}::uuid, ${idsB.manager as string}::uuid, ${'catalog.view'})`,
+        orgAId,
       );
 
       // An override tied to a membership that does not exist in that organization.
@@ -3130,6 +3735,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         (tx) =>
           tx.$executeRaw`INSERT INTO permission_overrides (organization_id, user_id, permission_id, effect)
             VALUES (${orgBId}::uuid, ${memberId}::uuid, ${'catalog.view'}, 'ALLOW'::permission_effect)`,
+        orgBId,
       );
 
       // A membership pointed at another organization's role.
@@ -3137,6 +3743,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         (tx) =>
           tx.$executeRaw`UPDATE organization_memberships SET role_id = ${idsB.manager as string}::uuid
             WHERE organization_id = ${orgAId}::uuid AND user_id = ${memberId}::uuid`,
+        orgAId,
       );
     });
 
