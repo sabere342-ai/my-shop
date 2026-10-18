@@ -330,9 +330,25 @@ branch; nothing is merged, no auto-merge is enabled, and no force push was used.
 | `lint`, `format:check` | clean across workspaces |
 | mechanical gates (stages 1–24), secret scan, migration immutability (G-6) | OK — gate prints 10 migration path(s) (nine migration files plus the lock file), none rewritten |
 
-### Remote CI on the exact record head
+### Remote CI on the exact record head `45e0b1e`
 
-Appended below after publication (§11).
+Every push of this branch runs both events (`push` and `pull_request`). Both
+concluded `success` on the implementation tree head `d1671b0` and on the
+pre-appendix record head `45e0b1e`; the appendix table below quotes the
+latter's exact run and job IDs. The final record commit (this tree) differs
+only in this documentation and runs both events again at publication — the
+final acceptance report quotes those run IDs, verified before closing (§11).
+
+The workflow (`.github/workflows/ci.yml`) declares exactly seven jobs; all seven
+are green in the quoted runs:
+
+| Run | Event | ID | Conclusion | Jobs (job conclusion `success` for every entry) |
+| --- | --- | --- | --- | --- |
+| push CI | `push` | `39099994104` | success | fast-checks `117594124529`, dependency-audit `117594488465`, flutter-build-windows `117594488463`, backend-unit `117594488585`, backend-integration-database `117594488450`, contract-drift `117594488442`, flutter-build-android `117594488449` |
+| pull-request CI | `pull_request` | `39099997007` | success | fast-checks `117594134052`, dependency-audit `117594378060`, flutter-build-windows `117594378222`, backend-unit `117594378058`, backend-integration-database `117594378089`, contract-drift `117594378059`, flutter-build-android `117594378163` |
+
+PR #21 is left open; owner merge authorization is required, and nothing is
+merged, no auto-merge is enabled, and no force push was used.
 
 ## 14. Boundary and verdict
 
