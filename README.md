@@ -233,7 +233,8 @@ re-authenticates.
 
 The snapshot is a compact RS256 JWS (72-hour validity) over the effective permission
 set, `permissions_version`, the catalog version, the organization id, and `iat`/`exp`.
-It carries **no device id** — device binding is M2-S5 — and verification refuses a
+It carries **no device id** — device identity rides in the access token's `did`
+claim, not in the snapshot — and verification refuses a
 tampered payload, a foreign signature, an algorithm downgrade, an expired or
 wrong-issuer snapshot, an unknown catalog version, and any non-owner snapshot that
 names an owner-exclusive permission (§38.16.3, §38.17).
@@ -279,10 +280,52 @@ set → `PERMISSION_DENIED`. Refusals are recorded as per-mutation REJECTED
 ledger rows, commit nothing, and never block the rest of the batch. What the
 validator proved is exactly what the ledger applied.
 
-Production sync remains **fail-closed**: `FailClosedSyncAuthenticator` admits
-nothing this slice — device registration and binding is M2-S5. The depth of
-this posture, its honest boundaries, and the failure codes are documented in
+Production sync is **device-bound** (slice M2-S5): `DeviceBoundSyncAuthenticator`
+identifies a sync caller by the bearer token (signature, live session, permission
+generation) **and** the server-written session/device binding — a token minted
+from an unbound session is refused `UNAUTHENTICATED`, and a caller whose device
+row is REVOKED is refused `DEVICE_REVOKED` for the whole request (§12.5). The
+depth of this posture, its honest boundaries, and the failure codes are
+documented in
 [`docs/security-architecture.md`](docs/security-architecture.md).
+
+### Devices: registration, binding, revocation (§12, §12.5, slice M2-S5)
+
+A device is an **installation**, registered by any member of the organization on
+first successful authentication (§12.1):
+
+```text
+POST /api/v1/organizations/{organizationId}/devices                      # any member
+GET  /api/v1/organizations/{organizationId}/devices                      # devices.view
+POST /api/v1/organizations/{organizationId}/devices/{deviceId}/bind-session  # any member
+POST /api/v1/organizations/{organizationId}/devices/{deviceId}/revoke    # devices.revoke
+```
+
+Registration is idempotent per `(organization_id, installation_id)`: the same
+keystore pair re-verifies against the stored SHA-256 digest and refreshes the
+metadata; a wrong credential is refused without revealing the device's state;
+a REVOKED installation is never re-activated — re-installation enrolls a *new*
+installation id and the old row stays revoked (§12.2's closed two-state
+vocabulary). The server stores only the digest; the installation credential
+itself exists only in the client keystore and never appears in a response, a
+log line, or a contract document (§13.6).
+
+`bind-session` writes the binding onto the verified principal's own session and
+answers a **fresh access token** carrying the `did` device claim — the next
+request is device-bound without a second round trip. Pre-binding tokens are
+refused for device-bound sync: a session and its token must agree about the
+binding, in both directions, on every authenticated request. A session binds
+at most one device, and no refresh token is rotated by binding.
+
+Revocation is one transaction: the device row becomes `REVOKED` and every
+session family bound to it is revoked with it (new `sessions.revoked_reason`
+value `DEVICE_REVOKED`), so refresh dies at the same instant the device does.
+At the sync boundary the *live* device row is re-read inside a tenant
+transaction — a revoked device is refused `DEVICE_REVOKED` on the next push or
+pull regardless of any token still carrying it, and its queued mutations are
+quarantined for owner decision, never discarded (§12.5). The owner-visible
+device list exposes §12.5's server-maintained sync metadata (last push/pull/
+sync, client schema version) so a one-sided failure is diagnosable.
 
 ### Running the backend
 
