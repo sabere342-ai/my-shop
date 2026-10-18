@@ -137,10 +137,11 @@ interface MigrationRow {
 /** The §4 classification, pinned as data so a change must be an explicit edit here. */
 const TENANT_ROOT_TABLE = 'organizations';
 
-/** The eight tenant tables whose isolation column is their `organization_id`. */
+/** The nine tenant tables whose isolation column is their `organization_id`. */
 const TENANT_ORG_TABLES: readonly string[] = [
   'change_log',
   'device_sync_cursors',
+  'devices',
   'mutation_ledger',
   'organization_memberships',
   'permission_overrides',
@@ -166,6 +167,11 @@ const ORG_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
 const USER_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const DEVICE_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+// The seeded tenant-A device's installation handle (§9.2 T-7): a distinct
+// uuid-shaped value, never the device row's own id (§12.3 — the two facts
+// must not be conflated even in a fixture).
+const DEVICE_INSTALLATION_ID = 'dddddddd-dddd-4ddd-9ddd-dddddddddddd';
+const DEVICE_ROGUE_ID = 'dddddddd-dddd-4ddd-8ddd-eddddddddddd';
 const ROLE_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 const MUTATION_ID = 'ffff0000-0000-4000-8000-000000000001';
 
@@ -198,6 +204,14 @@ const CROSS_TENANT_INSERT: ReadonlyMap<string, { sql: string; params: readonly u
       sql: `INSERT INTO device_sync_cursors (organization_id, device_id, updated_at)
               VALUES ($1::uuid, $2::uuid, now())`,
       params: [ORG_B, DEVICE_ID],
+    },
+  ],
+  [
+    'devices',
+    {
+      sql: `INSERT INTO devices (id, organization_id, installation_id, installation_secret_hash, label, platform)
+              VALUES ($1::uuid, $2::uuid, $3::uuid, $4, 'Cross-Tenant Device', 'windows')`,
+      params: [DEVICE_ROGUE_ID, ORG_B, DEVICE_ID, 'c'.repeat(64)],
     },
   ],
   [
@@ -267,6 +281,13 @@ const CROSS_TENANT_MOVE: ReadonlyMap<string, { sql: string; params: readonly unk
     },
   ],
   [
+    'devices',
+    {
+      sql: `UPDATE devices SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
+      params: [ORG_B, ORG_A],
+    },
+  ],
+  [
     'mutation_ledger',
     {
       sql: `UPDATE mutation_ledger SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
@@ -318,7 +339,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
     urls = requireTestUrls();
 
     // Drop + create from empty, provision roles, and deploy the full
-    // `0001`–`0008` history: the fresh-install precondition (AC-07).
+    // `0001`–`0009` history: the fresh-install precondition (AC-07).
     dbScript('test-setup');
     setupRan = true;
 
@@ -476,6 +497,20 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
            VALUES ($1::uuid, 1, $2::uuid, 'RLS_PROBE', 'rls-a-1', now())`,
         ORG_A,
         MUTATION_ID,
+      );
+      await tx.$executeRawUnsafe(
+        // The §12.1 tenant-A device row. Without it the cross-tenant UPDATE
+        // probe against `devices` matches zero rows — a no-op UPDATE proves
+        // nothing about any `WITH CHECK` — so the fixture owns one real row
+        // per its own trusted context, exactly as production registration
+        // would write it.
+        `INSERT INTO devices (id, organization_id, installation_id, installation_secret_hash, label, platform)
+           VALUES ($1::uuid, $2::uuid, $3, $4, $5, 'windows')`,
+        DEVICE_ID,
+        ORG_A,
+        DEVICE_INSTALLATION_ID,
+        'd'.repeat(64),
+        'RLS Fixture Device',
       );
       await tx.$executeRawUnsafe(
         `INSERT INTO device_sync_cursors (organization_id, device_id, last_pushed_server_sequence, last_pull_server_sequence, updated_at)
@@ -956,8 +991,8 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
     });
   });
 
-  describe('AC-07: the fresh install applied exactly the eight-path history', () => {
-    it('records exactly 0001 through 0008, every one finished and never rolled back', async () => {
+  describe('AC-07: the fresh install applied exactly the nine-path history', () => {
+    it('records exactly 0001 through 0009, every one finished and never rolled back', async () => {
       const rows = await migrator.$queryRawUnsafe<MigrationRow[]>(
         `SELECT migration_name FROM _prisma_migrations ORDER BY migration_name`,
       );
@@ -971,6 +1006,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
         '0006_users_permissions_version',
         '0007_authorization_roles',
         '0008_tenant_row_level_security',
+        '0009_device_binding',
       ]);
     });
   });
@@ -987,7 +1023,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
   });
 
   describe('AC-08: upgrading a predecessor-state database keeps every row and adds the scope', () => {
-    it('seeds real predecessor-shaped data on 0001–0007, applies 0008, and loses nothing', async () => {
+    it('seeds real predecessor-shaped data on 0001–0007, applies 0008 and 0009, and loses nothing', async () => {
       const scratchName = 'my_shop_m2s4_upgrade';
       const scratchMigrations = new URL(urls.migration);
       scratchMigrations.pathname = `/${scratchName}`;
@@ -1197,6 +1233,44 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
           expect(row.row_security).toBe(false);
           expect(row.forced).toBe(false);
         }
+
+        // M2-S5's migration joins the same in-use history: `devices` arrives
+        // with the identical forced-RLS posture, and the pre-existing session
+        // rows keep a NULL binding — the upgrade writes no row and binds
+        // nobody.
+        cpSync(
+          path.join(API_ROOT, 'prisma', 'migrations', '0009_device_binding'),
+          path.join(scratchRoot, 'migrations', '0009_device_binding'),
+          { recursive: true },
+        );
+        dbScript('deploy', {
+          args: ['--schema', scratchSchema],
+          env: { MIGRATION_DATABASE_URL: scratchMigrations.toString() },
+        });
+
+        const upgradedMigrations = await scratch.$queryRawUnsafe<MigrationRow[]>(
+          `SELECT migration_name FROM _prisma_migrations ORDER BY migration_name`,
+        );
+        expect(upgradedMigrations.map((row) => row.migration_name)).toContain('0009_device_binding');
+
+        const devicesState = await scratch.$queryRawUnsafe<ClassifiedRow[]>(
+          `SELECT c.relname AS tablename, c.relrowsecurity AS row_security, c.relforcerowsecurity AS forced
+             FROM pg_class c WHERE c.relname = 'devices' AND c.relkind = 'r'`,
+        );
+        expect(devicesState).toEqual([{ tablename: 'devices', row_security: true, forced: true }]);
+        const devicesPolicies = await scratch.$queryRawUnsafe<CountRow[]>(
+          `SELECT count(*)::int AS n FROM pg_policies
+            WHERE schemaname = 'public' AND tablename = 'devices' AND policyname = 'tenant_isolation'`,
+        );
+        expect(countOf(devicesPolicies)).toBe(1);
+        expect(countOf(await scratch.$queryRawUnsafe<CountRow[]>(`SELECT count(*)::int AS n FROM devices`))).toBe(0);
+
+        // And the upgrade moved nothing it must never transform: the 0008
+        // assertions above still hold after 0009 applied.
+        const survivedFeedAfterUpgrade = await withTenantTransaction({ prisma: scratch }, ORG_A, (tx) =>
+          tx.$queryRawUnsafe<CountRow[]>(`SELECT count(*)::int AS n FROM change_log WHERE entity_id = 'before-m2s4'`),
+        );
+        expect(countOf(survivedFeedAfterUpgrade)).toBe(1);
       } finally {
         await Promise.allSettled([scratch.$disconnect()]);
         try {
