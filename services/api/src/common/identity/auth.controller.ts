@@ -104,6 +104,7 @@ export class AuthController {
       organizations: [...principal.organizations],
       sessionId: principal.sessionId,
       permissionsVersion: principal.permissionsVersion,
+      ...(principal.deviceId === undefined ? {} : { deviceId: principal.deviceId }),
       expiresAt: principal.expiresAt.toISOString(),
     };
   }

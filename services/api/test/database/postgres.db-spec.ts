@@ -328,7 +328,8 @@ describe('database acceptance (real PostgreSQL)', () => {
       // `0003_organizations`, and its hardening adds `0004_bootstrap_key_shape`;
       // M2-S2 adds `0005_identity_auth` and `0006_users_permissions_version`;
       // M2-S3 adds `0007_authorization_roles`; M2-S4 adds the §8.2 RLS
-      // migration `0008_tenant_row_level_security` (policies only, no table).
+      // migration `0008_tenant_row_level_security` (policies only, no table);
+      // M2-S5 adds `0009_device_binding` (§12 devices + `sessions.device_id`).
       // Every applied migration must be finished and never rolled back
       // (migration history is append-only, Master Plan §44.1).
       expect(rows.map((row) => row.migration_name)).toEqual([
@@ -340,6 +341,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         '0006_users_permissions_version',
         '0007_authorization_roles',
         '0008_tenant_row_level_security',
+        '0009_device_binding',
       ]);
       for (const row of rows) {
         expect(row.finished_at).not.toBeNull();
@@ -359,8 +361,8 @@ describe('database acceptance (real PostgreSQL)', () => {
       // chain, and the failed-attempt backoff. M2-S3 authorizes the RBAC tables
       // (§40.6, §11.2, §11.4): `roles`, the `role_permissions` grant edges, and the
       // per-user `permission_overrides`. The permission ids themselves are not a
-      // table (§11.2: the catalog lives in code). Nothing else — M2-S4's RLS and
-      // M2-S5's device enrolment have their own slices and their own migrations.
+      // table (§11.2: the catalog lives in code). M2-S4's RLS is policies only;
+      // M2-S5 authorizes `devices`, the §12 installation record.
       const rows = await migrator.$queryRaw<NameRow[]>`
         SELECT tablename FROM pg_tables
         WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'
@@ -371,6 +373,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         'auth_throttles',
         'change_log',
         'device_sync_cursors',
+        'devices',
         'mutation_ledger',
         'organization_memberships',
         'organizations',
@@ -389,7 +392,7 @@ describe('database acceptance (real PostgreSQL)', () => {
       dbScript('deploy');
 
       const rows = await migrator.$queryRaw<MigrationRow[]>`SELECT migration_name FROM _prisma_migrations`;
-      expect(rows).toHaveLength(8);
+      expect(rows).toHaveLength(9);
     });
   });
 
@@ -4030,5 +4033,625 @@ describe('database acceptance (real PostgreSQL)', () => {
         rmSync(scratchRoot, { recursive: true, force: true });
       }
     }, 300_000);
+  });
+
+  describe('devices and the device-bound sync boundary (M2-S5)', () => {
+    /**
+     * The device-binding acceptance block (§40.6 M2-S5; §12, §12.4, §12.5,
+     * §38.16). It provisions two tenants through the real M2-S1 command, a
+     * cashier member through the application role, and then exercises the four
+     * device routes and the device-bound sync boundary against real PostgreSQL —
+     * with the **production module graph**: the `DeviceBoundSyncAuthenticator`
+     * is not overridden here, so every sync case proves the real boundary.
+     *
+     * The admission rules under test:
+     *
+     * - registration is idempotent per (organization, installation) and a
+     *   revoked installation is never re-activated (§12.2);
+     * - the installation credential never appears in any response (§13.6);
+     * - a session binds at most one device, and binding re-mints a token that
+     *   carries the `did` claim (§38.16.2);
+     * - revocation revokes the device and its bound session families in one
+     *   transaction (§12.4);
+     * - the sync boundary authenticates from verified material: an unbound
+     *   token is refused, a mismatched assertion is refused, a revoked device
+     *   is refused — and the refusal is the live row's, not the token's (§12.5).
+     */
+    const OWNER_EMAIL = 'owner.m2s5@example.test';
+    const MEMBER_EMAIL = 'member.m2s5@example.test';
+    const FOREIGN_OWNER_EMAIL = 'owner.m2s5.foreign@example.test';
+    const PASSPHRASE = 'a-sufficiently-long-m2s5-passphrase';
+    const PRIMARY_KEY = 'm2s5-device-tenant';
+    const FOREIGN_KEY = 'm2s5-device-foreign-tenant';
+    const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+    /** Keystore installation credentials, one per registered installation. */
+    const INSTALLATION_CREDENTIAL_A = 'm2s5-installation-credential-owner-device-padded';
+    const INSTALLATION_CREDENTIAL_B = 'm2s5-installation-credential-member-device-padded';
+    const INSTALLATION_CREDENTIAL_C = 'm2s5-installation-credential-member-second-padded';
+    const INSTALLATION_CREDENTIAL_D = 'm2s5-installation-credential-owner-second-padded';
+    const INSTALLATION_CREDENTIAL_F = 'm2s5-installation-credential-foreign-padded-x';
+
+    let config: AppConfigShape;
+    let harness: TestHarness;
+    let organizationId: string;
+    let foreignOrganizationId: string;
+    let ownerId: string;
+    let memberId: string;
+    let foreignOwnerId: string;
+    let ownerToken: string;
+    let ownerRefreshToken: string;
+    let memberToken: string;
+    /** The re-minted token of the member's device-bound session (the raw token loses validity at binding). */
+    let memberBoundToken: string;
+    /** The re-minted token of the owner's device-bound session. */
+    let ownerBoundToken: string;
+    let foreignToken: string;
+    let deviceAId: string;
+    let deviceBId: string;
+    let deviceCId: string;
+    let deviceDId: string;
+    let foreignDeviceId: string;
+
+    const b64urlJson = (segment: string): Record<string, unknown> =>
+      JSON.parse(Buffer.from(segment, 'base64url').toString('utf8')) as Record<string, unknown>;
+
+    const runBootstrap = async (argv: readonly string[]): Promise<BootstrapResult> => {
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const code = await runBootstrapCli(
+        argv,
+        { MIGRATION_DATABASE_URL: urls.migration },
+        { out: (line) => stdout.push(line), err: (line) => stderr.push(line) },
+      );
+      expect(stderr).toEqual([]);
+      expect(code).toBe(EXIT_SUCCESS);
+      return JSON.parse(stdout[0] ?? '{}') as BootstrapResult;
+    };
+
+    const provision = async (email: string): Promise<void> => {
+      const stderr: string[] = [];
+      const code = await runCredentialCli(
+        ['--email', email],
+        { NODE_ENV: 'test', DATABASE_URL: urls.application, [PASSWORD_ENV_VAR]: PASSPHRASE },
+        { out: () => undefined, err: (line) => stderr.push(line) },
+      );
+      expect(stderr).toEqual([]);
+      expect(code).toBe(EXIT_SUCCESS);
+    };
+
+    const login = (email: string) => harness.http.post('/api/v1/auth/login').send({ email, password: PASSPHRASE });
+
+    const loginFresh = async (email: string): Promise<{ accessToken: string; refreshToken: string }> => {
+      const response = await login(email).expect(200);
+      return {
+        accessToken: response.body.accessToken as string,
+        refreshToken: response.body.refreshToken as string,
+      };
+    };
+
+    const devicesPath = (organization: string): string => `/api/v1/organizations/${organization}/devices`;
+
+    const registerDevice = (token: string, organization: string, body: Record<string, unknown>) =>
+      harness.http.post(devicesPath(organization)).set('Authorization', `Bearer ${token}`).send(body);
+
+    const listDevices = (token: string, organization: string) =>
+      harness.http.get(devicesPath(organization)).set('Authorization', `Bearer ${token}`);
+
+    const bindSession = (token: string, organization: string, deviceId: string, installationCredential: string) =>
+      harness.http
+        .post(`${devicesPath(organization)}/${deviceId}/bind-session`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ installationSecret: installationCredential });
+
+    const revokeDevice = (token: string, organization: string, deviceId: string) =>
+      harness.http.post(`${devicesPath(organization)}/${deviceId}/revoke`).set('Authorization', `Bearer ${token}`);
+
+    const pushBatch = (token: string, body: Record<string, unknown>) =>
+      harness.http.post('/api/v1/sync/push').set('Authorization', `Bearer ${token}`).send(body);
+
+    const pullPage = (token: string) =>
+      harness.http.get('/api/v1/sync/pull?after=0').set('Authorization', `Bearer ${token}`);
+
+    /** One §38.8.1 SALE mutation this block pushes through the production boundary. */
+    const saleMutation = (deviceId: string, sequence: number): Record<string, unknown> => {
+      const mutationId = randomUUID();
+      return {
+        mutationId,
+        organizationId,
+        deviceId,
+        actorUserId: memberId,
+        actorRoleSnapshot: { permissions: ['sales.create'] },
+        aggregateType: 'SALE',
+        aggregateId: randomUUID(),
+        operationType: 'CREATE',
+        payload: { probe: { note: mutationId } },
+        payloadVersion: 1,
+        deviceLocalSequence: sequence,
+        localCreatedAt: '2026-06-01T00:00:00.000Z',
+        deviceIdempotencyKey: mutationId,
+      };
+    };
+
+    const pushEnvelope = (deviceId: string, sequence = 1): Record<string, unknown> => ({
+      deviceId,
+      syncBatchId: randomUUID(),
+      localSchemaVersion: MIN_SUPPORTED_LOCAL_SCHEMA_VERSION,
+      mutations: [saleMutation(deviceId, sequence)],
+    });
+
+    /** The device row of one organization, read inside its trusted context. */
+    const deviceRow = async (organization: string, id: string) => {
+      const rows = await inTenant(
+        migrator,
+        organization,
+        (tx) =>
+          tx.$queryRaw<
+            {
+              status: string;
+              revoked_at: Date | null;
+              last_push_at: Date | null;
+              last_pull_at: Date | null;
+              last_sync_at: Date | null;
+              client_schema_version: number | null;
+              app_version: string | null;
+            }[]
+          >`
+          SELECT status, revoked_at, last_push_at, last_pull_at, last_sync_at, client_schema_version, app_version
+            FROM devices WHERE id = ${id}::uuid`,
+      );
+      return rows[0];
+    };
+
+    /** The live binding of one user's session, read inside the tenant context. */
+    const sessionBinding = async (organization: string, userId: string) => {
+      const rows = await inTenant(
+        migrator,
+        organization,
+        (tx) =>
+          tx.$queryRaw<{ id: string; device_id: string | null; revoked_reason: string | null }[]>`
+          SELECT id, device_id, revoked_reason FROM sessions
+           WHERE user_id = ${userId}::uuid AND revoked_at IS NULL
+           ORDER BY created_at DESC`,
+      );
+      return rows[0];
+    };
+
+    beforeAll(async () => {
+      await migrator.$executeRaw`DELETE FROM auth_throttles`;
+
+      // 1. Two tenants through the real M2-S1 operator command.
+      const primary = await runBootstrap([
+        '--bootstrap-key',
+        PRIMARY_KEY,
+        '--name',
+        'Device Binding Tenant',
+        '--owner-email',
+        OWNER_EMAIL,
+      ]);
+      ownerId = primary.userId;
+      organizationId = primary.organizationId;
+      expect(ownerId).toMatch(UUID_PATTERN);
+
+      const foreign = await runBootstrap([
+        '--bootstrap-key',
+        FOREIGN_KEY,
+        '--name',
+        'Device Binding Foreign Tenant',
+        '--owner-email',
+        FOREIGN_OWNER_EMAIL,
+      ]);
+      foreignOwnerId = foreign.userId;
+      foreignOrganizationId = foreign.organizationId;
+      expect(foreignOwnerId).toMatch(UUID_PATTERN);
+
+      // 2. Credentials through the real M2-S2 operator command.
+      await provision(OWNER_EMAIL);
+      await provision(FOREIGN_OWNER_EMAIL);
+
+      // 3. A non-owner member of the primary tenant; the bootstrap creates only
+      //    the owner membership, so the edge is written through the application
+      //    role — the same path a later invitation flow will use. The member is
+      //    provisioned only after the account row exists.
+      const inserted = await migrator.$queryRaw<{ id: string }[]>`
+        INSERT INTO users (email) VALUES (${MEMBER_EMAIL}) RETURNING id`;
+      memberId = inserted[0]?.id ?? '';
+      expect(memberId).toMatch(UUID_PATTERN);
+      await provision(MEMBER_EMAIL);
+      await inTenant(
+        app,
+        organizationId,
+        (tx) =>
+          tx.$executeRaw`
+          INSERT INTO organization_memberships (organization_id, user_id, is_owner)
+          VALUES (${organizationId}::uuid, ${memberId}::uuid, false)`,
+      );
+
+      // 4. The application graph with a per-run key pair and a low Argon2id cost.
+      const { privateKey, publicKey } = generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      });
+      config = loadConfig({
+        NODE_ENV: 'test',
+        LOG_LEVEL: 'silent',
+        LOG_PRETTY: 'false',
+        DATABASE_URL: urls.application,
+        JWT_PRIVATE_KEY: Buffer.from(privateKey, 'utf8').toString('base64'),
+        JWT_PUBLIC_KEY: Buffer.from(publicKey, 'utf8').toString('base64'),
+        ARGON2_MEMORY_KIB: '8192',
+        ARGON2_TIME_COST: '1',
+      });
+      harness = await createTestHarness(config);
+
+      const owner = await loginFresh(OWNER_EMAIL);
+      ownerToken = owner.accessToken;
+      ownerRefreshToken = owner.refreshToken;
+      const foreignLogin = await loginFresh(FOREIGN_OWNER_EMAIL);
+      foreignToken = foreignLogin.accessToken;
+      expect(b64urlJson(ownerToken.split('.')[1] as string)['did']).toBeUndefined();
+
+      // The member gets the Cashier preset so the §9.4 ingress re-validation of
+      // pushed mutations finds `sales.create` — the push refusal under the
+      // production graph is then the applier's fail-closed answer, not a
+      // permission denial the membership could have avoided.
+      const roles = await harness.http
+        .get(`/api/v1/organizations/${organizationId}/roles`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .expect(200);
+      const cashier = (roles.body.roles as { key: string; id: string }[]).find((role) => role.key === 'cashier');
+      if (cashier === undefined) {
+        throw new Error('the cashier preset did not materialize');
+      }
+      await harness.http
+        .put(`/api/v1/organizations/${organizationId}/memberships/${memberId}/authorization`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ roleId: cashier.id, allow: [], deny: [] })
+        .expect(200);
+
+      const member = await loginFresh(MEMBER_EMAIL);
+      memberToken = member.accessToken;
+    }, 240_000);
+
+    afterAll(async () => {
+      await destroyTestHarness(harness);
+    });
+
+    it('§12.1: registration records the installation, with the credential in no response', async () => {
+      const response = await registerDevice(ownerToken, organizationId, {
+        installationId: '11111111-aaaa-4aaa-8aaa-000000000001',
+        installationSecret: INSTALLATION_CREDENTIAL_A,
+        platform: 'windows',
+        label: 'Front counter',
+        appVersion: '1.2.3',
+      }).expect(200);
+
+      const body = response.body as {
+        deviceId: string;
+        organizationId: string;
+        label: string;
+        platform: string;
+        status: string;
+        appVersion?: string;
+      };
+      expect(body.deviceId).toMatch(UUID_PATTERN);
+      expect(body).toMatchObject({
+        organizationId,
+        label: 'Front counter',
+        platform: 'windows',
+        status: 'ACTIVE',
+        appVersion: '1.2.3',
+      });
+      deviceAId = body.deviceId;
+
+      // The stored credential is a digest; neither the credential nor the word
+      // for it travels in any response (§13.6 redaction invariant).
+      expect(response.text).not.toContain(INSTALLATION_CREDENTIAL_A);
+      expect(response.text.toLowerCase()).not.toContain('secret');
+
+      const row = await deviceRow(organizationId, deviceAId);
+      expect(row).toMatchObject({ status: 'ACTIVE' });
+      expect(row?.revoked_at).toBeNull();
+    });
+
+    it('§12.1: re-presenting the same installation pair is an idempotent lookup, never a duplicate', async () => {
+      const response = await registerDevice(ownerToken, organizationId, {
+        installationId: '11111111-aaaa-4aaa-8aaa-000000000001',
+        installationSecret: INSTALLATION_CREDENTIAL_A,
+        platform: 'windows',
+      }).expect(200);
+
+      expect((response.body as { deviceId: string }).deviceId).toBe(deviceAId);
+
+      const rows = await inTenant(
+        migrator,
+        organizationId,
+        (tx) =>
+          tx.$queryRaw<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM devices
+           WHERE organization_id = ${organizationId}::uuid
+             AND installation_id = ${'11111111-aaaa-4aaa-8aaa-000000000001'}`,
+      );
+      expect(rows[0]?.n).toBe(1);
+    });
+
+    it('§12.3: a mismatched installation credential is refused without revealing the device state', async () => {
+      const refused = await registerDevice(ownerToken, organizationId, {
+        installationId: '11111111-aaaa-4aaa-8aaa-000000000001',
+        installationSecret: INSTALLATION_CREDENTIAL_B,
+        platform: 'windows',
+      }).expect(403);
+
+      expect(refused.body.code).toBe('PERMISSION_DENIED');
+      const row = await deviceRow(organizationId, deviceAId);
+      expect(row).toMatchObject({ status: 'ACTIVE' });
+    });
+
+    it('§12.4: any member may register; the device list needs `devices.view`', async () => {
+      const registered = await registerDevice(memberToken, organizationId, {
+        installationId: '11111111-aaaa-4aaa-8aaa-000000000002',
+        installationSecret: INSTALLATION_CREDENTIAL_B,
+        platform: 'android',
+      }).expect(200);
+      deviceBId = (registered.body as { deviceId: string }).deviceId;
+      expect(deviceBId).toMatch(UUID_PATTERN);
+
+      const memberList = await listDevices(memberToken, organizationId).expect(403);
+      expect(memberList.body.code).toBe('PERMISSION_DENIED');
+
+      const ownerList = await listDevices(ownerToken, organizationId).expect(200);
+      const listed = ownerList.body as { deviceId: string; label: string; platform: string }[];
+      expect(listed.map((row) => row.deviceId)).toEqual([deviceAId, deviceBId]);
+      // The default label is the platform name (§12.1).
+      expect(listed.find((row) => row.deviceId === deviceBId)?.platform).toBe('android');
+
+      // A different tenant's device is nowhere in any list (ADR-029).
+      const foreignRegistered = await registerDevice(foreignToken, foreignOrganizationId, {
+        installationId: '11111111-aaaa-4aaa-8aaa-000000000009',
+        installationSecret: INSTALLATION_CREDENTIAL_F,
+        platform: 'windows',
+      }).expect(200);
+      foreignDeviceId = (foreignRegistered.body as { deviceId: string }).deviceId;
+      const foreignList = await listDevices(foreignToken, foreignOrganizationId).expect(200);
+      expect((foreignList.body as { deviceId: string }[]).map((row) => row.deviceId)).toEqual([foreignDeviceId]);
+    });
+
+    it('§38.16.2: bind-session writes the binding, re-mints a token carrying `did`, and refuses a re-link', async () => {
+      // The member's live session gains exactly one device. The re-minted token
+      // carries `did`; the pre-binding token of the same session no longer
+      // verifies — the signed claim and the stored binding must agree (§10.1).
+      const bound = await bindSession(memberToken, organizationId, deviceBId, INSTALLATION_CREDENTIAL_B).expect(200);
+      const accessToken = (bound.body as { accessToken: string }).accessToken;
+      expect(b64urlJson(accessToken.split('.')[1] as string)['did']).toBe(deviceBId);
+      expect(b64urlJson(memberToken.split('.')[1] as string)['did']).toBeUndefined();
+      // The pre-binding token of the now-bound session no longer verifies: the
+      // claim agreement check refuses it before any route handler runs.
+      await registerDevice(memberToken, organizationId, {
+        installationId: '11111111-aaaa-4aaa-8aaa-000000000099',
+        installationSecret: INSTALLATION_CREDENTIAL_B,
+        platform: 'windows',
+      }).expect(401);
+      const stored = await sessionBinding(organizationId, memberId);
+      expect(stored?.device_id).toBe(deviceBId);
+
+      // Re-binding the same device is idempotent.
+      const rebound = await bindSession(accessToken, organizationId, deviceBId, INSTALLATION_CREDENTIAL_B).expect(200);
+      expect(b64urlJson((rebound.body as { accessToken: string }).accessToken.split('.')[1] as string)['did']).toBe(
+        deviceBId,
+      );
+      memberBoundToken = (rebound.body as { accessToken: string }).accessToken;
+
+      // Naming a different device afterwards is refused, never silently re-linked.
+      const second = await registerDevice(accessToken, organizationId, {
+        installationId: '11111111-aaaa-4aaa-8aaa-000000000003',
+        installationSecret: INSTALLATION_CREDENTIAL_C,
+        platform: 'windows',
+      }).expect(200);
+      deviceCId = (second.body as { deviceId: string }).deviceId;
+      const reLinked = await bindSession(accessToken, organizationId, deviceCId, INSTALLATION_CREDENTIAL_C).expect(403);
+      expect(reLinked.body.code).toBe('PERMISSION_DENIED');
+      expect((await sessionBinding(organizationId, memberId))?.device_id).toBe(deviceBId);
+
+      // A wrong credential is the same refusal a registration wrong answer is.
+      const fresh = await loginFresh(MEMBER_EMAIL);
+      const wrong = await bindSession(
+        fresh.accessToken,
+        organizationId,
+        deviceBId,
+        `${INSTALLATION_CREDENTIAL_B}-wrong`,
+      ).expect(403);
+      expect(wrong.body.code).toBe('PERMISSION_DENIED');
+    });
+
+    it('§12.3: a device of another tenant is invisible to every route of this tenant', async () => {
+      // A foreign id is answered NOT_FOUND, like a nonexistent one (ADR-029),
+      // on every route — including the ones that would fail on a credential.
+      expect(
+        (await bindSession(memberBoundToken, organizationId, foreignDeviceId, INSTALLATION_CREDENTIAL_B).expect(404))
+          .body.code,
+      ).toBe('NOT_FOUND');
+      // The revoke route's permission check happens before the handler, so the
+      // invisibility proof uses an actor that already holds `devices.revoke`.
+      expect((await revokeDevice(ownerToken, organizationId, foreignDeviceId).expect(404)).body.code).toBe('NOT_FOUND');
+    });
+
+    it('§12.4: one session binds one device — the device the owner chose first.', async () => {
+      const second = await registerDevice(ownerToken, organizationId, {
+        installationId: '11111111-aaaa-4aaa-8aaa-000000000004',
+        installationSecret: INSTALLATION_CREDENTIAL_D,
+        platform: 'windows',
+      }).expect(200);
+      deviceDId = (second.body as { deviceId: string }).deviceId;
+
+      // The owner's unbound session binds exactly one device; the re-minted
+      // token carries the binding — the pre-binding token goes stale (§10.1).
+      const boundForOwner = await bindSession(ownerToken, organizationId, deviceDId, INSTALLATION_CREDENTIAL_D).expect(
+        200,
+      );
+      ownerBoundToken = (boundForOwner.body as { accessToken: string }).accessToken;
+      expect(b64urlJson(ownerBoundToken.split('.')[1] as string)['did']).toBe(deviceDId);
+      expect((await sessionBinding(organizationId, ownerId))?.device_id).toBe(deviceDId);
+
+      // The same owner session names the other device it may also claim — the
+      // binding is refused and the first binding stands.
+      const refused = await bindSession(ownerBoundToken, organizationId, deviceAId, INSTALLATION_CREDENTIAL_A).expect(
+        403,
+      );
+      expect(refused.body.code).toBe('PERMISSION_DENIED');
+      expect((await sessionBinding(organizationId, ownerId))?.device_id).toBe(deviceDId);
+    });
+
+    it('§38.16.2: sync authenticates from the binding — unbound, mismatched, then admitted', async () => {
+      // The owner's original token predates any binding: no `did`, no sync.
+      const unbound = (await loginFresh(OWNER_EMAIL)).accessToken;
+      expect(b64urlJson(unbound.split('.')[1] as string)['did']).toBeUndefined();
+      const refusedUnbound = await pushBatch(unbound, pushEnvelope(deviceAId)).expect(401);
+      expect(refusedUnbound.body.code).toBe('UNAUTHENTICATED');
+
+      // The body asserts another device; the context is authority (§38.16).
+      const refusedAssertion = await pushBatch(memberBoundToken, pushEnvelope(foreignDeviceId)).expect(403);
+      expect(refusedAssertion.body.code).toBe('PERMISSION_DENIED');
+
+      // Admitted: the device-bound member session pushes through the *production*
+      // authenticator, and the fail-closed applier records the mutation REJECTED
+      // with UNSUPPORTED_MUTATION — the boundary is live end to end.
+      const envelope = pushEnvelope(deviceBId);
+      const mutationId = (envelope.mutations as { mutationId: string }[])[0]?.mutationId ?? '';
+      const admitted = await pushBatch(memberBoundToken, envelope).expect(200);
+      expect((admitted.body.outcomes as { status: string; rejectionCode: string }[])[0]).toMatchObject({
+        status: 'REJECTED',
+        rejectionCode: 'UNSUPPORTED_MUTATION',
+      });
+
+      const ledger = await inTenant(
+        migrator,
+        organizationId,
+        (tx) =>
+          tx.$queryRaw<{ status: string; rejection_code: string | null }[]>`
+          SELECT status, rejection_code FROM mutation_ledger
+           WHERE organization_id = ${organizationId}::uuid AND mutation_id = ${mutationId}::uuid`,
+      );
+      expect(ledger[0]).toEqual({ status: 'REJECTED', rejection_code: 'UNSUPPORTED_MUTATION' });
+
+      // §12.5: the push metadata of the completed batch is on the device row.
+      const afterPush = await deviceRow(organizationId, deviceBId);
+      expect(afterPush?.last_push_at).not.toBeNull();
+      expect(afterPush?.last_sync_at).not.toBeNull();
+      expect(afterPush?.client_schema_version).toBe(MIN_SUPPORTED_LOCAL_SCHEMA_VERSION);
+
+      // §12.5: the pull half moves `last_pull_at`, never `last_push_at`.
+      await pullPage(memberBoundToken).expect(200);
+      const afterPull = await deviceRow(organizationId, deviceBId);
+      expect(afterPull?.last_pull_at).not.toBeNull();
+      expect(afterPull?.last_push_at).not.toBeNull();
+    });
+
+    it('§12.5: the sync boundary reads the live row — a revoked device is refused even when the token says otherwise', async () => {
+      // A database writer that bypasses the service flips the device's status
+      // without touching its sessions — the exact case the §12.5 boundary
+      // re-read exists for: the token's binding claim must not be authority.
+      await inTenant(
+        migrator,
+        organizationId,
+        (tx) =>
+          tx.$executeRaw`
+          UPDATE devices SET status = 'REVOKED', revoked_at = now() WHERE id = ${deviceBId}::uuid`,
+      );
+      try {
+        const refused = await pushBatch(memberBoundToken, pushEnvelope(deviceBId, 2)).expect(403);
+        expect(refused.body.code).toBe('DEVICE_REVOKED');
+        const stillRefused = await pullPage(memberBoundToken).expect(403);
+        expect(stillRefused.body.code).toBe('DEVICE_REVOKED');
+      } finally {
+        await inTenant(
+          migrator,
+          organizationId,
+          (tx) =>
+            tx.$executeRaw`
+            UPDATE devices SET status = 'ACTIVE', revoked_at = NULL WHERE id = ${deviceBId}::uuid`,
+        );
+      }
+      // The restored device syncs again: the refusal was the live status, not a mark.
+      await pushBatch(memberBoundToken, pushEnvelope(deviceBId, 3)).expect(200);
+    });
+
+    it('§12.4: revocation kills the device and its bound sessions in one transaction, permanently (§40.6 key acceptance)', async () => {
+      // The owner's bound session's family is what dies; prove refresh alive first.
+      const refreshed = await harness.http
+        .post('/api/v1/auth/refresh')
+        .send({ refreshToken: ownerRefreshToken })
+        .expect(200);
+      ownerRefreshToken = refreshed.body.refreshToken as string;
+
+      // A cashier lacks `devices.revoke`.
+      const denied = await revokeDevice(memberBoundToken, organizationId, deviceDId).expect(403);
+      expect(denied.body.code).toBe('PERMISSION_DENIED');
+
+      await revokeDevice(ownerBoundToken, organizationId, deviceDId).expect(204);
+
+      // The device is REVOKED with its timestamp...
+      const row = await deviceRow(organizationId, deviceDId);
+      expect(row).toMatchObject({ status: 'REVOKED' });
+      expect(row?.revoked_at).not.toBeNull();
+
+      // ...and the session family bound to it died with it: no live session
+      // for that device, and the death carries the new closed-vocabulary reason.
+      const stillLiveOnD = await inTenant(
+        migrator,
+        organizationId,
+        (tx) =>
+          tx.$queryRaw<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM sessions
+           WHERE device_id = ${deviceDId}::uuid AND revoked_at IS NULL`,
+      );
+      expect(stillLiveOnD[0]?.n).toBe(0);
+      const deadReason = await inTenant(
+        migrator,
+        organizationId,
+        (tx) =>
+          tx.$queryRaw<{ revoked_reason: string | null }[]>`
+          SELECT revoked_reason FROM sessions
+           WHERE device_id = ${deviceDId}::uuid AND revoked_at IS NOT NULL
+           ORDER BY revoked_at DESC`,
+      );
+      expect(deadReason[0]?.revoked_reason).toBe('DEVICE_REVOKED');
+
+      // Refresh dies immediately: the family is revoked, not the token stale.
+      const dead = await harness.http
+        .post('/api/v1/auth/refresh')
+        .send({ refreshToken: ownerRefreshToken })
+        .expect(401);
+      expect(dead.body.code).toBe('UNAUTHENTICATED');
+
+      // From here a fresh owner session speaks for the owner — the revoked one is gone.
+      const owner2 = await loginFresh(OWNER_EMAIL);
+
+      // Re-registration of the revoked installation is refused (§12.2).
+      const reRegistered = await registerDevice(owner2.accessToken, organizationId, {
+        installationId: '11111111-aaaa-4aaa-8aaa-000000000004',
+        installationSecret: INSTALLATION_CREDENTIAL_D,
+        platform: 'windows',
+      }).expect(403);
+      expect(reRegistered.body.code).toBe('DEVICE_REVOKED');
+      // Exactly one row exists for the installation, still revoked.
+      const rows = await inTenant(
+        migrator,
+        organizationId,
+        (tx) =>
+          tx.$queryRaw<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM devices
+           WHERE organization_id = ${organizationId}::uuid
+             AND installation_id = ${'11111111-aaaa-4aaa-8aaa-000000000004'}`,
+      );
+      expect(rows[0]?.n).toBe(1);
+
+      // Idempotent: revoking a revoked device answers 204 again.
+      await revokeDevice(owner2.accessToken, organizationId, deviceDId).expect(204);
+      expect(await deviceRow(organizationId, deviceDId)).toMatchObject({ status: 'REVOKED' });
+
+      // The owner's other device keeps syncing — revocation is per device.
+      await pushBatch(memberBoundToken, pushEnvelope(deviceBId, 4)).expect(200);
+    });
   });
 });

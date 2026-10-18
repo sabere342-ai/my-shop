@@ -1,4 +1,4 @@
-# Row-level security inventory — tenant-owned tables (M2-S4)
+# Row-level security inventory — tenant-owned tables (M2-S4, extended by M2-S5)
 
 Master Plan §8.1–§8.3 requires tenant isolation at the **database layer**. This
 document is the human-readable inventory of that enforcement; the machine
@@ -37,7 +37,7 @@ is absent; NULL keeps the predicate NULL, which filters the row out exactly
 like `false`. "No context" is therefore "no rows" for every connection: the
 application role mid-flight, an operator `psql`, a stray pooled session.
 
-## Table inventory — migration `0008_tenant_row_level_security`
+## Table inventory — migrations `0008_tenant_row_level_security` + `0009_device_binding`
 
 ### Tenant-owned (forced RLS + `tenant_isolation` policy)
 
@@ -52,9 +52,10 @@ application role mid-flight, an operator `psql`, a stray pooled session.
 | `change_log` | `organization_id` | Symmetric tenant clause |
 | `device_sync_cursors` | `organization_id` | Symmetric tenant clause |
 | `sync_sequences` | `organization_id` | Symmetric tenant clause |
+| `devices` (M2-S5) | `organization_id` | Symmetric tenant clause — the identical `ENABLE` + `FORCE` + `tenant_isolation` posture, applied by `0009` |
 
 The tenant root needs no `organization_id` — its own `id` is the tenant
-column; the eight others key on `organization_id`.
+column; the nine others key on `organization_id`.
 
 ### Explicitly global (no RLS, classified on purpose)
 
@@ -65,6 +66,12 @@ column; the eight others key on `organization_id`.
 | `sessions` | Per-session authentication state; no `organization_id` |
 | `refresh_tokens` | Per-session rotation state; no `organization_id` |
 | `auth_throttles` | Per-identity throttle state; no `organization_id` |
+
+`sessions` gains `device_id` (M2-S5) — a *reference* to a forced-RLS-protected
+`devices` row, not a tenant column: the table-inventory test still pins the
+five identity tables as global, and every device read or write that uses the
+binding runs inside a tenant transaction scoped to the device's own
+organization.
 
 Login, session, and throttle state are per-identity, never per-tenant. The
 table-inventory test pins this classification so a future tenant column cannot
@@ -87,13 +94,14 @@ runs under table ownership before or without the policy.
 
 ## Operations
 
-- **Fresh install:** migrations `0001`–`0008` apply from empty (`node
+- **Fresh install:** migrations `0001`–`0009` apply from empty (`node
   scripts/db.mjs deploy`); the drift gate (`prisma migrate diff --exit-code`)
-  still exits 0 — PostgreSQL policies do not appear in Prisma's diff.
-- **Upgrade:** `0008` changes no role, no grant, no owner, and no data; the
-  upgrade acceptance case (AC-08) seeds full predecessor-shaped data on
-  `0001`–`0007`, applies `0008`, and proves every pre-existing row survives
-  byte-identical with RLS in force.
+  still exits 0 — PostgreSQL policies and CHECK constraints do not appear in
+  Prisma's diff.
+- **Upgrade:** `0008`/`0009` change no role, no grant, no owner, and no
+  pre-existing data; the upgrade acceptance case (AC-08) seeds full
+  predecessor-shaped data on `0001`–`0007`, applies the later migrations, and
+  proves every pre-existing row survives byte-identical with RLS in force.
 - **Rollback:** forward-only (§35.1) — a *new* migration re-issues correct
   policies. Dropping a policy is an emergency isolation-reduction decision
   requiring owner authorization, never the automatic path.

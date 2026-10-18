@@ -23,6 +23,18 @@
 // schema migration); the database only stores the grant edges and constrains
 // their shape.
 //
+// M2-S5 adds the device surface (section 40.6 row M2-S5; section 12): the
+// tenant-owned `devices` table — the installation record, its closed
+// `ACTIVE`/`REVOKED` trust vocabulary (section 12.2), the keystore-backed
+// installation handle and its stored SHA-256 secret digest (section 12.3), and
+// the server-maintained subset of the section 12.5 sync metadata. The binding
+// half lives on `sessions.device_id`: revoking a device revokes its session
+// families in the same transaction (section 12.4). Like every tenant-owned
+// table, `devices` carries ENABLE + FORCE row-level security with the one
+// `tenant_isolation` policy (migration `0008`'s posture, extended by migration
+// `0009_device_binding`); the five global identity tables remain
+// policy-free on purpose.
+//
 // M2-S4 turns the tenancy boundary into a database fact (section 40.6 row M2-S4;
 // section 8.1–8.3). Every tenant-owned table named in this file — including the
 // sync infrastructure tables of M1b-S4 — now carries ENABLE + FORCE row-level
@@ -175,6 +187,7 @@ model Organization {
 
   memberships OrganizationMembership[]
   roles       Role[]
+  devices     Device[]
 
   @@map("organizations")
 }
@@ -199,7 +212,6 @@ model User {
 
   @@map("users")
 }
-
 /// §9.2 T-2/T-5 (one owner) and T-4 (multi-org membership): the membership
 /// edge. The partial unique index `uq_organizations_single_owner
 /// (organization_id) WHERE is_owner` is the single ownership source of truth —
@@ -270,6 +282,16 @@ model Session {
   absoluteExpiresAt DateTime  @map("absolute_expires_at") @db.Timestamptz(6)
   revokedAt         DateTime? @map("revoked_at") @db.Timestamptz(6)
   revokedReason     String?   @map("revoked_reason")
+  /// section 12.4 / section 40.6 M2-S5: the device this session runs on,
+  /// written by the server inside the bind-session transaction after the
+  /// bearer principal, live membership, device status, and installation-secret
+  /// digest are verified — never asserted by the client body. `deviceId` is
+  /// copied into the access token's `did` claim at mint time (and re-derived
+  /// from this row on every refresh), so the sync boundary reads the binding
+  /// from a verified source. One session binds at most one device; a session
+  /// that could hop devices would make per-device revocation advisory.
+  deviceId          String?   @map("device_id") @db.Uuid
+  device            Device?   @relation(fields: [deviceId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   user   User           @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   tokens RefreshToken[]
@@ -390,4 +412,51 @@ model PermissionOverride {
   @@unique([organizationId, userId, permissionId])
   @@index([organizationId])
   @@map("permission_overrides")
+}
+
+/// section 12 / section 40.6 M2-S5: one organization-scoped installation. The
+/// `id` is the server-issued device identity — never a client fingerprint —
+/// and is the only device id any authorized decision reads. A device carries
+/// exactly two trust states (section 12.2 `ACTIVE`/`REVOKED`; no approval
+/// flow in V1, the column is the reserved extension point).
+///
+/// Identity is layered (section 12.3): `(organization_id, installation_id)`
+/// is the client keystore's stable handle, unique per organization (§9.2 T-7) so
+/// re-registration is an idempotent lookup; `installation_secret_hash` is the
+/// only server copy of the keystore-held secret — a SHA-256 digest, never a
+/// reversible form. A REVOKED device row is kept forever: re-registration of a
+/// revoked installation is refused, and re-installation enrolls a *new*
+/// installation id.
+///
+/// The section 12.5 sync metadata carries what the server honestly knows from
+/// the sync protocol it serves (`last_push_at`, `last_pull_at`, `last_sync_at`,
+/// `client_schema_version`, `client_app_version`); the pending counts, the
+/// offline grace expiry, and the clock anchor are added by later slices that
+/// own their inputs.
+model Device {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId       String   @map("organization_id") @db.Uuid
+  installationId       String   @map("installation_id") @db.VarChar(64)
+  installationSecretHash String @map("installation_secret_hash") @db.Char(64)
+  label                String   @db.VarChar(100)
+  platform             String   @db.VarChar(32)
+  osVersion            String?  @map("os_version") @db.VarChar(64)
+  appVersion           String?  @map("app_version") @db.VarChar(32)
+  status               String   @default("ACTIVE") @db.VarChar(16)
+  registeredAt         DateTime @default(now()) @map("registered_at") @db.Timestamptz(6)
+  lastSeenAt           DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  lastAuthenticatedAt  DateTime @default(now()) @map("last_authenticated_at") @db.Timestamptz(6)
+  revokedAt            DateTime? @map("revoked_at") @db.Timestamptz(6)
+  lastPushAt           DateTime? @map("last_push_at") @db.Timestamptz(6)
+  lastPullAt           DateTime? @map("last_pull_at") @db.Timestamptz(6)
+  lastSyncAt           DateTime? @map("last_sync_at") @db.Timestamptz(6)
+  clientSchemaVersion  Int?     @map("client_schema_version")
+  clientAppVersion     String?  @map("client_app_version") @db.VarChar(32)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  sessions     Session[]
+
+  @@unique([organizationId, installationId])
+  @@index([organizationId, status])
+  @@map("devices")
 }

@@ -60,6 +60,13 @@ export interface LoginInput {
   readonly clientAddress?: string;
 }
 
+/** The access token a successful device binding hands back (M2-S5). */
+export interface BoundAccessToken {
+  readonly accessToken: string;
+  readonly tokenType: 'Bearer';
+  readonly expiresIn: number;
+}
+
 /** The verified identity behind an access token, as the application consumes it. */
 export interface AuthenticatedPrincipal {
   readonly userId: string;
@@ -67,6 +74,13 @@ export interface AuthenticatedPrincipal {
   readonly organizations: readonly string[];
   readonly sessionId: string;
   readonly permissionsVersion: number;
+  /**
+   * M2-S5 (§12.4): the device the session is bound to, when the session is
+   * device-bound — the server-written binding re-derived from the token's signed
+   * `did` claim. `undefined` on a session opened without a device binding; the
+   * device-bound sync boundary requires it to be present.
+   */
+  readonly deviceId?: string;
   readonly expiresAt: Date;
 }
 
@@ -325,6 +339,10 @@ export class AuthService {
           organizations,
           sessionId: session.id,
           permissionsVersion: account.permissionsVersion,
+          // M2-S5: the device binding rides with every refresh — the claim is
+          // re-derived from the stored session row. The binding can never be
+          // added or dropped by the client; only the server writes it.
+          ...(session.deviceId === null ? {} : { deviceId: session.deviceId }),
         },
         now,
       );
@@ -406,6 +424,7 @@ export class AuthService {
       where: { id: claims.sessionId },
       select: {
         userId: true,
+        deviceId: true,
         revokedAt: true,
         absoluteExpiresAt: true,
         user: { select: { email: true, permissionsVersion: true } },
@@ -415,6 +434,20 @@ export class AuthService {
     if (session === null || session.userId !== claims.userId) {
       this.options.sink.record({ type: 'ACCESS_TOKEN_REJECTED', errorCode: ERROR_CODES.UNAUTHENTICATED });
       throw unauthenticated('access token does not name an active session');
+    }
+
+    // §12.4 (M2-S5): the binding is a server-written fact and its signed copy
+    // travels in the token. The two must agree in both directions: a device-
+    // bound session cannot be honored by a token whose `did` claim is missing or
+    // names another device, and a token claiming a device the session never
+    // bound is a session/device mismatch — refused, not repaired.
+    if ((claims.deviceId ?? null) !== session.deviceId) {
+      this.options.sink.record({
+        type: 'ACCESS_TOKEN_REJECTED',
+        userId: session.userId,
+        errorCode: ERROR_CODES.UNAUTHENTICATED,
+      });
+      throw unauthenticated('the access token and its session disagree about the device binding');
     }
 
     if (session.revokedAt !== null) {
@@ -453,8 +486,59 @@ export class AuthService {
       organizations: claims.organizations,
       sessionId: claims.sessionId,
       permissionsVersion: claims.permissionsVersion,
+      ...(claims.deviceId === undefined ? {} : { deviceId: claims.deviceId }),
       expiresAt: claims.expiresAt,
     };
+  }
+
+  /**
+   * Mints a fresh access token for an *active* session (M2-S5 bind-session).
+   *
+   * The device binding endpoint binds an existing session and immediately hands
+   * back a token that carries the `did` claim, so the client never has to guess
+   * when a binding took effect. The mint re-resolves every server-side fact the
+   * login path resolves — membership set, permission generation, device
+   * binding — from the stored session row, so the fresh token cannot assert a
+   * state the session does not hold.
+   *
+   * @throws `DomainError` when the session does not exist (no binding can be
+   *   minted for it).
+   */
+  async mintAccessTokenForSession(sessionId: string, now: Date = new Date()): Promise<BoundAccessToken> {
+    return this.host.prisma.$transaction(async (tx) => {
+      const session = await tx.session.findUnique({
+        where: { id: sessionId },
+        select: {
+          userId: true,
+          deviceId: true,
+          revokedAt: true,
+          absoluteExpiresAt: true,
+          user: { select: { permissionsVersion: true } },
+        },
+      });
+      if (session === null || session.revokedAt !== null) {
+        throw unauthenticated('the session is not active');
+      }
+
+      // Decision D-A (M2-S4): the membership reads are policy-protected; the
+      // caller's own edges become visible from the server-resolved session's
+      // user id — the same verified identity the bearer guard carries.
+      await establishUserContext(tx, session.userId);
+      const organizations = await this.membershipsOf(session.userId, tx);
+
+      const accessToken = this.options.accessToken.sign(
+        {
+          userId: session.userId,
+          organizations,
+          sessionId,
+          permissionsVersion: session.user.permissionsVersion,
+          ...(session.deviceId === null ? {} : { deviceId: session.deviceId }),
+        },
+        now,
+      );
+
+      return { accessToken, tokenType: 'Bearer', expiresIn: this.options.accessTokenTtlSeconds };
+    });
   }
 
   /** Revokes a family, preserving the first reason if it was already revoked. */

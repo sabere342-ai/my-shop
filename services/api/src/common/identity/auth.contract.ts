@@ -124,6 +124,15 @@ export class MeResponse {
   })
   readonly permissionsVersion!: number;
 
+  @ApiProperty({
+    format: 'uuid',
+    required: false,
+    description:
+      'The device this session is bound to (M2-S5 §12.4), when the bind-session route has linked one. ' +
+      'Absent on a session opened without a device binding.',
+  })
+  readonly deviceId?: string;
+
   @ApiProperty({ format: 'date-time', description: 'When the access token expires.' })
   readonly expiresAt!: string;
 }
