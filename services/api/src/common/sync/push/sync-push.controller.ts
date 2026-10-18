@@ -47,7 +47,9 @@ export class SyncPushController {
   })
   @ApiResponse({
     status: HttpStatus.UNAUTHORIZED,
-    description: 'No valid credential; until M2 lands the production authenticator refuses every push (§38.16).',
+    description:
+      'No valid credential: an unbound session (no `did` device claim) or a revoked device is refused ' +
+      '`UNAUTHENTICATED`/`DEVICE_REVOKED` at the device-bound sync boundary (§12.4, §38.16, §38.16.4).',
     content: PROBLEM_CONTENT,
   })
   @ApiResponse({

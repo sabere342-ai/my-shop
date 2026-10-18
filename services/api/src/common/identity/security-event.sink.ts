@@ -32,13 +32,23 @@ export type SecurityEventType =
   | 'REFRESH_REUSE_DETECTED'
   | 'LOGOUT'
   | 'ACCESS_TOKEN_REJECTED'
-  | 'ACCESS_TOKEN_STALE';
+  | 'ACCESS_TOKEN_STALE'
+  | 'DEVICE_REGISTERED'
+  | 'DEVICE_REGISTRATION_REFUSED'
+  | 'DEVICE_REVOKED';
 
 /** One security event. Every field is either a closed vocabulary value or an id. */
 export interface SecurityEvent {
   readonly type: SecurityEventType;
   /** The identity the event concerns, when it is known and verified. */
   readonly userId?: string;
+  /**
+   * The device the event concerns (M2-S5). Only a server-resolved device id —
+   * never an installation handle, never a client assertion — is ever recorded.
+   */
+  readonly deviceId?: string;
+  /** The tenant the event concerns (M2-S5 devices), when it is a server fact. */
+  readonly organizationId?: string;
   /** The raising error code, when the event is a refusal. */
   readonly errorCode?: ErrorCode;
   /** The client address, when available; a §13.5 rate-limit scope, never authority. */
@@ -66,6 +76,8 @@ export class LoggingSecurityEventSink implements SecurityEventSink {
           component: 'identity',
           reason: event.type,
           ...(event.userId === undefined ? {} : { userId: event.userId }),
+          ...(event.deviceId === undefined ? {} : { deviceId: event.deviceId }),
+          ...(event.organizationId === undefined ? {} : { organizationId: event.organizationId }),
           ...(event.errorCode === undefined ? {} : { errorCode: event.errorCode }),
           ...(event.clientAddress === undefined ? {} : { ip: event.clientAddress }),
         }),

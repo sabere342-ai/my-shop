@@ -12,14 +12,18 @@
  * uses. It imports `LedgerModule.forRoot(config)` for the single door through
  * which a mutation becomes a durable server fact (§38.9).
  *
- * Both the authenticator and the mutation applier are **ports** bound here to
- * fail-closed production defaults. M2 owns real token verification and device
- * enrolment (§40.6) and business modules own real aggregate apply paths, so until
- * they land the production graph refuses every push `UNAUTHENTICATED` and records
- * every mutation `REJECTED`/`UNSUPPORTED_MUTATION` — never anonymous acceptance,
- * never a silent drop. A test overrides the two tokens with implementations that
- * live under `test/`, so the trusting code is structurally absent from a
- * production build.
+ * Both the authenticator and the mutation applier are **ports**, and the
+ * production bindings fail closed — they just fail closed at different walls
+ * now. M2-S5 (§40.6, §12.4) binds the authenticator to the real
+ * `DeviceBoundSyncAuthenticator`: a push must present a bearer token minted from
+ * a device-bound session, and the device must still be active — so an
+ * unauthenticated or unbound caller is still refused `UNAUTHENTICATED`, and a
+ * revoked device is refused `DEVICE_REVOKED`. The applier stays bound to its
+ * fail-closed default until business modules own real aggregate apply paths, so
+ * every accepted mutation is still recorded `REJECTED`/`UNSUPPORTED_MUTATION`
+ * — never anonymous acceptance, never a silent drop. A test overrides the two
+ * tokens with implementations that live under `test/`, so the trusting code is
+ * structurally absent from a production build.
  */
 
 import { Module, type DynamicModule } from '@nestjs/common';
@@ -28,9 +32,11 @@ import { APP_LOGGER, createAppLogger } from '../../../app.providers';
 import { APP_CONFIG, type AppConfigShape } from '../../config/app.config';
 import { AuthorizationModule } from '../../authorization/authorization.module';
 import { AuthorizationService } from '../../tenancy/authorization/authorization.service';
+import { DeviceModule, DEVICE_SYNC_AUTHENTICATOR } from '../../devices/device.module';
+import { DeviceService } from '../../devices/device.service';
 import { LedgerModule } from '../ledger/mutation-ledger.module';
 import { MutationLedgerService } from '../ledger/mutation-ledger.service';
-import { FailClosedSyncAuthenticator, SYNC_AUTHENTICATOR } from './sync-auth';
+import { SYNC_AUTHENTICATOR } from './sync-auth';
 import {
   MembershipPermissionRevalidator,
   SYNC_INGRESS_REVALIDATOR,
@@ -58,6 +64,12 @@ export class PushModule {
         // `IdentityModule`/`DatabaseModule.forRoot(config)` graph, deduplicated
         // by the NestJS module system like every other composition here.
         AuthorizationModule.forRoot(config),
+        // §12.4 (M2-S5): the push boundary is a device capability. The devices
+        // module exports the production `DeviceBoundSyncAuthenticator` and the
+        // `DeviceService` that records the §12.5 sync metadata; the same
+        // composition the device routes use, deduplicated like every other
+        // `forRoot` import.
+        DeviceModule.forRoot(config),
       ],
       controllers: [SyncPushController],
       providers: [
@@ -67,9 +79,11 @@ export class PushModule {
           inject: [APP_CONFIG],
           useFactory: (resolved: AppConfigShape): PinoLogger => createAppLogger(resolved),
         },
-        // §38.16: production refuses every push until M2 supplies token and
-        // device verification. A test overrides this token.
-        { provide: SYNC_AUTHENTICATOR, useClass: FailClosedSyncAuthenticator },
+        // §38.16 / §12.4: production identifies a push by the bearer token
+        // (signature, session liveness, permission generation) **and** the
+        // session's registered, still-active device binding. An unbound or
+        // revoked device never reaches the ledger. A test overrides this token.
+        { provide: SYNC_AUTHENTICATOR, useExisting: DEVICE_SYNC_AUTHENTICATOR },
         // §38.27 / §38.10.3: production supports no aggregate type yet, so every
         // mutation is a recorded per-mutation rejection. A test overrides this token.
         { provide: SYNC_MUTATION_APPLIER, useClass: FailClosedMutationApplier },
@@ -87,13 +101,14 @@ export class PushModule {
         SyncAuthGuard,
         {
           provide: SyncPushService,
-          inject: [MutationLedgerService, SYNC_MUTATION_APPLIER, SYNC_INGRESS_REVALIDATOR, APP_LOGGER],
+          inject: [MutationLedgerService, SYNC_MUTATION_APPLIER, SYNC_INGRESS_REVALIDATOR, APP_LOGGER, DeviceService],
           useFactory: (
             ledger: MutationLedgerService,
             applier: SyncMutationApplier,
             ingressRevalidator: SyncIngressRevalidator,
             logger: PinoLogger,
-          ) => new SyncPushService(ledger, applier, ingressRevalidator, logger),
+            devices: DeviceService,
+          ) => new SyncPushService(ledger, applier, ingressRevalidator, logger, devices),
         },
       ],
       exports: [SyncPushService],

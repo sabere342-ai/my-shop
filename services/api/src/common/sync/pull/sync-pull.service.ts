@@ -22,6 +22,7 @@
 
 import type { Logger as PinoLogger } from 'pino';
 import type { MutationLedgerService } from '../ledger/mutation-ledger.service';
+import type { DeviceService } from '../../devices/device.service';
 import {
   DEFAULT_PULL_PAGE_SIZE,
   PULL_RETENTION_DAYS,
@@ -35,6 +36,13 @@ export class SyncPullService {
   constructor(
     private readonly ledger: MutationLedgerService,
     private readonly logger?: PinoLogger,
+    /**
+     * §12.5 (M2-S5): the device service that records the pull metadata once per
+     * served page. Optional only so a narrowly-scoped unit construction does not
+     * have to depend on the devices module — the production wiring always
+     * supplies it.
+     */
+    private readonly devices?: DeviceService,
   ) {}
 
   /**
@@ -53,6 +61,14 @@ export class SyncPullService {
       after,
       limit,
       retentionDays: PULL_RETENTION_DAYS,
+    });
+
+    // §12.5 (M2-S5): once per served page — never per row — the device's sync
+    // metadata moves. The recording is best-effort and diagnostic; it can
+    // neither fail the page the server just served nor authorize anything.
+    await this.devices?.recordPullMetadata({
+      organizationId: context.organizationId,
+      deviceId: context.deviceId,
     });
 
     if (page.rebaselineRequired) {

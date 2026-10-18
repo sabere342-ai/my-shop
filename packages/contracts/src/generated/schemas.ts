@@ -23,6 +23,38 @@ export interface AuthorizationMeResponse {
   readonly roleKey: string;
 }
 
+/** OpenAPI schema `BindSessionRequest` (Master Plan §7.1, ADR-001). */
+export interface BindSessionRequest {
+  readonly installationSecret: string;
+}
+
+/** OpenAPI schema `BindSessionResponse` (Master Plan §7.1, ADR-001). */
+export interface BindSessionResponse {
+  readonly accessToken: string;
+  readonly tokenType: 'Bearer';
+  readonly expiresIn: number;
+}
+
+/** OpenAPI schema `DeviceResponse` (Master Plan §7.1, ADR-001). */
+export interface DeviceResponse {
+  readonly deviceId: string;
+  readonly organizationId: string;
+  readonly label: string;
+  readonly platform: 'windows' | 'android';
+  readonly osVersion?: string;
+  readonly appVersion?: string;
+  readonly status: string;
+  readonly registeredAt: string;
+  readonly lastSeenAt: string;
+  readonly lastAuthenticatedAt: string;
+  readonly revokedAt?: string;
+  readonly lastPushAt?: string;
+  readonly lastPullAt?: string;
+  readonly lastSyncAt?: string;
+  readonly clientSchemaVersion?: number;
+  readonly clientAppVersion?: string;
+}
+
 /** OpenAPI schema `LivenessReport` (Master Plan §7.1, ADR-001). */
 export interface LivenessReport {
   readonly status: 'ok';
@@ -46,6 +78,7 @@ export interface MeResponse {
   readonly organizations: readonly unknown[];
   readonly sessionId: string;
   readonly permissionsVersion: number;
+  readonly deviceId?: string;
   readonly expiresAt: string;
 }
 
@@ -175,6 +208,16 @@ export interface ReadinessReport {
 /** OpenAPI schema `RefreshRequest` (Master Plan §7.1, ADR-001). */
 export interface RefreshRequest {
   readonly refreshToken: string;
+}
+
+/** OpenAPI schema `RegisterDeviceRequest` (Master Plan §7.1, ADR-001). */
+export interface RegisterDeviceRequest {
+  readonly installationId: string;
+  readonly installationSecret: string;
+  readonly platform: 'windows' | 'android';
+  readonly osVersion?: string;
+  readonly appVersion?: string;
+  readonly label?: string;
 }
 
 /** OpenAPI schema `ReplaceRolePermissionsRequest` (Master Plan §7.1, ADR-001). */

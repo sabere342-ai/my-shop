@@ -30,6 +30,7 @@ import { PullModule } from './common/sync/pull/sync-pull.module';
 import { PushModule } from './common/sync/push/sync-push.module';
 import { IdentityModule } from './common/identity/identity.module';
 import { AuthorizationModule } from './common/authorization/authorization.module';
+import { DeviceModule } from './common/devices/device.module';
 import { ProblemDetailsFilter } from './common/errors/problem.filter';
 import { createValidationPipe } from './common/pipes/validation.pipe';
 import { APP_LOGGER, createAppLogger } from './app.providers';
@@ -69,13 +70,14 @@ export class AppModule {
       // configuration and the logger. The ledger module (M1b-S4) is registered
       // as the single door for idempotent mutation acceptance; it publishes no
       // controller. The push module (M1b-S5) sits on top of it and is the first
-      // sync route: `POST /api/v1/sync/push`, guarded and fail-closed until M2
-      // supplies real identity (§38.10.1, §38.16). The pull module (M1b-S6) is
-      // the matching egress: `GET /api/v1/sync/pull` reads the same change feed,
-      // guarded and fail-closed the same way (§38.11.2, §38.16). The identity
-      // module (M2-S2) is the first real authentication surface: `/api/v1/auth/*`
-      // issues, rotates, and revokes the tokens the sync guards will consume
-      // (§10.1–§10.3, §40.6).
+      // sync route: `POST /api/v1/sync/push`, guarded and device-bound (§12.4).
+      // The pull module (M1b-S6) is the matching egress: `GET /api/v1/sync/pull`
+      // reads the same change feed under the same device-bound identity
+      // (§38.11.2, §38.16). The identity module (M2-S2) issues, rotates, and
+      // revokes the tokens the sync guards consume (§10.1–§10.3, §40.6). The
+      // device module (M2-S5, §12) owns device registration, the bind-session
+      // route, the owner-visible device list, and revocation — and exports the
+      // production sync authenticator the push and pull guards bind.
       imports: [
         HealthModule,
         DatabaseModule.forRoot(config),
@@ -84,6 +86,7 @@ export class AppModule {
         PullModule.forRoot(config),
         IdentityModule.forRoot(config),
         AuthorizationModule.forRoot(config),
+        DeviceModule.forRoot(config),
       ],
       providers: coreProviders(config),
       exports: [APP_CONFIG, APP_LOGGER],

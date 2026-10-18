@@ -37,6 +37,7 @@ import {
 } from './push.contract';
 import type { SyncMutationApplier } from './sync-mutation-applier';
 import type { SyncIngressRevalidator } from './ingress-revalidation';
+import type { DeviceService } from '../../devices/device.service';
 import type { SyncTrustedContext } from './sync-auth';
 
 export class SyncPushService {
@@ -46,6 +47,13 @@ export class SyncPushService {
     /** §9.4 (M2-S4): the acceptance re-validator. Bound in the module wiring; test-overridable. */
     private readonly ingressRevalidator: SyncIngressRevalidator,
     private readonly logger?: PinoLogger,
+    /**
+     * §12.5 (M2-S5): the device service that records the push metadata once per
+     * completed batch. Optional only so a narrowly-scoped unit construction does
+     * not have to depend on the devices module — the production wiring always
+     * supplies it.
+     */
+    private readonly devices?: DeviceService,
   ) {}
 
   /**
@@ -74,6 +82,15 @@ export class SyncPushService {
     for (const mutation of request.mutations) {
       outcomes.push(await this.applyOne(mutation, context));
     }
+
+    // §12.5 (M2-S5): once per completed batch — never per mutation — the device's
+    // sync metadata moves. The recording is best-effort and diagnostic; it can
+    // neither fail the batch the server just accepted nor authorize anything.
+    await this.devices?.recordPushMetadata({
+      organizationId: context.organizationId,
+      deviceId: context.deviceId,
+      clientSchemaVersion: request.localSchemaVersion,
+    });
 
     return { syncBatchId: request.syncBatchId, outcomes };
   }

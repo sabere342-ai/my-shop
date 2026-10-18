@@ -37,7 +37,7 @@ import type { IdentityConfigShape } from '../config/app.config';
 import { DomainError } from '../errors/domain.error';
 import { ERROR_CODES } from '../errors/problem';
 
-/** The claims this slice mints (the §10.3 set). */
+/** The claims this slice mints (the §10.3 set, plus the M2-S5 device claim). */
 export interface AccessTokenClaims {
   /** `sub`: the user id. */
   readonly userId: string;
@@ -47,6 +47,15 @@ export interface AccessTokenClaims {
   readonly sessionId: string;
   /** `perms_version`: the permission generation this token was minted against. */
   readonly permissionsVersion: number;
+  /**
+   * `did`: the M2-S5 device binding (§12.4, §38.16.2). Present exactly when the
+   * session it names is bound to a device — a fact the server writes on
+   * `sessions.device_id` through the bind-session route, and a copy of which
+   * rides in this claim. A session opened without a binding carries no `did`,
+   * and a refresh re-mints the claim from the stored session row — it can
+   * therefore never be advanced by the client.
+   */
+  readonly deviceId?: string;
 }
 
 /** The verified claims, with the times resolved. */
@@ -55,6 +64,7 @@ export interface VerifiedAccessToken {
   readonly organizations: readonly string[];
   readonly sessionId: string;
   readonly permissionsVersion: number;
+  readonly deviceId?: string;
   readonly issuedAt: Date;
   readonly expiresAt: Date;
 }
@@ -152,7 +162,7 @@ class RsaAccessTokenService implements AccessTokenService {
     const expiresAt = issuedAt + this.options.ttlSeconds;
 
     const header = { alg: ALGORITHM, typ: 'JWT' };
-    const payload = {
+    const payload: Record<string, unknown> = {
       sub: claims.userId,
       orgs: [...claims.organizations],
       sid: claims.sessionId,
@@ -162,6 +172,12 @@ class RsaAccessTokenService implements AccessTokenService {
       iat: issuedAt,
       exp: expiresAt,
     };
+    // The device claim is optional by design: a session opened without a device
+    // binding carries no `did`, and the claim's presence is decided by the
+    // server at bind time, never by the client.
+    if (claims.deviceId !== undefined) {
+      payload['did'] = claims.deviceId;
+    }
 
     const signingInput = `${encodeSegment(header)}.${encodeSegment(payload)}`;
     const signature = createSign(SIGNING_ALGORITHM).update(signingInput).sign(this.privateKey);
@@ -225,6 +241,10 @@ class RsaAccessTokenService implements AccessTokenService {
       organizations: stringArrayClaim(payload, 'orgs'),
       sessionId: stringClaim(payload, 'sid'),
       permissionsVersion: numberClaim(payload, 'perms_version'),
+      // `did` is minted only for device-bound sessions (§12.4). A present but
+      // malformed claim is refused rather than read as undefined: a token that
+      // asserts a device is either proving a real binding or is not accepted.
+      ...(payload['did'] === undefined ? {} : { deviceId: stringClaim(payload, 'did') }),
       issuedAt: new Date(issuedAtSeconds * 1000),
       expiresAt: new Date(expiresAtSeconds * 1000),
     };
