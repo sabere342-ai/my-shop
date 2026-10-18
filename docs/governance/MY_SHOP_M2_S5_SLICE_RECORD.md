@@ -304,19 +304,35 @@ client.
 
 | Commit | Type | Subject |
 | ------ | ---- | ------- |
-| _locked base_ | — | M2-S4 record commit (PR #20 head, `PASS_MY_SHOP_M2_S4_TENANCY_RLS_OFFLINE_INGRESS_REMOTE_LOCKED`) — to be pinned by the record commit |
-| _declare commit_ | `docs(m2-s5)` | declare the device-binding slice and its acceptance criteria |
-| _implementation commit_ | `feat(m2-s5)` | devices: registration, binding, revocation, and the device-bound sync boundary |
-| _test commit_ | `test(m2-s5)` | proof: device unit, route boundary, and database acceptance suites |
-| _docs commit_ | `docs(m2-s5)` | document the device surface, the extended RLS inventory, and the device-bound posture |
+| `4eb8b4b` | locked base | M2-S4 record commit (PR #20 head, `PASS_MY_SHOP_M2_S4_TENANCY_RLS_OFFLINE_INGRESS_REMOTE_LOCKED`) |
+| `c19f651` | `docs(m2-s5)` | declare the device-binding slice and its acceptance criteria |
+| `373dcea` | `feat(m2-s5)` | devices: registration, binding, revocation, and the device-bound sync boundary |
+| `0f7cb97` | `test(m2-s5)` | proof: device unit, route boundary, and database acceptance suites |
+| `d1671b0` | `docs(m2-s5)` | document the device surface, the extended RLS inventory, and the device-bound posture |
 | _record commit_ | `docs(m2-s5)` | record the changed paths, execution evidence, and the remote lock |
 
-**Base:** the locked M2-S4 head (PR #20 open). **Implementation head:** the
-`feat` commit. **Record head:** the commit that carries this section
-(documentation only). Exact values are appended to this section at close,
-together with the execution evidence the verification and the remote runs
-produce; until then this record declares intent and authority only
-(A3.2, A40.6).
+**Base:** `4eb8b4b882193164a7a656e793ee9f133e378b5c` (locked M2-S4 head, PR #20
+open). **Implementation head:** `373dcea32280239596d05ce0d325e6426d07d0ee`.
+**Record head:** the commit that carries this section (documentation only).
+GitHub allocated the pull request number **#21**
+(`https://github.com/sabere342-ai/my-shop/pull/21`), targeting the predecessor
+branch; nothing is merged, no auto-merge is enabled, and no force push was used.
+
+### Local verification (final tree, before push)
+
+| Gate | Result |
+| --- | --- |
+| `test:unit` | **432 passed / 432**, 37 suites |
+| `test:integration` (HTTP, full app) | **55 passed / 55**, 6 suites |
+| `test:database` (real PostgreSQL 18, serial) | **119 passed / 119**, 2 suites — both db acceptance suites, re-run on the final tree |
+| `typecheck` (application + test config) | clean, both `tsc` configs |
+| `contracts:check` | `contracts are in sync` (regenerated once this slice) |
+| `lint`, `format:check` | clean across workspaces |
+| mechanical gates (stages 1–24), secret scan, migration immutability (G-6) | OK — gate prints 10 migration path(s) (nine migration files plus the lock file), none rewritten |
+
+### Remote CI on the exact record head
+
+Appended below after publication (§11).
 
 ## 14. Boundary and verdict
 
