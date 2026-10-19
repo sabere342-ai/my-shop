@@ -21,8 +21,18 @@ import 'package:drift/drift.dart' show driftRuntimeOptions;
 import 'package:drift/native.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:my_shop_desktop/core/api/api_client.dart';
+import 'package:my_shop_desktop/core/api/auth_api.dart';
+import 'package:my_shop_desktop/core/api/enrollment_api.dart';
+import 'package:my_shop_desktop/core/auth/auth_composition.dart';
+import 'package:my_shop_desktop/core/auth/auth_service.dart';
+import 'package:my_shop_desktop/core/auth/installation_identity_vault.dart';
 import 'package:my_shop_desktop/core/auth/keystore.dart';
+import 'package:my_shop_desktop/core/auth/secure_token_store.dart';
+import 'package:my_shop_desktop/core/auth/snapshot_grace_verifier.dart';
 import 'package:my_shop_desktop/core/offline/db/app_database.dart';
+import 'package:my_shop_desktop/core/offline/grace/offline_grace_service.dart';
+import 'package:my_shop_desktop/core/offline/outbox/binding_store.dart';
 import 'package:pointycastle/asn1.dart';
 import 'package:pointycastle/export.dart' as pc;
 
@@ -401,4 +411,49 @@ class SnapshotTestAuthority {
 String _base64UrlNoPadding(List<int> bytes) {
   final String encoded = base64Url.encode(bytes);
   return encoded.replaceAll('=', '');
+}
+
+/// An [AuthKit] wired exactly as production composition is, except every
+/// injectable seam is a fake: the network is a [ScriptedServer], the keystore
+/// is [RecordingKeystore], the database is in memory, and the platform name is
+/// pinned. Widget suites override [authKitProvider] with this.
+AuthKit testAuthKit({
+  required ScriptedServer server,
+  RecordingKeystore? keystore,
+  AppDatabase? db,
+  String? pinnedPem,
+}) {
+  final RecordingKeystore keys = keystore ?? RecordingKeystore();
+  final AppDatabase database = db ?? memoryDatabase();
+  final SnapshotTestAuthority authority = SnapshotTestAuthority.instance;
+  final ApiClient client = ApiClient(
+    ApiClientConfig(baseUrl: Uri.parse('https://server.test')),
+    client: server.client(),
+  );
+  final SnapshotBackedGraceSignatureVerifier verifier =
+      SnapshotBackedGraceSignatureVerifier(
+        RsaSignedSnapshotVerifier(
+          publicKeyPemSpki: pinnedPem ?? authority.spkiPem,
+        ),
+      );
+  final AuthFlowDependencies deps = AuthFlowDependencies(
+    authApi: AuthApi(client),
+    enrollmentApi: EnrollmentApi(client),
+    tokenStore: SecureTokenStore(keys),
+    identityVault: InstallationIdentityVault(keys),
+    bindingStore: DeviceBindingStore(database),
+    graceService: OfflineGraceService(database, verifier: verifier),
+    verifier: verifier,
+  );
+  return AuthKit(
+    tokenStore: deps.tokenStore,
+    identityVault: deps.identityVault,
+    bindingStore: deps.bindingStore,
+    apiClient: client,
+    authApi: deps.authApi,
+    enrollmentApi: deps.enrollmentApi,
+    verifier: verifier,
+    graceService: deps.graceService,
+    authService: AuthService(deps, platformName: () => 'windows'),
+  );
 }
