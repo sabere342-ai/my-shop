@@ -55,6 +55,12 @@ interface StoredMembershipRow {
   createdAt: Date;
 }
 
+/** §22.2 M3-S1: the settings singleton row the bootstrap transaction materializes. */
+interface StoredSettingsRow {
+  organizationId: string;
+  settingsVersion: bigint;
+}
+
 const CREATED_AT = new Date('2026-01-01T00:00:00.000Z');
 
 /** Canonical UUID shape the trusted tenant context accepts (§9.3, M2-S4). */
@@ -64,6 +70,7 @@ interface FakeStore {
   organizations: StoredOrganizationRow[];
   users: StoredUserRow[];
   memberships: StoredMembershipRow[];
+  settings: StoredSettingsRow[];
 }
 
 interface FakeBootstrap {
@@ -75,6 +82,7 @@ interface FakeBootstrap {
     readonly organizationCreate: jest.Mock;
     readonly membershipCreate: jest.Mock;
     readonly userCreate: jest.Mock;
+    readonly settingsCreate: jest.Mock;
     readonly transaction: jest.Mock;
   };
 }
@@ -99,6 +107,7 @@ function fakeBootstrap(
     organizations: [...(options.seed?.organizations ?? [])],
     users: [...(options.seed?.users ?? [])],
     memberships: [...(options.seed?.memberships ?? [])],
+    settings: [...(options.seed?.settings ?? [])],
   };
   const calls: string[] = [];
   // See `findOrganizationInTransaction`: `transactionReads: false` blinds the
@@ -177,6 +186,16 @@ function fakeBootstrap(
     return Promise.resolve(membership);
   });
 
+  /** §22.2 M3-S1: the bootstrap transaction's default settings row (version 1). */
+  const settingsCreate = jest.fn((args: { data: { organizationId: string; settingsVersion: bigint } }) => {
+    const row: StoredSettingsRow = {
+      organizationId: args.data.organizationId,
+      settingsVersion: args.data.settingsVersion,
+    };
+    store.settings.push(row);
+    return Promise.resolve(row);
+  });
+
   const tx = {
     // M2-S4: the trusted-context `set_config` statements (bootstrap key first,
     // tenant id on creation/classification), recorded so ordering proofs can
@@ -197,6 +216,7 @@ function fakeBootstrap(
     }),
     organization: { findUnique: findOrganizationInTransaction, create: organizationCreate },
     organizationMembership: { create: membershipCreate, findFirst: findOwnerMembership },
+    organizationSettings: { create: settingsCreate },
     user: { findUnique: findUser, create: userCreate },
   };
 
@@ -207,6 +227,7 @@ function fakeBootstrap(
       organizations: [...store.organizations],
       users: [...store.users],
       memberships: [...store.memberships],
+      settings: [...store.settings],
     };
     try {
       return await run(tx as unknown as Prisma.TransactionClient);
@@ -214,6 +235,7 @@ function fakeBootstrap(
       store.organizations = snapshot.organizations;
       store.users = snapshot.users;
       store.memberships = snapshot.memberships;
+      store.settings = snapshot.settings;
       throw error;
     }
   });
@@ -231,7 +253,7 @@ function fakeBootstrap(
     host,
     store,
     calls,
-    mocks: { organizationCreate, membershipCreate, userCreate, transaction },
+    mocks: { organizationCreate, membershipCreate, userCreate, settingsCreate, transaction },
   } satisfies FakeBootstrap;
 }
 
@@ -285,6 +307,13 @@ describe('OrganizationBootstrapService', () => {
     expect(store.users).toHaveLength(1);
     expect(store.memberships).toHaveLength(1);
     expect(store.memberships[0]).toMatchObject({ isOwner: true });
+    // §22.2 (M3-S1): the settings singleton materializes in the same bootstrap
+    // transaction — one row, version 1, tied to the minted organization id.
+    expect(store.settings).toHaveLength(1);
+    expect(store.settings[0]).toEqual({
+      organizationId: store.organizations[0]?.id,
+      settingsVersion: 1n,
+    });
     expect(mocks.organizationCreate).toHaveBeenCalledWith({
       data: { id: expect.stringMatching(UUID_SHAPE), name: 'Main Shop', bootstrapKey: 'main-shop' },
     });
@@ -415,12 +444,14 @@ describe('OrganizationBootstrapService', () => {
     expect(mocks.organizationCreate).toHaveBeenCalledTimes(1);
     expect(mocks.userCreate).toHaveBeenCalledTimes(1);
     expect(mocks.membershipCreate).toHaveBeenCalledTimes(1);
-    // All three rows are invisible: the probe runs after every write and before
+    expect(mocks.settingsCreate).toHaveBeenCalledTimes(1);
+    // All four rows are invisible: the probe runs after every write and before
     // the commit, so the transaction's atomicity is the only thing that can
     // explain zero rows.
     expect(store.organizations).toEqual([]);
     expect(store.users).toEqual([]);
     expect(store.memberships).toEqual([]);
+    expect(store.settings).toEqual([]);
   });
 
   it('classifies a unique violation as the stored result, after the transaction has ended', async () => {

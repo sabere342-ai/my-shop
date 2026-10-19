@@ -51,13 +51,14 @@ import type { Organization, Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import type { Logger as PinoLogger } from 'pino';
 import { establishBootstrapKeyContext, establishTenantContext } from '../database/tenant-context';
+import type { PrismaHost } from '../sync/ledger/mutation-ledger.service';
+import { FIRST_SETTINGS_VERSION } from '../settings/settings.contract';
 import {
   canonicalizeEmail,
   EmailShapeError,
   findOrCreateUserByEmail,
   findUserById,
 } from '../identity/user-provisioning';
-import type { PrismaHost } from '../sync/ledger/mutation-ledger.service';
 import {
   acquireBootstrapKeyLock,
   createOrganizationWithOwner,
@@ -239,6 +240,17 @@ export class OrganizationBootstrapService {
       name: request.name,
       bootstrapKey: request.bootstrapKey,
       ownerUserId: user.id,
+    });
+
+    // §22.2 (M3-S1): the settings singleton materializes with the tenant root
+    // — version 1, every column at its plan default — in the same bootstrap
+    // transaction. The tenant context the organization write established
+    // satisfies the row's WITH CHECK; the bootstrap accepted update (§40.7
+    // M3-S1) says a *new* organization's settings exist from its first
+    // committed transaction, so a later settings read finds the row instead
+    // of lazily materializing it.
+    await tx.organizationSettings.create({
+      data: { organizationId: organization.id, settingsVersion: FIRST_SETTINGS_VERSION },
     });
 
     // AC-05: everything above exists only if this returns. A throw here must

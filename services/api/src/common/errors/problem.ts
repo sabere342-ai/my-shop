@@ -45,6 +45,9 @@ export const ERROR_CODES = {
   DISCOUNT_LIMIT_EXCEEDED: 'DISCOUNT_LIMIT_EXCEEDED',
   DISCOUNT_APPROVAL_REQUIRED: 'DISCOUNT_APPROVAL_REQUIRED',
 
+  /** Master Plan section 22 / section 38.18 (M3-S1): an accepted write raced another; the token is stale. */
+  SETTINGS_VERSION_CONFLICT: 'SETTINGS_VERSION_CONFLICT',
+
   // --- Offline mutation ingress (Master Plan section 38) ---
   /** Master Plan section 38.9: an identical mutation_id was already accepted. */
   REPLAY: 'REPLAY',
@@ -112,6 +115,7 @@ const MESSAGE_BY_CODE: Readonly<Record<ErrorCode, string>> = {
   INVENTORY_CONFLICT: 'Stock on the server differs from the recorded quantity.',
   OFFLINE_GRACE_EXPIRED: 'The offline authorization window has expired.',
   DEVICE_REVOKED: 'This device has been revoked.',
+  SETTINGS_VERSION_CONFLICT: 'The settings changed while you were editing. Refresh and try again.',
   CLIENT_TOO_OLD: 'This app version is too old. Update to continue.',
   UNSUPPORTED_MUTATION: 'This operation is not supported by the server.',
 
@@ -148,6 +152,8 @@ const STATUS_BY_CODE: Readonly<Record<ErrorCode, number>> = {
   INVENTORY_CONFLICT: 409,
   OFFLINE_GRACE_EXPIRED: 403,
   DEVICE_REVOKED: 403,
+  /** §22/§38.18 (M3-S1): a lost optimistic token is answered 409, never a silent overwrite. */
+  SETTINGS_VERSION_CONFLICT: 409,
   // section 38.7.2: the whole request is refused because its producer is too old;
   // 426 (Upgrade Required) is the exact transport meaning, and the client branches
   // on the CLIENT_TOO_OLD code rather than on the status.
@@ -308,6 +314,7 @@ const TITLE_BY_CODE: Readonly<Record<ErrorCode, string>> = {
   INVENTORY_CONFLICT: 'Inventory conflict',
   OFFLINE_GRACE_EXPIRED: 'Offline window expired',
   DEVICE_REVOKED: 'Device revoked',
+  SETTINGS_VERSION_CONFLICT: 'Settings version conflict',
   CLIENT_TOO_OLD: 'App update required',
   UNSUPPORTED_MUTATION: 'Unsupported operation',
 
