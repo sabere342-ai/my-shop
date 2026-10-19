@@ -34,10 +34,17 @@ dependencies:
   sqlite3_flutter_libs: ^0.5.28
   path_provider: ^2.1.5
   path: ^1.9.0
+  # M2-S7: REST transport for the auth flow (section 7.3, ADR-001). First-party
+  # package:http, platform-neutral, no credential of its own.
   http: ^1.6.0
+  # M2-S7: platform-keystore token storage (section 13.6, section 6.10). The
+  # governing acceptance of the slice: a token is never stored outside the
+  # platform keystore, and a failed keystore never falls back to plaintext.
   flutter_secure_storage: ^11.2.0
+  # M2-S7: RS256 verification of the signed authorization snapshot
+  # (section 38.16.3, M2-S3). Pure Dart; the pinned key is parsed from the
+  # pointycastle ASN.1 reader, so no second ASN.1 dependency is needed.
   pointycastle: ^4.0.0
-  asn1lib: ^1.6.5
 
 dev_dependencies:
   flutter_test:

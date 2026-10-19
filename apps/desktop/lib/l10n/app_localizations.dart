@@ -133,6 +133,90 @@ abstract class AppLocalizations {
   /// In ar, this message translates to:
   /// **'العودة إلى البداية'**
   String get backToHome;
+
+  /// No description provided for @authSignInTitle.
+  ///
+  /// In ar, this message translates to:
+  /// **'تسجيل الدخول'**
+  String get authSignInTitle;
+
+  /// No description provided for @authEmailLabel.
+  ///
+  /// In ar, this message translates to:
+  /// **'البريد الإلكتروني'**
+  String get authEmailLabel;
+
+  /// No description provided for @authPasswordLabel.
+  ///
+  /// In ar, this message translates to:
+  /// **'كلمة السر'**
+  String get authPasswordLabel;
+
+  /// No description provided for @authSignInAction.
+  ///
+  /// In ar, this message translates to:
+  /// **'تسجيل الدخول'**
+  String get authSignInAction;
+
+  /// No description provided for @authInvalidCredentials.
+  ///
+  /// In ar, this message translates to:
+  /// **'البريد الإلكتروني أو كلمة السر غير صحيحة.'**
+  String get authInvalidCredentials;
+
+  /// No description provided for @authRateLimited.
+  ///
+  /// In ar, this message translates to:
+  /// **'ثمة محاولات كثيرة؛ انتظر قليلًا ثم أعد المحاولة.'**
+  String get authRateLimited;
+
+  /// No description provided for @authRefused.
+  ///
+  /// In ar, this message translates to:
+  /// **'رفض الخادم الطلب؛ راجع البيانات وأعد المحاولة.'**
+  String get authRefused;
+
+  /// No description provided for @authWithheld.
+  ///
+  /// In ar, this message translates to:
+  /// **'لم يصل رد من الخادم؛ تحقق من الاتصال وأعد المحاولة.'**
+  String get authWithheld;
+
+  /// No description provided for @authChooseOrganizationTitle.
+  ///
+  /// In ar, this message translates to:
+  /// **'اختيار جهة العمل'**
+  String get authChooseOrganizationTitle;
+
+  /// No description provided for @authChooseOrganizationBody.
+  ///
+  /// In ar, this message translates to:
+  /// **'حسابك مرتبط بأكثر من جهة؛ اختر جهة العمل التي سيعمل عليها هذا الجهاز.'**
+  String get authChooseOrganizationBody;
+
+  /// No description provided for @authSessionMissing.
+  ///
+  /// In ar, this message translates to:
+  /// **'لا توجد جلسة نشطة؛ سُجِّلت الخروج.'**
+  String get authSessionMissing;
+
+  /// No description provided for @shellGraceActive.
+  ///
+  /// In ar, this message translates to:
+  /// **'الأذونات المخزّنة على هذا الجهاز سارية؛ التعديل يعمل دون اتصال.'**
+  String get shellGraceActive;
+
+  /// No description provided for @shellGraceReadOnly.
+  ///
+  /// In ar, this message translates to:
+  /// **'يمكن القراءة دون اتصال؛ التعديل يتوقف حتى اتصال جديد بالخادم.'**
+  String get shellGraceReadOnly;
+
+  /// No description provided for @shellGraceUnavailable.
+  ///
+  /// In ar, this message translates to:
+  /// **'لم تُقرأ حالة الجلسة المحلية بعد.'**
+  String get shellGraceUnavailable;
 }
 
 class _AppLocalizationsDelegate

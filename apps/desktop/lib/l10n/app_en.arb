@@ -5,5 +5,19 @@
   "shellBody": "No business screens in this build.",
   "notFoundTitle": "Page not found",
   "notFoundBody": "The link may have been removed or changed.",
-  "backToHome": "Back to start"
+  "backToHome": "Back to start",
+  "authSignInTitle": "Sign in",
+  "authEmailLabel": "Email",
+  "authPasswordLabel": "Password",
+  "authSignInAction": "Sign in",
+  "authInvalidCredentials": "The email or password is not correct.",
+  "authRateLimited": "Too many attempts; wait a little and try again.",
+  "authRefused": "The server refused the request; review the details and try again.",
+  "authWithheld": "No answer came from the server; check the connection and try again.",
+  "authChooseOrganizationTitle": "Choose your workspace",
+  "authChooseOrganizationBody": "Your account belongs to more than one organization; choose the one this device works in.",
+  "authSessionMissing": "There is no active session; sign in again.",
+  "shellGraceActive": "The permissions cached on this device are valid; editing works offline.",
+  "shellGraceReadOnly": "Reading works offline; editing pauses until a new connection.",
+  "shellGraceUnavailable": "The local session status has not been read yet."
 }

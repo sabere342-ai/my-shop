@@ -83,6 +83,14 @@ final NotifierProvider<AppSessionNotifier, AppSessionState> appSessionProvider =
       AppSessionNotifier.new,
     );
 
+/// The offline-grace status the shell's calm line reads (§38.31: one line,
+/// never a sync retrofit). It re-reads the service when the session state
+/// changes, so a sign-in or sign-out moves the line with the session.
+final FutureProvider<OfflineGraceStatus> appGraceStatusProvider =
+    FutureProvider<OfflineGraceStatus>((Ref ref) {
+  return ref.watch(appSessionProvider.notifier).graceStatus();
+});
+
 class AppSessionNotifier extends Notifier<AppSessionState> {
   @override
   AppSessionState build() {

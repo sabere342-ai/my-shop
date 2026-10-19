@@ -94,17 +94,21 @@ class MeWireResponse {
     final Object? perms = json['permissionsVersion'];
     final Object? expiry = json['expiresAt'];
     final Object? device = json['deviceId'];
-    if (user is! String)
+    if (user is! String) {
       throw const FormatException('me response carried no userId');
-    if (mail is! String)
+    }
+    if (mail is! String) {
       throw const FormatException('me response carried no email');
-    if (session is! String)
+    }
+    if (session is! String) {
       throw const FormatException('me response carried no sessionId');
+    }
     if (perms is! int) {
       throw const FormatException('me response carried no permissionsVersion');
     }
-    if (expiry is! String)
+    if (expiry is! String) {
       throw const FormatException('me response carried no expiresAt');
+    }
     final DateTime parsedExpiry = DateTime.parse(expiry);
     if (orgs is! List || orgs.any((Object? o) => o is! String)) {
       throw const FormatException(
