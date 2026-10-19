@@ -5,5 +5,19 @@
   "shellBody": "لا توجد شاشات عمل في هذه النسخة.",
   "notFoundTitle": "الصفحة غير موجودة",
   "notFoundBody": "ربما حُذف الرابط أو تغيّر.",
-  "backToHome": "العودة إلى البداية"
+  "backToHome": "العودة إلى البداية",
+  "authSignInTitle": "تسجيل الدخول",
+  "authEmailLabel": "البريد الإلكتروني",
+  "authPasswordLabel": "كلمة السر",
+  "authSignInAction": "تسجيل الدخول",
+  "authInvalidCredentials": "البريد الإلكتروني أو كلمة السر غير صحيحة.",
+  "authRateLimited": "ثمة محاولات كثيرة؛ انتظر قليلًا ثم أعد المحاولة.",
+  "authRefused": "رفض الخادم الطلب؛ راجع البيانات وأعد المحاولة.",
+  "authWithheld": "لم يصل رد من الخادم؛ تحقق من الاتصال وأعد المحاولة.",
+  "authChooseOrganizationTitle": "اختيار جهة العمل",
+  "authChooseOrganizationBody": "حسابك مرتبط بأكثر من جهة؛ اختر جهة العمل التي سيعمل عليها هذا الجهاز.",
+  "authSessionMissing": "لا توجد جلسة نشطة؛ سُجِّلت الخروج.",
+  "shellGraceActive": "الأذونات المخزّنة على هذا الجهاز سارية؛ التعديل يعمل دون اتصال.",
+  "shellGraceReadOnly": "يمكن القراءة دون اتصال؛ التعديل يتوقف حتى اتصال جديد بالخادم.",
+  "shellGraceUnavailable": "لم تُقرأ حالة الجلسة المحلية بعد."
 }

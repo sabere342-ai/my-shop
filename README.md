@@ -327,6 +327,45 @@ quarantined for owner decision, never discarded (§12.5). The owner-visible
 device list exposes §12.5's server-maintained sync metadata (last push/pull/
 sync, client schema version) so a one-sided failure is diagnosable.
 
+### The client auth flow (§13.6, §38.16, slice M2-S7)
+
+The Flutter client (`apps/desktop`) consumes the surfaces above. Its custody
+rule is absolute: **a token is never written outside the platform secure
+storage** (§13.6, ADR-006). Access and refresh tokens live in one keystore
+record (`auth.access_token`, Windows DPAPI / Android Keystore); a failed read
+or write reports the session as unauthenticated, a corrupted record is wiped
+and refused, and sign-out wipes the token record, the installation identity,
+and the offline grace record locally even if the server logout call fails.
+There is no plaintext, preferences, or database fallback anywhere — the test
+suite cross-checks every other persistence seam for token material and finds
+none.
+
+Two build inputs configure a client binary (`--dart-define`), because a
+client is compiled for the deployment it belongs to:
+
+| Define                        | Required | Purpose                                                                    |
+| ----------------------------- | -------- | -------------------------------------------------------------------------- |
+| `MY_SHOP_API_BASE_URL`        | yes      | The server origin (§34.1). Absent ⇒ composition fails fast naming the define. |
+| `MY_SHOP_SNAPSHOT_PUBLIC_KEY` | no       | SPKI public key for verifying the signed authorization snapshot (§38.16.3). Absent ⇒ sign-in works online, but no offline grace session can ever be established — the verifier has no accepting default. |
+
+On start the client reads the keystore before the first frame and routes
+honestly: no stored session → `/sign-in`; a stored session without an
+organization → `/organization-setup`; a stored session with one → the shell.
+Sign-in succeeds only through the server's verified response; a refused login
+surfaces the mapped problem code (bad credentials, throttling) and nothing
+else. On a fresh authenticated session the client enrolls its installation
+idempotently (§12.1), binds the session (receiving the re-minted `did`-bound
+token), and mints + stores the signed authorization snapshot. Organization
+choices are exactly the memberships `/auth/me` verified — never a
+client-asserted tenant id (§9.3).
+
+While offline inside the grace window the shell shows one calm status line
+(§38.31): active grace, read-only (expired grace — reads continue, committed
+work still syncs, mutations are refused), or honestly neutral (no session, no
+grace). The line is driven by the existing `OfflineGraceService` admission
+policy, not a re-implementation. A fresh offline device without a minted
+record cannot mutate — that is §38.18's safe fallback, not a regression.
+
 ### Running the backend
 
 The API reads its configuration from the environment and **refuses to start** on invalid
