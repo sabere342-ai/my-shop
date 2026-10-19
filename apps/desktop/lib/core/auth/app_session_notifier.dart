@@ -88,8 +88,8 @@ final NotifierProvider<AppSessionNotifier, AppSessionState> appSessionProvider =
 /// changes, so a sign-in or sign-out moves the line with the session.
 final FutureProvider<OfflineGraceStatus> appGraceStatusProvider =
     FutureProvider<OfflineGraceStatus>((Ref ref) {
-  return ref.watch(appSessionProvider.notifier).graceStatus();
-});
+      return ref.watch(appSessionProvider.notifier).graceStatus();
+    });
 
 class AppSessionNotifier extends Notifier<AppSessionState> {
   @override

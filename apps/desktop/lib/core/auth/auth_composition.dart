@@ -65,18 +65,21 @@ final Provider<AuthKit> authKitProvider = Provider<AuthKit>((Ref ref) {
 });
 
 /// The §7.3 transport plus everything reachable through it, as one value.
+/// Every member is injectable so tests drive real transitions with fakes
+/// (§6.5: no service locator, no global mutable state); [AuthKit.compose] is
+/// the production wiring of the same injectable shape.
 class AuthKit {
-  const AuthKit._(
-    this.tokenStore,
-    this.identityVault,
-    this.bindingStore,
-    this.apiClient,
-    this.authApi,
-    this.enrollmentApi,
-    this.verifier,
-    this.graceService,
-    this.authService,
-  );
+  AuthKit({
+    required this.tokenStore,
+    required this.identityVault,
+    required this.bindingStore,
+    required this.apiClient,
+    required this.authApi,
+    required this.enrollmentApi,
+    required this.verifier,
+    required this.graceService,
+    required this.authService,
+  });
 
   final SecureTokenStore tokenStore;
   final InstallationIdentityVault identityVault;
@@ -142,16 +145,16 @@ class AuthKit {
     );
     final AuthService authService = AuthService(deps);
 
-    return AuthKit._(
-      tokenStore,
-      identityVault,
-      bindingStore,
-      apiClient,
-      authApi,
-      enrollmentApi,
-      verifier,
-      graceService,
-      authService,
+    return AuthKit(
+      tokenStore: tokenStore,
+      identityVault: identityVault,
+      bindingStore: bindingStore,
+      apiClient: apiClient,
+      authApi: authApi,
+      enrollmentApi: enrollmentApi,
+      verifier: verifier,
+      graceService: graceService,
+      authService: authService,
     );
   }
 }
