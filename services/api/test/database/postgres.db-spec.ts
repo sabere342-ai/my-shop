@@ -33,9 +33,12 @@ import { tmpdir } from 'node:os';
 import { PrismaClient, type Prisma } from '@prisma/client';
 import { loadConfig, type AppConfigShape } from '../../src/common/config/app.config';
 import { PrismaService } from '../../src/common/database/prisma.service';
+import { verifyAuditStreamScope } from '../../src/common/audit/audit-integrity';
+import { AUDIT_EVENT_TYPES, GLOBAL_SECURITY_SCOPE } from '../../src/common/audit/stream.contract';
 import { ERROR_CODES } from '../../src/common/errors/problem';
 import { MutationContradictionError, MutationRejectedError } from '../../src/common/sync/ledger/mutation-ledger.errors';
 import { payloadHashOf } from '../../src/common/sync/ledger/payload-hash';
+import { mutationFingerprint } from '../../src/common/sync/push/sync-push.service';
 import {
   type ApplyMutationRequest,
   type MutationAppliedOutcome,
@@ -329,7 +332,10 @@ describe('database acceptance (real PostgreSQL)', () => {
       // M2-S2 adds `0005_identity_auth` and `0006_users_permissions_version`;
       // M2-S3 adds `0007_authorization_roles`; M2-S4 adds the §8.2 RLS
       // migration `0008_tenant_row_level_security` (policies only, no table);
-      // M2-S5 adds `0009_device_binding` (§12 devices + `sessions.device_id`).
+      // M2-S5 adds `0009_device_binding` (§12 devices + `sessions.device_id`);
+      // M2-S6 adds `0010_audit_streams` (§32 both audit streams + the heads)
+      // and `0011_audit_stream_head_grant` (the anchor keeps its bounded
+      // UPDATE).
       // Every applied migration must be finished and never rolled back
       // (migration history is append-only, Master Plan §44.1).
       expect(rows.map((row) => row.migration_name)).toEqual([
@@ -342,6 +348,8 @@ describe('database acceptance (real PostgreSQL)', () => {
         '0007_authorization_roles',
         '0008_tenant_row_level_security',
         '0009_device_binding',
+        '0010_audit_streams',
+        '0011_audit_stream_head_grant',
       ]);
       for (const row of rows) {
         expect(row.finished_at).not.toBeNull();
@@ -362,14 +370,18 @@ describe('database acceptance (real PostgreSQL)', () => {
       // (§40.6, §11.2, §11.4): `roles`, the `role_permissions` grant edges, and the
       // per-user `permission_overrides`. The permission ids themselves are not a
       // table (§11.2: the catalog lives in code). M2-S4's RLS is policies only;
-      // M2-S5 authorizes `devices`, the §12 installation record.
+      // M2-S5 authorizes `devices`, the §12 installation record; M2-S6
+      // authorizes the two §32.1 audit-stream tables (`audit_events`,
+      // `security_events`) and the §32.5 allocation anchor `audit_stream_heads`.
       const rows = await migrator.$queryRaw<NameRow[]>`
         SELECT tablename FROM pg_tables
         WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'
-        ORDER BY tablename
+        ORDER BY tablename COLLATE "C"
       `;
 
       expect(rows.map((row) => row.tablename)).toEqual([
+        'audit_events',
+        'audit_stream_heads',
         'auth_throttles',
         'change_log',
         'device_sync_cursors',
@@ -381,6 +393,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         'refresh_tokens',
         'role_permissions',
         'roles',
+        'security_events',
         'sessions',
         'sync_sequences',
         'user_credentials',
@@ -392,7 +405,7 @@ describe('database acceptance (real PostgreSQL)', () => {
       dbScript('deploy');
 
       const rows = await migrator.$queryRaw<MigrationRow[]>`SELECT migration_name FROM _prisma_migrations`;
-      expect(rows).toHaveLength(9);
+      expect(rows).toHaveLength(11);
     });
   });
 
@@ -457,6 +470,31 @@ describe('database acceptance (real PostgreSQL)', () => {
       await expect(app.$executeRaw`ALTER TABLE separation_probe ADD COLUMN note text`).rejects.toThrow();
 
       await migrator.$executeRaw`DROP TABLE separation_probe`;
+    });
+
+    it('M2-S6 §32.5: the application role holds exactly the append privileges on the audit streams', async () => {
+      // The §32.5 law, verified against PostgreSQL's own privilege resolution:
+      // INSERT + SELECT on both event tables, no UPDATE, no DELETE; the
+      // allocation anchor keeps INSERT + SELECT + UPDATE (its advance is the
+      // atomic companion of the append) and never DELETE. The negative half
+      // (an UPDATE/DELETE is refused at execution time) lives in the
+      // audit-streams acceptance suite, which walks the real chain.
+      const rows = await app.$queryRaw<{ table_name: string; privilege_type: string }[]>`
+        SELECT table_name, privilege_type FROM information_schema.role_table_grants
+        WHERE grantee = 'my_shop_app'
+          AND table_name IN ('audit_events', 'security_events', 'audit_stream_heads')
+        ORDER BY table_name, privilege_type
+      `;
+
+      expect(rows).toEqual([
+        { table_name: 'audit_events', privilege_type: 'INSERT' },
+        { table_name: 'audit_events', privilege_type: 'SELECT' },
+        { table_name: 'audit_stream_heads', privilege_type: 'INSERT' },
+        { table_name: 'audit_stream_heads', privilege_type: 'SELECT' },
+        { table_name: 'audit_stream_heads', privilege_type: 'UPDATE' },
+        { table_name: 'security_events', privilege_type: 'INSERT' },
+        { table_name: 'security_events', privilege_type: 'SELECT' },
+      ]);
     });
   });
 
@@ -1421,6 +1459,275 @@ describe('database acceptance (real PostgreSQL)', () => {
         });
         expect(await ingressProbeCount(mutation['mutationId'] as string)).toBe(0);
       }, 60_000);
+    });
+
+    /**
+     * M2-S6 — the §32.2A audit-stream rows behind the boundary acceptance.
+     *
+     * This block's harness runs the production wiring, so every row below is
+     * what the *running app* appended — not a fixture: the canonical
+     * `SYNC_MUTATION_ACCEPTED` row committed with the ledger facts (class A),
+     * replayed answers that append nothing, a `REJECTED` row carrying the
+     * §32.2A classification, the rejected replay's attempt-number `RETRY`
+     * row, and the idempotency contradiction's class-B durable pair — which
+     * must survive in both streams although its own journal aborted. Each
+     * block closes on the read-only verifier: what a clean run committed must
+     * verify as one chain.
+     */
+    describe('durable audit streams (M2-S6)', () => {
+      /** Class-B durability is fire-and-forget: poll for the row, never sleep-and-hope. */
+      async function eventually(count: () => Promise<number>): Promise<void> {
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          if ((await count()) > 0) return;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        throw new Error('the expected durable event did not appear in time');
+      }
+
+      /** The audit rows of one mutation, oldest chain position first. */
+      async function auditRowsOf(mutationId: string): Promise<
+        {
+          sequence: string;
+          event_type: string;
+          actor_kind: string;
+          actor_user_id: string | null;
+          actor_device_id: string | null;
+          target_type: string | null;
+          target_id: string | null;
+          occurred_at: string;
+          /** `received_at` of the ledger row and the event's `occurred_at` are one instant. */
+          committed_with_received_at: boolean;
+          payload: unknown;
+        }[]
+      > {
+        return inTenant(
+          app,
+          PUSH_ORG,
+          (tx) =>
+            tx.$queryRaw<
+              {
+                sequence: string;
+                event_type: string;
+                actor_kind: string;
+                actor_user_id: string | null;
+                actor_device_id: string | null;
+                target_type: string | null;
+                target_id: string | null;
+                occurred_at: string;
+                committed_with_received_at: boolean;
+                payload: unknown;
+              }[]
+            >`
+          SELECT e.sequence::text AS "sequence", e.event_type, e.actor_kind, e.actor_user_id, e.actor_device_id,
+                 e.target_type, e.target_id, e.occurred_at::text AS occurred_at,
+                 (l.received_at = e.occurred_at) AS committed_with_received_at,
+                 e.payload
+            FROM audit_events e
+            JOIN mutation_ledger l
+              ON l.organization_id = e.organization_id AND l.mutation_id = e.mutation_id
+           WHERE e.organization_id = ${PUSH_ORG}::uuid AND e.mutation_id = ${mutationId}::uuid
+           ORDER BY e.sequence`,
+        );
+      }
+
+      /** How many rows of one event type one mutation carries. */
+      async function auditCountOf(mutationId: string, eventType: string): Promise<number> {
+        const rows = await inTenant(
+          app,
+          PUSH_ORG,
+          (tx) =>
+            tx.$queryRaw<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM audit_events
+           WHERE organization_id = ${PUSH_ORG}::uuid
+             AND mutation_id = ${mutationId}::uuid
+             AND event_type = ${eventType}`,
+        );
+        return rows[0]?.n ?? 0;
+      }
+
+      it('appends one canonical SYNC_MUTATION_ACCEPTED row, committed with the acceptance facts (§32.2A)', async () => {
+        const note = `audit-accept-${randomUUID()}`;
+        const mutation = pushMutation(1, note);
+
+        const response = await harness.http
+          .post(PUSH_PATH)
+          .send(pushEnvelope([mutation]))
+          .expect(200);
+        const outcome = (response.body['outcomes'] as { status: string; serverSequence: string }[])[0];
+        expect(outcome?.status).toBe('APPLIED');
+
+        const rows = await auditRowsOf(mutation['mutationId'] as string);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          event_type: 'SYNC_MUTATION_ACCEPTED',
+          // §32.6: the trusted context carries no verified actor, so the row is
+          // device-attributed — the actor the ledger can prove from its own facts.
+          actor_kind: 'DEVICE',
+          actor_user_id: null,
+          actor_device_id: PUSH_DEVICE,
+          target_type: 'PUSH_PROBE',
+          target_id: `push:${note}`,
+          payload: { resultRef: `push/${note}`, serverSequence: outcome?.serverSequence },
+          committed_with_received_at: true,
+        });
+        expect(await ledgerRow(mutation['mutationId'] as string)).toMatchObject({ status: 'APPLIED' });
+      });
+
+      it('never re-audits a replayed acceptance — the stored record is the redelivered answer (§38.9.2)', async () => {
+        const note = `audit-replay-${randomUUID()}`;
+        const mutation = pushMutation(1, note);
+        const batch = pushEnvelope([mutation]);
+
+        await harness.http.post(PUSH_PATH).send(batch).expect(200);
+        expect(await auditCountOf(mutation['mutationId'] as string, 'SYNC_MUTATION_ACCEPTED')).toBe(1);
+
+        const replay = await harness.http.post(PUSH_PATH).send(batch).expect(200);
+        expect((replay.body['outcomes'] as { status: string }[])[0]?.status).toBe('REPLAY');
+        expect(await auditCountOf(mutation['mutationId'] as string, 'SYNC_MUTATION_ACCEPTED')).toBe(1);
+      });
+
+      it('appends one class-A SYNC_MUTATION_REJECTED row with the §32.2A classification (§38.13)', async () => {
+        const note = `audit-reject-${randomUUID()}`;
+        const mutation = pushMutation(1, note, 'reject');
+
+        const response = await harness.http
+          .post(PUSH_PATH)
+          .send(pushEnvelope([mutation]))
+          .expect(200);
+        expect((response.body['outcomes'] as { status: string; rejectionCode: string }[])[0]).toMatchObject({
+          status: 'REJECTED',
+          rejectionCode: ERROR_CODES.INSUFFICIENT_STOCK,
+        });
+
+        const rows = await auditRowsOf(mutation['mutationId'] as string);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          event_type: 'SYNC_MUTATION_REJECTED',
+          actor_kind: 'DEVICE',
+          actor_device_id: PUSH_DEVICE,
+          target_type: 'MUTATION',
+          target_id: mutation['mutationId'],
+          payload: {
+            classification: 'BUSINESS',
+            rejectionCode: ERROR_CODES.INSUFFICIENT_STOCK,
+          },
+          committed_with_received_at: true,
+        });
+      });
+
+      it('appends one SYNC_MUTATION_RETRY row per rejected replay, with the attempt number (§32.2A)', async () => {
+        const note = `audit-retry-${randomUUID()}`;
+        const mutation = pushMutation(1, note, 'reject');
+        const batch = pushEnvelope([mutation]);
+        const mutationId = mutation['mutationId'] as string;
+
+        await harness.http.post(PUSH_PATH).send(batch).expect(200);
+        const firstRetry = await harness.http.post(PUSH_PATH).send(batch).expect(200);
+        const secondRetry = await harness.http.post(PUSH_PATH).send(batch).expect(200);
+        // §38.10.1 makes the stored rejection THE answer either way (the wire
+        // carries no replay flag for rejections): the retries are proven by the
+        // §32.2A rows below.
+        expect((firstRetry.body['outcomes'] as { status: string }[])[0]?.status).toBe('REJECTED');
+        expect((secondRetry.body['outcomes'] as { status: string }[])[0]?.status).toBe('REJECTED');
+
+        const rows = await auditRowsOf(mutationId);
+        expect(rows.map((row) => row.event_type)).toEqual([
+          'SYNC_MUTATION_REJECTED',
+          'SYNC_MUTATION_RETRY',
+          'SYNC_MUTATION_RETRY',
+        ]);
+        expect(
+          rows
+            .map((row) => (row['payload'] as { attemptNumber?: number }).attemptNumber)
+            .filter((n) => n !== undefined),
+        ).toEqual([1, 2]);
+        // The refusal itself is still one committed row; only retries accumulate.
+        expect(await auditCountOf(mutationId, 'SYNC_MUTATION_REJECTED')).toBe(1);
+      });
+
+      it('persists the idempotency contradiction in both streams although its journal aborted (class B, §38.9.2)', async () => {
+        const note = `audit-contradict-${randomUUID()}`;
+        const mutation = pushMutation(1, note);
+        const mutationId = mutation['mutationId'] as string;
+
+        await harness.http
+          .post(PUSH_PATH)
+          .send(pushEnvelope([mutation]))
+          .expect(200);
+
+        // The §38.9.2 alarm: the same mutation_id under a different payload.
+        const changed = {
+          ...mutation,
+          payload: { probe: { note: `${note}-changed`, outcome: 'apply' } },
+        };
+        const response = await harness.http
+          .post(PUSH_PATH)
+          .send(pushEnvelope([changed]))
+          .expect(200);
+        expect((response.body['outcomes'] as { status: string; rejectionCode: string }[])[0]).toMatchObject({
+          status: 'CONTRADICTION',
+          rejectionCode: ERROR_CODES.MUTATION_CONTRADICTION,
+        });
+
+        // The alarm's transaction died; the stored ledger row is still the first acceptance.
+        expect(await ledgerRow(mutationId)).toMatchObject({ status: 'APPLIED' });
+        expect(await auditCountOf(mutationId, 'SYNC_MUTATION_ACCEPTED')).toBe(1);
+
+        // The class-B audit row survives it — in its own committed transaction.
+        await eventually(() => auditCountOf(mutationId, 'SYNC_MUTATION_CONTRADICTION'));
+        const contradiction = (await auditRowsOf(mutationId)).filter(
+          (row) => row.event_type === 'SYNC_MUTATION_CONTRADICTION',
+        );
+        expect(contradiction).toHaveLength(1);
+        // The stored hash is the ledger's own: over the complete mutation
+        // fingerprint (§38.8.1), never just the payload field.
+        expect((contradiction[0]?.payload as { storedPayloadHash?: string }).storedPayloadHash).toBe(
+          payloadHashOf(mutationFingerprint(mutation as unknown as Parameters<typeof mutationFingerprint>[0])),
+        );
+
+        // And the matching §32.3/§38.27 security row, in the tenant partition.
+        const security = await inTenant(
+          app,
+          PUSH_ORG,
+          (tx) =>
+            tx.$queryRaw<
+              {
+                partition_kind: string;
+                actor_kind: string;
+                actor_device_id: string | null;
+                reason_code: string | null;
+                payload: Record<string, unknown>;
+              }[]
+            >`
+          SELECT partition_kind, actor_kind, actor_device_id, reason_code, payload
+            FROM security_events
+           WHERE organization_id = ${PUSH_ORG}::uuid
+             AND payload->>'mutationId' = ${mutationId}
+             AND event_type = 'SYNC_MUTATION_CONTRADICTION'`,
+        );
+        expect(security).toHaveLength(1);
+        expect(security[0]).toMatchObject({
+          partition_kind: 'TENANT',
+          actor_kind: 'DEVICE',
+          actor_device_id: PUSH_DEVICE,
+          reason_code: ERROR_CODES.MUTATION_CONTRADICTION,
+          payload: { mutationId },
+        });
+      });
+
+      it('the committed AUDIT and tenant SECURITY chains of this organization verify (§32.5 key acceptance)', async () => {
+        const audit = await inTenant(app, PUSH_ORG, (tx) =>
+          verifyAuditStreamScope(tx, { stream: 'AUDIT', scope: PUSH_ORG }),
+        );
+        expect(audit.verified).toBe(true);
+        expect(audit.defects).toEqual([]);
+
+        const security = await inTenant(app, PUSH_ORG, (tx) =>
+          verifyAuditStreamScope(tx, { stream: 'SECURITY', scope: PUSH_ORG }),
+        );
+        expect(security.verified).toBe(true);
+        expect(security.defects).toEqual([]);
+      });
     });
   });
 
@@ -4652,6 +4959,298 @@ describe('database acceptance (real PostgreSQL)', () => {
 
       // The owner's other device keeps syncing — revocation is per device.
       await pushBatch(memberBoundToken, pushEnvelope(deviceBId, 4)).expect(200);
+    });
+
+    /**
+     * M2-S6 — the §32 audit rows behind the device lifecycle, and the one
+     * read route the slice serves.
+     *
+     * Every protected state change the earlier device tests committed already
+     * committed its audit rows with it (class A), and the refused attempts
+     * durably recorded their class-B rows afterwards. This block reads what
+     * the run above committed back through PostgreSQL, verifies the chains,
+     * and closes on the §32.1 read route: guarded, cursor-paged, RLS-isolated,
+     * and serving only the business history — the security history has no
+     * route until an owner console exists (the documented deferral).
+     */
+    describe('the device lifecycle audit and the audit read route (M2-S6)', () => {
+      const auditPath = (organization: string): string => `/api/v1/organizations/${organization}/audit/events`;
+
+      interface AuditEventWire {
+        readonly sequence: string;
+        readonly eventType: string;
+        readonly occurredAt: string;
+        readonly actorKind: string;
+        readonly actorUserId?: string;
+        readonly actorDeviceId?: string;
+        readonly targetType?: string;
+        readonly targetId?: string;
+        readonly documentRef?: string;
+        readonly mutationId?: string;
+        readonly deviceLocalSequence?: string;
+        readonly payload?: Record<string, unknown>;
+      }
+
+      /** Class-B durability is fire-and-forget: poll for the row, never sleep-and-hope. */
+      async function pollUntil(positive: () => Promise<boolean>): Promise<void> {
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          if (await positive()) return;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        throw new Error('the expected durable event did not appear in time');
+      }
+
+      it('appends exactly one class-A DEVICE_REVOKED business row for the one real revocation (§32.2)', async () => {
+        const [device] = await inTenant(
+          migrator,
+          organizationId,
+          (tx) => tx.$queryRaw<{ label: string }[]>`SELECT label FROM devices WHERE id = ${deviceDId}::uuid`,
+        );
+        const rows = await inTenant(
+          app,
+          organizationId,
+          (tx) =>
+            tx.$queryRaw<
+              {
+                event_type: string;
+                actor_kind: string;
+                actor_user_id: string | null;
+                target_type: string | null;
+                target_id: string | null;
+                document_ref: string | null;
+                payload: { label?: string } | null;
+              }[]
+            >`
+          SELECT event_type, actor_kind, actor_user_id, target_type, target_id, document_ref, payload
+            FROM audit_events
+           WHERE organization_id = ${organizationId}::uuid AND event_type = 'DEVICE_REVOKED'`,
+        );
+
+        // The idempotent second revoke answered 204 without a second event:
+        // the §32.2 row counts real state changes, not route calls.
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          actor_kind: 'USER',
+          actor_user_id: ownerId,
+          target_type: 'DEVICE',
+          target_id: deviceDId,
+          document_ref: `device:${deviceDId}`,
+          payload: { label: device?.label },
+        });
+      });
+
+      it('verifies the committed AUDIT chains of both tenants (§32.5 key acceptance)', async () => {
+        const audit = await inTenant(app, organizationId, (tx) =>
+          verifyAuditStreamScope(tx, { stream: 'AUDIT', scope: organizationId }),
+        );
+        expect(audit.verified).toBe(true);
+        expect(audit.defects).toEqual([]);
+
+        const foreign = await inTenant(app, foreignOrganizationId, (tx) =>
+          verifyAuditStreamScope(tx, { stream: 'AUDIT', scope: foreignOrganizationId }),
+        );
+        expect(foreign.verified).toBe(true);
+        expect(foreign.defects).toEqual([]);
+      });
+
+      it('keeps the security truth beside the audit: tenant device rows, refusals, and GLOBAL logins (§32.3)', async () => {
+        const tenantRows = await inTenant(
+          app,
+          organizationId,
+          (tx) =>
+            tx.$queryRaw<
+              {
+                event_type: string;
+                actor_kind: string;
+                actor_user_id: string | null;
+                device_id: string | null;
+                reason_code: string | null;
+              }[]
+            >`
+          SELECT event_type, actor_kind, actor_user_id, device_id, reason_code
+            FROM security_events
+           WHERE organization_id = ${organizationId}::uuid`,
+        );
+
+        // Every tenant-partition row names its tenant; the read already is the
+        // trusted context, so the shape claim is the row content's own.
+        expect(tenantRows.every((row) => row.event_type !== 'LOGIN_SUCCEEDED')).toBe(true);
+
+        // §12.1: one DEVICE_REGISTERED row per registration, device-anchored
+        // at the server-resolved device and attributed to its verified caller.
+        const registered = tenantRows.filter((row) => row.event_type === 'DEVICE_REGISTERED');
+        expect(registered.map((row) => row.device_id).sort()).toEqual(
+          [deviceAId, deviceBId, deviceCId, deviceDId].sort(),
+        );
+        expect(registered.every((row) => row.actor_kind === 'USER')).toBe(true);
+        expect(registered.map((row) => row.actor_user_id)).toEqual(expect.arrayContaining([ownerId, memberId]));
+
+        // §12.4: the revocation carries the revoking owner as verified actor.
+        const revoked = tenantRows.filter((row) => row.event_type === 'DEVICE_REVOKED');
+        expect(revoked).toHaveLength(1);
+        expect(revoked[0]).toMatchObject({
+          actor_kind: 'USER',
+          actor_user_id: ownerId,
+          device_id: deviceDId,
+        });
+
+        // The refused attempts recorded their class-B rows durably: the wrong
+        // installation credential and the revoked re-registration attempt.
+        const refusalReasons = tenantRows
+          .filter((row) => row.event_type === 'DEVICE_REGISTRATION_REFUSED')
+          .map((row) => row.reason_code);
+        expect(refusalReasons).toEqual(expect.arrayContaining(['PERMISSION_DENIED', 'DEVICE_REVOKED']));
+
+        // §32.3 point 9 / §10.2: successful logins land in the documented
+        // GLOBAL partition — pre-authentication and per-identity telemetry with
+        // no tenant fact, admitted by the nil scope to every verified
+        // connection, and reproducible here as this run's own login rows.
+        await pollUntil(async () => {
+          const rows = await app.$queryRaw<{ n: number }[]>`
+            SELECT count(*)::int AS n FROM security_events
+             WHERE event_type = 'LOGIN_SUCCEEDED' AND actor_user_id = ${ownerId}::uuid`;
+          return (rows[0]?.n ?? 0) > 0;
+        });
+        const globalRows = await app.$queryRaw<
+          {
+            partition_kind: string;
+            organization_id: string | null;
+            actor_kind: string;
+            actor_user_id: string | null;
+          }[]
+        >`
+          SELECT partition_kind, organization_id, actor_kind, actor_user_id
+            FROM security_events
+           WHERE event_type = 'LOGIN_SUCCEEDED'`;
+        expect(globalRows.length).toBeGreaterThan(0);
+        expect(globalRows.every((row) => row.partition_kind === 'GLOBAL' && row.organization_id === null)).toBe(true);
+        expect(globalRows.map((row) => row.actor_kind)).toEqual(expect.arrayContaining(['USER']));
+        expect(globalRows.map((row) => row.actor_user_id)).toEqual(expect.arrayContaining([ownerId]));
+
+        // One committed stream despite the fire-and-forget class-B writers:
+        // the global chain verifies, so no login row was lost mid-append.
+        const globalChain = await app.$transaction((tx) =>
+          verifyAuditStreamScope(tx, { stream: 'SECURITY', scope: GLOBAL_SECURITY_SCOPE }),
+        );
+        expect(globalChain.verified).toBe(true);
+        expect(globalChain.defects).toEqual([]);
+      });
+
+      it('guards the §32.1 route: unauthenticated is 401, and a cashier is PERMISSION_DENIED', async () => {
+        const unauthenticated = await harness.http.get(auditPath(organizationId)).expect(401);
+        expect(unauthenticated.body.code).toBe('UNAUTHENTICATED');
+
+        // The member is a cashier this run: `audit.view` is not in the §11.3
+        // preset, and the route's permission check refuses before the handler.
+        const cashier = await harness.http
+          .get(auditPath(organizationId))
+          .set('Authorization', `Bearer ${memberBoundToken}`)
+          .expect(403);
+        expect(cashier.body.code).toBe('PERMISSION_DENIED');
+      });
+
+      it('serves the owner a newest-first page with decimal-string sequences and a working cursor (§32.1)', async () => {
+        const owner = await loginFresh(OWNER_EMAIL);
+        const page: AuditEventWire[] = [];
+        let cursor: string | undefined;
+
+        // One row per page until the stream is exhausted: the keyset cursor
+        // (`cursor` strictly below the last served sequence) must walk the
+        // whole history without skipping or repeating a row.
+        for (;;) {
+          const response = await harness.http
+            .get(auditPath(organizationId))
+            .query({ limit: 1, ...(cursor === undefined ? {} : { cursor }) })
+            .set('Authorization', `Bearer ${owner.accessToken}`)
+            .expect(200);
+          const body = response.body as { events: AuditEventWire[]; nextAfter?: string };
+          page.push(...body.events);
+          if (body.nextAfter === undefined) break;
+          cursor = body.nextAfter;
+        }
+
+        expect(page.length).toBeGreaterThan(0);
+        // Newest first: the per-organization chain positions run downward.
+        const sequences = page.map((row) => Number(row.sequence));
+        let strictlyDecreasing = true;
+        for (let index = 1; index < sequences.length; index += 1) {
+          const previous = sequences[index - 1];
+          const current = sequences[index];
+          if (previous !== undefined && current !== undefined && current >= previous) {
+            strictlyDecreasing = false;
+          }
+        }
+        expect(strictlyDecreasing).toBe(true);
+
+        // Exactly the stored rows came through, each wire-shaped: sequence as
+        // a decimal string (the BIGINT cannot ride JSON numbers), server time
+        // as ISO-8601, and only the closed vocabulary.
+        const stored = await inTenant(
+          app,
+          organizationId,
+          (tx) =>
+            tx.$queryRaw<
+              { n: number }[]
+            >`SELECT count(*)::int AS n FROM audit_events WHERE organization_id = ${organizationId}::uuid`,
+        );
+        expect(page.length).toBe(stored[0]?.n ?? 0);
+        for (const row of page) {
+          expect(row.sequence).toMatch(/^[0-9]+$/);
+          expect(new Date(row.occurredAt).toISOString()).toBe(row.occurredAt);
+          expect((AUDIT_EVENT_TYPES as readonly string[]).includes(row.eventType)).toBe(true);
+        }
+
+        // The §32.2 revocation row is on the wire with its §32.2A facts.
+        const [device] = await inTenant(
+          migrator,
+          organizationId,
+          (tx) => tx.$queryRaw<{ label: string }[]>`SELECT label FROM devices WHERE id = ${deviceDId}::uuid`,
+        );
+        expect(page).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              eventType: 'DEVICE_REVOKED',
+              targetType: 'DEVICE',
+              targetId: deviceDId,
+              documentRef: `device:${deviceDId}`,
+              payload: { label: device?.label },
+            }),
+          ]),
+        );
+      });
+
+      it('serves each tenant only its own history: the route cannot cross the RLS boundary (§8.2)', async () => {
+        const owner = await loginFresh(OWNER_EMAIL);
+        const primaryResponse = await harness.http
+          .get(auditPath(organizationId))
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .expect(200);
+        const primaryRows = (primaryResponse.body as { events: AuditEventWire[] }).events;
+        expect(primaryRows.map((row) => row.targetId)).toContain(deviceDId);
+
+        const foreignResponse = await harness.http
+          .get(auditPath(foreignOrganizationId))
+          .set('Authorization', `Bearer ${foreignToken}`)
+          .expect(200);
+        const foreignRows = (foreignResponse.body as { events: AuditEventWire[] }).events;
+        // No row of the foreign page may be a row of the primary history: the
+        // isolation is the database policy (§8.2), not a WHERE clause.
+        for (const row of foreignRows) {
+          for (const seen of primaryRows) {
+            expect(row.mutationId ?? row.targetId).not.toBe(seen.mutationId ?? seen.targetId);
+            expect(row.actorUserId).not.toBe(seen.actorUserId ?? ownerId);
+          }
+        }
+        expect(foreignRows.map((row) => row.targetId)).not.toContain(deviceDId);
+      });
+
+      it('keeps the §32.3 security history off the wire (owner-only capability, no route)', async () => {
+        const owner = await loginFresh(OWNER_EMAIL);
+        await harness.http
+          .get(`/api/v1/organizations/${organizationId}/audit/security-events`)
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .expect(404);
+      });
     });
   });
 });
