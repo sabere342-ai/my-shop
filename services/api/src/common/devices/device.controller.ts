@@ -56,6 +56,7 @@ export class DeviceController {
   async register(
     @Body() body: RegisterDeviceRequest,
     @OrganizationId() organizationId: string,
+    @VerifiedPrincipal() principal: AuthenticatedPrincipal,
   ): Promise<DeviceResponse> {
     const view = await this.devices.register(
       {
@@ -66,6 +67,9 @@ export class DeviceController {
         ...(body.osVersion === undefined ? {} : { osVersion: body.osVersion }),
         ...(body.appVersion === undefined ? {} : { appVersion: body.appVersion }),
         ...(body.label === undefined ? {} : { label: body.label }),
+        // §32.6 (M2-S6): the durable registration event records the verified
+        // issuer — from the guard's principal, never a body field.
+        actorUserId: principal.userId,
       },
       new Date(),
     );

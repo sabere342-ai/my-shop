@@ -23,7 +23,7 @@
  *    tenant transactions on one pool cannot see each other's tenant.
  *  - **AC-05** — the application role is not a superuser, carries no
  *    `BYPASSRLS`, and cannot disable the policy, drop it, or write a new one.
- *  - **AC-07** — the fresh-install migration history is exactly `0001`–`0008`.
+ *  - **AC-07** — the fresh-install migration history is exactly `0001`–`0011`.
  *  - **AC-08** — an upgrade from the real predecessor state (`0001`–`0007` with
  *    predecessor-shaped rows already committed) applies `0008`, loses nothing,
  *    and is fail-closed from the first statement after it.
@@ -137,8 +137,9 @@ interface MigrationRow {
 /** The §4 classification, pinned as data so a change must be an explicit edit here. */
 const TENANT_ROOT_TABLE = 'organizations';
 
-/** The nine tenant tables whose isolation column is their `organization_id`. */
+/** The ten tenant tables whose isolation column is their `organization_id`. */
 const TENANT_ORG_TABLES: readonly string[] = [
+  'audit_events',
   'change_log',
   'device_sync_cursors',
   'devices',
@@ -149,6 +150,24 @@ const TENANT_ORG_TABLES: readonly string[] = [
   'roles',
   'sync_sequences',
 ];
+
+/**
+ * The §32.5 append-only class: the history tables whose event rows are
+ * INSERT+SELECT only — the application role holds no UPDATE and no DELETE at
+ * all, so tampering is refused by privilege before RLS is ever consulted. The
+ * negative probes for UPDATE/DELETE therefore authorize a 42501 from either
+ * mechanism.
+ */
+const APPEND_ONLY_TABLES: readonly string[] = ['audit_events'];
+
+/**
+ * The 0010 scoped-RLS class (§32 tables): `security_events`' two verified
+ * partitions (tenant + the deliberate GLOBAL one) and the allocation anchor
+ * `audit_stream_heads`, whose policies admit the documented nil scope instead
+ * of refusing it. Their protection shape is asserted separately from the
+ * plain `tenant_isolation` tables above.
+ */
+const SCOPED_RLS_TABLES: readonly string[] = ['security_events', 'audit_stream_heads'];
 
 const TENANT_TABLES: readonly string[] = [TENANT_ROOT_TABLE, ...TENANT_ORG_TABLES];
 
@@ -190,6 +209,14 @@ const SEEDED_PAYLOAD_HASH = 'a'.repeat(64);
  * transaction's trusted context names tenant A. PostgreSQL must answer `42501`.
  */
 const CROSS_TENANT_INSERT: ReadonlyMap<string, { sql: string; params: readonly unknown[] }> = new Map([
+  [
+    'audit_events',
+    {
+      sql: `INSERT INTO audit_events (organization_id, sequence, occurred_at, event_type, actor_kind, actor_device_id, prev_event_hash, event_hash)
+              VALUES ($1::uuid, 99, now(), 'DEVICE_REVOKED', 'DEVICE', $2::uuid, $3, $3)`,
+      params: [ORG_B, DEVICE_ID, 'f'.repeat(64)],
+    },
+  ],
   [
     'change_log',
     {
@@ -267,6 +294,16 @@ const CROSS_TENANT_INSERT: ReadonlyMap<string, { sql: string; params: readonly u
  */
 const CROSS_TENANT_MOVE: ReadonlyMap<string, { sql: string; params: readonly unknown[] }> = new Map([
   [
+    'audit_events',
+    {
+      // The append-only state of §32.5 means this refusal may come from the
+      // missing UPDATE privilege before the WITH CHECK is ever consulted;
+      // both intersect at SQLSTATE 42501 like every other denial.
+      sql: `UPDATE audit_events SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
+      params: [ORG_B, ORG_A],
+    },
+  ],
+  [
     'change_log',
     {
       sql: `UPDATE change_log SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
@@ -339,7 +376,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
     urls = requireTestUrls();
 
     // Drop + create from empty, provision roles, and deploy the full
-    // `0001`–`0009` history: the fresh-install precondition (AC-07).
+    // `0001`–`0011` history: the fresh-install precondition (AC-07).
     dbScript('test-setup');
     setupRan = true;
 
@@ -522,6 +559,18 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
         `INSERT INTO sync_sequences (organization_id, last_sequence) VALUES ($1::uuid, 7)`,
         ORG_A,
       );
+      await tx.$executeRawUnsafe(
+        // The §32.2A audit seed: one real tenant-A event row, so the
+        // ownership-move probe against `audit_events` matches a row the RLS
+        // then must refuse to move — a zero-row UPDATE proves nothing about
+        // any WITH CHECK, exactly as the `devices` probe above argues.
+        `INSERT INTO audit_events (organization_id, sequence, occurred_at, event_type, actor_kind, actor_user_id, mutation_id, prev_event_hash, event_hash)
+           VALUES ($1::uuid, 1, now(), 'SYNC_MUTATION_ACCEPTED', 'USER', $2::uuid, $3::uuid, $4, $4)`,
+        ORG_A,
+        USER_ID,
+        MUTATION_ID,
+        SEEDED_PAYLOAD_HASH,
+      );
     });
 
     // The decision D-A fixture needs a second membership edge of the same
@@ -600,6 +649,45 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
       );
       expect(countOf(policies)).toBe(0);
     });
+
+    it('the §32 audit-stream tables carry their 0010 scoped policies — forced, exactly one each', async () => {
+      // The M2-S6 class: `security_events` (tenant + deliberate GLOBAL
+      // partitions) and `audit_stream_heads` (the allocation anchor whose
+      // policies admit the documented nil sentinel scope). Same ENABLE +
+      // FORCE as every tenant table, one policy per table, fixed name, ALL.
+      const rows = await migrator.$queryRawUnsafe<ClassifiedRow[]>(
+        `SELECT c.relname AS tablename, c.relrowsecurity AS row_security, c.relforcerowsecurity AS forced
+           FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname IN (${tableList(SCOPED_RLS_TABLES)})
+          ORDER BY c.relname`,
+      );
+
+      expect(rows.map((row) => row.tablename)).toEqual([...SCOPED_RLS_TABLES].sort());
+      for (const row of rows) {
+        expect({ table: row.tablename, row_security: row.row_security, forced: row.forced }).toEqual({
+          table: row.tablename,
+          row_security: true,
+          forced: true,
+        });
+      }
+
+      const policies = await migrator.$queryRawUnsafe<{ tablename: string; n: number }[]>(
+        `SELECT tablename, count(*)::int AS n FROM pg_policies
+          WHERE schemaname = 'public' AND tablename IN (${tableList(SCOPED_RLS_TABLES)})
+            AND policyname = 'scope_isolation' AND cmd = 'ALL'
+          GROUP BY tablename`,
+      );
+      expect(policies).toHaveLength(SCOPED_RLS_TABLES.length);
+      for (const policy of policies) {
+        expect(policy.n).toBe(1);
+      }
+      const extra = await migrator.$queryRawUnsafe<CountRow[]>(
+        `SELECT count(*)::int AS n FROM pg_policies
+          WHERE schemaname = 'public' AND tablename IN (${tableList(SCOPED_RLS_TABLES)}) AND policyname <> 'scope_isolation'`,
+      );
+      expect(countOf(extra)).toBe(0);
+    });
   });
 
   describe('AC-02: the future-table inventory gate is machine-enforced', () => {
@@ -626,7 +714,13 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
     it('the audit query sees every organization_id table, and each of them is forced-RLS protected', async () => {
       const rows = await tenantColumnAudit();
 
-      expect(rows.map((row) => row.tablename)).toEqual([...TENANT_ORG_TABLES].sort());
+      // The audit query keys on the *column name*, so it also finds
+      // `security_events` — the §32 table whose organization_id is present on
+      // tenant rows and NULL on the deliberate GLOBAL partition. Its policy
+      // admits the nil scope instead of forbidding it (the scoped-RLS class
+      // below), but the ENABLE + FORCE posture is the identical fail-closed
+      // base: no context can write a tenant row into it.
+      expect(rows.map((row) => row.tablename)).toEqual([...TENANT_ORG_TABLES, 'security_events'].sort());
       for (const row of rows) {
         expect({ table: row.tablename, row_security: row.row_security, forced: row.forced }).toEqual({
           table: row.tablename,
@@ -726,11 +820,21 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
 
     it('a foreign tenant context deletes nothing of tenant A in any tenant table', async () => {
       for (const table of TENANT_ORG_TABLES) {
-        const deleted = await app.$transaction(async (tx) => {
-          await establishTenantContext(tx, ORG_B);
-          return tx.$executeRawUnsafe(`DELETE FROM ${table} WHERE organization_id = $1::uuid`, ORG_A);
-        });
-        expect(deleted).toBe(0);
+        const outcome = await app
+          .$transaction(async (tx) => {
+            await establishTenantContext(tx, ORG_B);
+            return tx.$executeRawUnsafe(`DELETE FROM ${table} WHERE organization_id = $1::uuid`, ORG_A);
+          })
+          .catch((caught: unknown) => caught);
+        // The §32.5 append-only history has no DELETE privilege for the
+        // application role at all: the refusal is 42501 before RLS is ever
+        // consulted. Every other table answers with a zero-row delete.
+        if (APPEND_ONLY_TABLES.includes(table)) {
+          expect(outcome).toBeInstanceOf(Error);
+          expect(sqlStateOf(outcome)).toBe('42501');
+        } else {
+          expect(outcome).toBe(0);
+        }
       }
 
       // And the root again: tenant B's scope removes no tenant A row, by id.
@@ -991,8 +1095,8 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
     });
   });
 
-  describe('AC-07: the fresh install applied exactly the nine-path history', () => {
-    it('records exactly 0001 through 0009, every one finished and never rolled back', async () => {
+  describe('AC-07: the fresh install applied exactly the eleven-path history', () => {
+    it('records exactly 0001 through 0011, every one finished and never rolled back', async () => {
       const rows = await migrator.$queryRawUnsafe<MigrationRow[]>(
         `SELECT migration_name FROM _prisma_migrations ORDER BY migration_name`,
       );
@@ -1007,6 +1111,8 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
         '0007_authorization_roles',
         '0008_tenant_row_level_security',
         '0009_device_binding',
+        '0010_audit_streams',
+        '0011_audit_stream_head_grant',
       ]);
     });
   });

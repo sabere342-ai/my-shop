@@ -34,6 +34,8 @@ import { AuthorizationModule } from '../../authorization/authorization.module';
 import { AuthorizationService } from '../../tenancy/authorization/authorization.service';
 import { DeviceModule, DEVICE_SYNC_AUTHENTICATOR } from '../../devices/device.module';
 import { DeviceService } from '../../devices/device.service';
+import { IdentityModule, SECURITY_EVENT_SINK } from '../../identity/identity.module';
+import type { SecurityEventSink } from '../../identity/security-event.sink';
 import { LedgerModule } from '../ledger/mutation-ledger.module';
 import { MutationLedgerService } from '../ledger/mutation-ledger.service';
 import { SYNC_AUTHENTICATOR } from './sync-auth';
@@ -64,6 +66,11 @@ export class PushModule {
         // `IdentityModule`/`DatabaseModule.forRoot(config)` graph, deduplicated
         // by the NestJS module system like every other composition here.
         AuthorizationModule.forRoot(config),
+        // M2-S6 (§32.3): the identity module's `SECURITY_EVENT_SINK` port is
+        // imported (deduped with the graph above) so the push service's §38.16
+        // identity refusals become durable `security_events` rows at the same
+        // call sites that already emitted the structured log lines.
+        IdentityModule.forRoot(config),
         // §12.4 (M2-S5): the push boundary is a device capability. The devices
         // module exports the production `DeviceBoundSyncAuthenticator` and the
         // `DeviceService` that records the §12.5 sync metadata; the same
@@ -101,14 +108,22 @@ export class PushModule {
         SyncAuthGuard,
         {
           provide: SyncPushService,
-          inject: [MutationLedgerService, SYNC_MUTATION_APPLIER, SYNC_INGRESS_REVALIDATOR, APP_LOGGER, DeviceService],
+          inject: [
+            MutationLedgerService,
+            SYNC_MUTATION_APPLIER,
+            SYNC_INGRESS_REVALIDATOR,
+            APP_LOGGER,
+            DeviceService,
+            SECURITY_EVENT_SINK,
+          ],
           useFactory: (
             ledger: MutationLedgerService,
             applier: SyncMutationApplier,
             ingressRevalidator: SyncIngressRevalidator,
             logger: PinoLogger,
             devices: DeviceService,
-          ) => new SyncPushService(ledger, applier, ingressRevalidator, logger, devices),
+            securitySink: SecurityEventSink,
+          ) => new SyncPushService(ledger, applier, ingressRevalidator, logger, devices, securitySink),
         },
       ],
       exports: [SyncPushService],

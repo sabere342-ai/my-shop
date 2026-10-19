@@ -150,7 +150,25 @@ export class AuthService {
   async login(input: LoginInput, now: Date = new Date()): Promise<TokenResponse> {
     const email = canonicalOrNull(input.email);
     const keys = this.throttleKeys(email, input.clientAddress);
-    await this.options.throttle.assertNotBlocked(keys, now);
+    // §32.3 (M2-S6): a throttled-block refusal is itself a security fact — it
+    // names no verified identity (the caller never authenticated), so it is
+    // recorded into the GLOBAL security partition as an UNVERIFIED attempt
+    // whose claimed e-mail — when it was a mailbox shape — is labelled, and
+    // the refusal shape is unchanged.
+    try {
+      await this.options.throttle.assertNotBlocked(keys, now);
+    } catch (error) {
+      if (error instanceof DomainError && error.code === ERROR_CODES.RATE_LIMITED) {
+        this.options.sink.record({
+          type: 'LOGIN_THROTTLED',
+          actorKind: 'UNVERIFIED',
+          errorCode: ERROR_CODES.RATE_LIMITED,
+          ...(email === null ? {} : { claimedEmail: email }),
+          ...(input.clientAddress === undefined ? {} : { clientAddress: input.clientAddress }),
+        });
+      }
+      throw error;
+    }
 
     const account =
       email === null
@@ -172,6 +190,11 @@ export class AuthService {
       await this.options.throttle.recordFailure(keys, now);
       this.options.sink.record({
         type: 'LOGIN_FAILED',
+        // M2-S6 (§32.6): no identity was verified. The attempt names no
+        // account, so the claimed e-mail — when it was a mailbox shape — is
+        // the labelled claim, and the event is UNVERIFIED.
+        actorKind: 'UNVERIFIED',
+        ...(email === null ? {} : { claimedEmail: email }),
         errorCode: ERROR_CODES.UNAUTHENTICATED,
         ...(input.clientAddress === undefined ? {} : { clientAddress: input.clientAddress }),
       });
@@ -183,7 +206,12 @@ export class AuthService {
       await this.options.throttle.recordFailure(keys, now);
       this.options.sink.record({
         type: 'LOGIN_FAILED',
+        // The account exists; the attempt failed. §32.6: that is an
+        // UNVERIFIED attempt aimed at the account — recorded as a labelled
+        // claim, never as a verified principal.
+        actorKind: 'UNVERIFIED',
         userId: account.id,
+        ...(email === null ? {} : { claimedEmail: email }),
         errorCode: ERROR_CODES.UNAUTHENTICATED,
         ...(input.clientAddress === undefined ? {} : { clientAddress: input.clientAddress }),
       });
@@ -355,8 +383,13 @@ export class AuthService {
         this.options.sink.record({ type: 'REFRESH_ROTATED', userId: outcome.userId });
         return outcome.tokens;
       case 'reuse':
+        // The *caller* was never authenticated — the replayed token may be a
+        // stolen copy or a buggy retry — so the event is an UNVERIFIED attempt
+        // aimed at the affected account (§32.6), while its family revocation
+        // was a committed class-A fact of the refresh transaction.
         this.options.sink.record({
           type: 'REFRESH_REUSE_DETECTED',
+          actorKind: 'UNVERIFIED',
           userId: outcome.userId,
           errorCode: ERROR_CODES.UNAUTHENTICATED,
         });

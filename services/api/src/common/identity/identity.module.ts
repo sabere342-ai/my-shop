@@ -15,9 +15,11 @@
  * - the access-token port is RS256 when key material is configured and fail-closed
  *   otherwise (`createAccessTokenService`);
  * - the throttle store is the `auth_throttles` table through Prisma;
- * - the security-event sink is the logging implementation, because §32 places the
- *   durable tables in M2-S6. Swapping that one binding is the whole of the change
- *   M2-S6 will need here.
+ * - the security-event sink is the M2-S6 durable implementation
+ *   (`DurableSecurityEventSink`): it persists to `security_events` with the
+ *   documented class-B failure policy and keeps emitting the redacted line.
+ *   The `LoggingSecurityEventSink` stays exported as a redaction reference and
+ *   a unit-test stand-in.
  *
  * `AuthService` is exported so a later slice (M2-S3 authorization, M2-S5 device
  * enrolment) reuses this identity context rather than rebuilding one — the §39.3
@@ -35,7 +37,8 @@ import { AuthController } from './auth.controller';
 import { AuthService, createAuthService } from './auth.service';
 import { AuthThrottle, PrismaAuthThrottleStore, type ThrottlePolicy } from './auth-throttle';
 import { JwtAuthGuard } from './jwt-auth.guard';
-import { LoggingSecurityEventSink } from './security-event.sink';
+import { DurableSecurityEventSink } from '../audit/durable-security-event-sink';
+import type { SecurityEventSink } from './security-event.sink';
 
 /** Injection token for the access-token port. */
 export const ACCESS_TOKEN_SERVICE = Symbol('ACCESS_TOKEN_SERVICE');
@@ -73,9 +76,15 @@ export class IdentityModule {
             new AuthThrottle(new PrismaAuthThrottleStore(prisma), throttlePolicy(identity)),
         },
         {
+          // M2-S6: the production binding is now the durable sink, which
+          // persists the event inside its own class-B transaction (tenant
+          // transaction when the event names a verified organization, the
+          // documented GLOBAL partition otherwise) and always emits the same
+          // allow-listed log line. Construction needs the Prisma host and the
+          // redaction logger — the same logger the port's line always used.
           provide: SECURITY_EVENT_SINK,
-          inject: [APP_LOGGER],
-          useFactory: (logger: PinoLogger) => new LoggingSecurityEventSink(logger),
+          inject: [PrismaService, APP_LOGGER],
+          useFactory: (prisma: PrismaService, logger: PinoLogger) => new DurableSecurityEventSink(prisma, logger),
         },
         {
           provide: AuthService,
@@ -84,7 +93,7 @@ export class IdentityModule {
             prisma: PrismaService,
             accessToken: ReturnType<typeof createAccessTokenService>,
             throttle: AuthThrottle,
-            sink: LoggingSecurityEventSink,
+            sink: SecurityEventSink,
           ) => createAuthService(prisma, identity, { accessToken, throttle, sink }),
         },
         JwtAuthGuard,

@@ -22,9 +22,18 @@
 
 import type { Prisma, PrismaClient } from '@prisma/client';
 import type { Logger as PinoLogger } from 'pino';
+import { ERROR_CODES } from '../../errors/problem';
 import { withTenantTransaction, type ContextClient } from '../../database/tenant-context';
 import { payloadHashOf } from './payload-hash';
 import { MutationContradictionError, MutationRejectedError } from './mutation-ledger.errors';
+import type { AuditStreamWriter } from '../../audit/audit-stream-writer';
+import type { DurableAuditRecorder } from '../../audit/durable-security-event-sink';
+import {
+  type AuditActor,
+  type AuditEventInput,
+  type AuditEventType,
+  type SyncRejectionClassification,
+} from '../../audit/stream.contract';
 
 /**
  * The database surface the ledger needs: a client that can open interactive
@@ -66,6 +75,14 @@ export interface ApplyMutationRequest {
   readonly deviceId: string;
   /** The complete immutable business event (§38.8.1 `payload`, §38.24). */
   readonly payload: Record<string, unknown>;
+  /**
+   * M2-S6 (§32.6, §32.2A): the **verified** actor of the push path, from the
+   * sync trusted context — never the mutation's asserted `actorUserId`,
+   * which is an offline claim the ledger deliberately never inspects. It
+   * attributes the audit rows only; the ledger's own invariants are
+   * unaffected. A caller without one records the rows as device-attributed.
+   */
+  readonly verifiedActorUserId?: string;
   /**
    * The business effect, executed inside the ledger's transaction with access to
    * the same transaction client. Its work, the ledger row, and the change-log
@@ -168,10 +185,26 @@ function toBigInt(value: unknown): bigint {
   throw new Error('the server-sequence allocation returned a non-integer value');
 }
 
+/** The stored rejection answer when a malformed ledger row lacks its code. */
+const UNKNOWN_REJECTION = 'UNKNOWN';
+
 export class MutationLedgerService {
   constructor(
     private readonly host: PrismaHost,
     private readonly logger?: PinoLogger,
+    /**
+     * M2-S6 (§32.5, §32.2A): the transactional audit writer for the class-A
+     * rows — accepted, rejected, and retry events commit with the ledger
+     * facts they describe. Production wiring always supplies it.
+     */
+    private readonly audit?: AuditStreamWriter,
+    /**
+     * M2-S6 (§32.2A): the durable class-B recorder for the rows that follow a
+     * *refused* ledger frame — the §38.9.2 idempotency contradiction, whose
+     * audit row and security event must survive the transaction the alarm
+     * aborts. Production wiring always supplies it.
+     */
+    private readonly durableAudit?: DurableAuditRecorder,
   ) {}
 
   /**
@@ -208,11 +241,10 @@ export class MutationLedgerService {
       });
 
       if (existing !== null) {
-        return this.replay(existing, receivedPayloadHash, request);
+        return this.replay(tx, existing, receivedPayloadHash, request);
       }
 
       const receivedAt = new Date();
-
       // §9.4 T-8/T-9 (M2-S4): the §9.4 re-validation runs here — after the
       // idempotency lookup (a stored answer is replayed without a second
       // authorization) and before the effect — inside the same transaction, so
@@ -224,7 +256,10 @@ export class MutationLedgerService {
           await validateIngress(tx);
         } catch (error) {
           if (error instanceof MutationRejectedError) {
-            return this.recordRejection(tx, request, receivedPayloadHash, receivedAt, error.code);
+            // §32.2A: an ingress refusal is the authorization class — the
+            // highest-severity offline family — recorded in the same
+            // transaction as the REJECTED ledger row itself (class A).
+            return this.recordRejection(tx, request, receivedPayloadHash, receivedAt, error.code, 'INGRESS');
           }
           throw error;
         }
@@ -237,7 +272,7 @@ export class MutationLedgerService {
         effect = await request.apply(tx);
       } catch (error) {
         if (error instanceof MutationRejectedError) {
-          return this.recordRejection(tx, request, receivedPayloadHash, receivedAt, error.code);
+          return this.recordRejection(tx, request, receivedPayloadHash, receivedAt, error.code, 'BUSINESS');
         }
         throw error;
       }
@@ -272,6 +307,24 @@ export class MutationLedgerService {
       });
 
       await this.advancePushCursor(tx, request, serverSequence);
+
+      // M2-S6 (§32.2A "Sync accepted": mutation id, device, server time, result
+      // reference, server sequence): the canonical acceptance row — one per
+      // mutation, ever, enforced by the partial unique index beside this
+      // service's replay discipline — commits with the acceptance facts. The
+      // row carries the mutation id: the acceptance's own identity, and what
+      // the database's `uq_audit_events_accepted_per_mutation` law keys on.
+      // A replayed push never re-enters this path: its answer comes from the
+      // stored record above, so no second acceptance row can pretend the same
+      // mutation was accepted twice. The failed append rolls the acceptance
+      // itself back (class A: an unaudited acceptance is not an acceptance).
+      await this.appendMutationAuditEvent(tx, request, 'SYNC_MUTATION_ACCEPTED', {
+        occurredAt: receivedAt,
+        mutationId: request.mutationId,
+        targetType: effect.entityType,
+        targetId: effect.entityId,
+        payload: { resultRef: effect.resultRef, serverSequence: serverSequence.toString() },
+      });
 
       return {
         status: 'APPLIED',
@@ -372,8 +425,20 @@ export class MutationLedgerService {
     return toBigInt(value) + 1n;
   }
 
-  /** §38.9.2: one stored row, two answers — replay or contradiction. */
-  private replay(existing: LedgerRow, receivedPayloadHash: string, request: ApplyMutationRequest): MutationOutcome {
+  /**
+   * §38.9.2: one stored row, two answers — replay or contradiction.
+   *
+   * The first classification is answered from the record alone; a rejection
+   * replay appends one §32.2A `SYNC_MUTATION_RETRY` row (class A) whose payload
+   * carries the attempt number (one past the prior retry count — the §32.2A
+   * "attempt number" fact) and the stored rejection code.
+   */
+  private async replay(
+    tx: Prisma.TransactionClient,
+    existing: LedgerRow,
+    receivedPayloadHash: string,
+    request: ApplyMutationRequest,
+  ): Promise<MutationOutcome> {
     if (existing.payloadHash !== receivedPayloadHash) {
       this.logger?.warn(
         {
@@ -386,6 +451,34 @@ export class MutationLedgerService {
         },
         'mutation_id reused with a different payload_hash — 409 MUTATION_CONTRADICTION, owner review required',
       );
+      // §32.2A "Sync rejected — idempotency contradiction" + §32.3/§38.27: the
+      // contradiction is the one history this throw's own transaction cannot
+      // carry — the journal rolls back with the alarm. Both durable rows are
+      // therefore class B: the recorder opens its own short transaction (the
+      // tenant scope is the request's verified one) and never throws into this
+      // decision. A persistence failure leaves the structured warn line above
+      // as the record — never the mislabeled silence of a lost fact.
+      this.durableAudit?.recordTenantAuditEvent({
+        eventType: 'SYNC_MUTATION_CONTRADICTION',
+        organizationId: request.organizationId,
+        actor: this.mutationActor(request),
+        occurredAt: new Date(),
+        mutationId: request.mutationId,
+        payload: { storedPayloadHash: existing.payloadHash, replayedPayloadHash: receivedPayloadHash },
+      });
+      this.durableAudit?.recordSecurityEvent({
+        eventType: 'SYNC_MUTATION_CONTRADICTION',
+        organizationId: request.organizationId,
+        actor: this.mutationActor(request),
+        occurredAt: new Date(),
+        deviceId: request.deviceId,
+        reasonCode: ERROR_CODES.MUTATION_CONTRADICTION,
+        payload: {
+          mutationId: request.mutationId,
+          storedPayloadHash: existing.payloadHash,
+          replayedPayloadHash: receivedPayloadHash,
+        },
+      });
       throw new MutationContradictionError(
         request.organizationId,
         request.mutationId,
@@ -396,13 +489,29 @@ export class MutationLedgerService {
 
     // Replay of a stored rejection is answered from the stored record and
     // applies nothing (§38.13: a permanent rejection is never silently dropped,
-    // and never accidentally revived).
+    // and never accidentally revived). The retry the caller just made is a
+    // server-observed fact of the §32.2A vocabulary — recorded class A: this
+    // read-answer frame is live and the row it appends commits with it.
     if (existing.status === 'REJECTED') {
+      const priorRetries = await tx.auditEvent.count({
+        where: {
+          organizationId: request.organizationId,
+          mutationId: request.mutationId,
+          eventType: 'SYNC_MUTATION_RETRY',
+        },
+      });
+      await this.appendMutationAuditEvent(tx, request, 'SYNC_MUTATION_RETRY', {
+        occurredAt: new Date(),
+        mutationId: request.mutationId,
+        targetType: 'MUTATION',
+        targetId: request.mutationId,
+        payload: { attemptNumber: priorRetries + 1, rejectionCode: existing.rejectionCode ?? UNKNOWN_REJECTION },
+      });
       return {
         status: 'REJECTED',
         isReplay: true,
         mutationId: request.mutationId,
-        rejectionCode: existing.rejectionCode ?? 'UNKNOWN',
+        rejectionCode: existing.rejectionCode ?? UNKNOWN_REJECTION,
         receivedAt: existing.receivedAt,
       };
     }
@@ -416,6 +525,13 @@ export class MutationLedgerService {
       throw new Error('mutation_ledger row with status APPLIED lacks its result or sequence');
     }
 
+    // An applied-mutation replay (§38.9.3: the normal offline redelivery — a
+    // lost answer, a double tap, a network retry) is deliberately NOT re-audit-
+    // ed: the §32.2A event vocabulary has no replay event, the canonical
+    // ACCEPTED row is unique per mutation by database law, and re-auditing a
+    // normal replay would manufacture a tamper-detection ambiguity (rows
+    // arriving outside the chain's per-scope order for no decision). The
+    // redelivered answer comes from the stored record.
     return {
       status: 'APPLIED',
       isReplay: true,
@@ -434,6 +550,7 @@ export class MutationLedgerService {
     payloadHash: string,
     receivedAt: Date,
     rejectionCode: string,
+    classification: SyncRejectionClassification,
   ): Promise<MutationRejectedOutcome> {
     await tx.mutationLedger.create({
       data: {
@@ -446,6 +563,19 @@ export class MutationLedgerService {
         rejectionCode,
       },
     });
+    // M2-S6 (§32.2A "Sync rejected — business/authorization"): the durable
+    // refusal row commits **inside this same transaction** (class A) — the
+    // stored REJECTED ledger row and the audit row that explains it are one
+    // committed fact pair. `classification` is the §32.2A discriminator: the
+    // re-validator's INGRESS refusal is the highest-severity offline family;
+    // everything the business effect refused is BUSINESS.
+    await this.appendMutationAuditEvent(tx, request, 'SYNC_MUTATION_REJECTED', {
+      occurredAt: receivedAt,
+      mutationId: request.mutationId,
+      targetType: 'MUTATION',
+      targetId: request.mutationId,
+      payload: { classification, rejectionCode },
+    });
     return {
       status: 'REJECTED',
       isReplay: false,
@@ -453,6 +583,43 @@ export class MutationLedgerService {
       rejectionCode,
       receivedAt,
     };
+  }
+
+  /**
+   * §32.6 / §32.2A: one audit actor for the ledger's rows, copied from the
+   * ledger's own facts — the push trusted context's verified actor when the
+   * caller supplied one, the mutation's producing device otherwise. Never
+   * "nobody", and never the mutation payload's *asserted* `actorUserId`, which
+   * is an offline claim the ledger never inspects (§38.17's discipline: the
+   * ledger's invariants are unaffected; this is attribution only).
+   */
+  private mutationActor(request: ApplyMutationRequest): AuditActor {
+    return request.verifiedActorUserId === undefined
+      ? { kind: 'DEVICE', deviceId: request.deviceId }
+      : { kind: 'USER', userId: request.verifiedActorUserId, deviceId: request.deviceId };
+  }
+
+  /**
+   * The §32.2A append helper: one class-A row of the closed audit vocabulary
+   * inside the caller's (always tenant-scoped) ledger transaction. Append-only
+   * by construction — the writer is told nothing but the event; failures roll
+   * the whole protected frame back. Without a writer (narrow unit wiring), the
+   * unchanged ledger contract keeps its earlier M1b behaviour.
+   */
+  private appendMutationAuditEvent(
+    tx: Prisma.TransactionClient,
+    request: ApplyMutationRequest,
+    eventType: AuditEventType,
+    event: Omit<AuditEventInput, 'eventType' | 'organizationId' | 'actor'>,
+  ): Promise<void> {
+    return Promise.resolve(
+      this.audit?.appendAuditEvent(tx, {
+        eventType,
+        organizationId: request.organizationId,
+        actor: this.mutationActor(request),
+        ...event,
+      }),
+    );
   }
 
   /**

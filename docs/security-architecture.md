@@ -1,11 +1,11 @@
-# Security architecture — database-enforced tenancy, ingress re-validation, device binding
+# Security architecture — database-enforced tenancy, ingress re-validation, device binding, audit streams
 
 This document describes My Shop's security posture after slices M2-S4 (tenancy
-and ingress re-validation) and M2-S5 (device binding):
-defense in depth ends at the database predicate, not at an authorization
-guard. The Master Plan (§8, §9.3, §9.4, §12) is the authority; this page explains
-how the code composes it. The table-level inventory lives in
-[`docs/rls-inventory.md`](rls-inventory.md).
+and ingress re-validation), M2-S5 (device binding), and M2-S6 (durable audit
+streams): defense in depth ends at the database predicate, not at an
+authorization guard. The Master Plan (§8, §9.3, §9.4, §12, §32) is the
+authority; this page explains how the code composes it. The table-level
+inventory lives in [`docs/rls-inventory.md`](rls-inventory.md).
 
 ## The three enforcement layers
 
@@ -127,6 +127,61 @@ REVOKED installation (§12.2's closed two-state vocabulary): re-installation
 enrolls a *new* installation id, leaving the old identity and its quarantined
 history intact (§12.5).
 
+## The durable audit streams (§32, slice M2-S6)
+
+Two append-only histories, both written by the same allocation law and
+verifiable against the database's own bytes (§32.5):
+
+- **`audit_events` — the business history.** What happened to the business:
+  sync mutation accepted/rejected/contradicted/retried, device revoked. Reads
+  from one tenant route (`/audit/events`, `audit.view`), newest first,
+  cursor-paged on the chain position; isolation is a database predicate, not a
+  service filter.
+- **`security_events` — the security history.** Who tried to get in, and did
+  we stop them: login outcomes, throttling, refresh reuse, token refusals,
+  registration/refusal/revocation, sync identity mismatch and mutation
+  contradiction. Two verified partitions: tenant rows (organization is a
+  server fact) and the deliberate GLOBAL partition for pre-authentication
+  attempts, which carry labelled *claims* (`actor_kind = UNVERIFIED`) and
+  never a fabricated tenant id. Owner-only service capability — there is no
+  HTTP route for this stream.
+
+Four properties make tampering detectable:
+
+1. **Privilege before policy.** Migrations 0010/0011 leave `my_shop_app` with
+   INSERT + SELECT on both event tables and no UPDATE and no DELETE at
+   PostgreSQL's own resolution; the acceptance probes refuse UPDATE, DELETE,
+   and truncation by SQLSTATE. The allocation anchor `audit_stream_heads`
+   keeps exactly one bounded privilege — its head-row UPDATE — because that
+   advance *is* the second half of every append (migration 0011's rationale
+   en clair); it holds no DELETE.
+2. **Gapless committed chains.** Per `(stream, scope)`: a transaction advisory
+   lock serializes allocation, the head row stores the last *committed*
+   sequence and hash in one transaction with the insert, so a rolled-back
+   append leaves no gap, and concurrent writers collide on the unique indexes
+   rather than double-allocating.
+3. **A hash chain per row.** `prev_event_hash` → `event_hash` (SHA-256 over
+   the canonical whole-row serialization); row N links to row N-1.
+4. **A read-only verifier.** `audit-integrity.ts` only ever reads: it names
+   `SEQUENCE_BREAK`, `HASH_MISMATCH`, `CHAIN_BREAK`, and `HEAD_DISAGREEMENT`
+   defects per scope; the acceptance suite manufactures each under a
+   superuser connection and watches it be named.
+
+Attribution (§32.6) has no NULL-means-nobody: every row carries an explicit
+`actor_kind` — USER (a verified principal), DEVICE (a server-resolved device,
+e.g. sync rows carry the ledger's device id, never the transport's),
+SYSTEM (a documented principal string), or UNVERIFIED (pre-authentication
+attempt: the attempted e-mail and claimed ids are labels, never facts).
+Payloads are allow-listed shapes per event type; credentials and secrets are
+structurally inadmissible, and the redaction acceptance tests pin that.
+
+**Honest boundary:** the hash is application-computed. A *superuser* or
+table-owner principal can rewrite a row and recompute a whole chain. §32.5's
+guarantee is delivered exactly as written — tampering by every principal the
+database lawfully constrains is detected and named; the boundary is tested,
+not assumed (the application role and any non-superuser principal cannot
+UPDATE or DELETE a committed row).
+
 ## Honest boundaries of this slice
 
 - **The sync boundary admits bound and active devices only.** The
@@ -139,8 +194,11 @@ history intact (§12.5).
   member arrives with future slices; until then a stale actor whose
   organization is intact keeps its recorded membership. Tokens still expire,
   and `permissions_version` still freezes stale access tokens on change.
-- **No durable security-event stream exists yet.** §42.28's machinery arrives in
-  M2-S6; this slice records rejections in the ledger only.
+- **Durable security-event stream (M2-S6).** The M2-S2 port finally has its
+  durable sink: every refusal, rotation, partial-failure, and device-fact is
+  an append-only `security_events` row (tenant partition or the documented
+  GLOBAL partition) rather than a log-line-only fact — see the audit-streams
+  section below.
 - **Accounting/inventory business effects.** The applier remains the
   fail-closed default; real effects arrive with M4/M5 modules.
 
@@ -154,3 +212,5 @@ history intact (§12.5).
   Upgrades from `0001`–`0007` keep every pre-existing row byte-identical with
   RLS in force (AC-08 proof); `0009` adds the `devices` table and the
   `sessions.device_id` binding column on top of that posture (M2-S5 AC proof).
+  M2-S6's `0010`/`0011` are additive too: three new tables, their forced
+  policies, and the §32.5 grant rescope of `my_shop_app` on those tables only.

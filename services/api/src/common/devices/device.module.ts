@@ -29,6 +29,7 @@ import { PrismaService } from '../database/prisma.service';
 import { DeviceController } from './device.controller';
 import { DeviceService } from './device.service';
 import { DeviceBoundSyncAuthenticator } from './device-sync-authenticator';
+import { AuditStreamWriter } from '../audit/audit-stream-writer';
 
 /** Injection token for the production device-bound sync authenticator. */
 export const DEVICE_SYNC_AUTHENTICATOR = Symbol('DEVICE_SYNC_AUTHENTICATOR');
@@ -59,7 +60,10 @@ export class DeviceModule {
           provide: DeviceService,
           inject: [PrismaService, SECURITY_EVENT_SINK, APP_LOGGER],
           useFactory: (host: PrismaService, sink: SecurityEventSink, logger: ReturnType<typeof createAppLogger>) =>
-            new DeviceService(host, sink, logger),
+            // M2-S6: the transactional audit writer rides with the service —
+            // the class-A rows of registration and revocation commit inside
+            // the caller's transaction (§32.5). The writer holds no state.
+            new DeviceService(host, sink, logger, new AuditStreamWriter()),
         },
         {
           provide: DEVICE_SYNC_AUTHENTICATOR,

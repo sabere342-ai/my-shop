@@ -38,6 +38,7 @@ import { withTenantTransaction } from '../database/tenant-context';
 import type { SecurityEventSink } from '../identity/security-event.sink';
 import type { PrismaHost } from '../identity/prisma-host';
 import { deviceSecretMatches, hashDeviceSecret } from './device-secret';
+import type { AuditStreamWriter } from '../audit/audit-stream-writer';
 import { type DevicePlatform } from './device.contract';
 
 /**
@@ -61,6 +62,12 @@ export interface RegisterDeviceInput {
   readonly appVersion?: string;
   readonly label?: string;
   readonly clientAddress?: string;
+  /**
+   * M2-S6 (§32.6): the verified principal performing the registration,
+   * supplied by the route from the bearer guard — never a body field. The
+   * durable registration event names this actor.
+   */
+  readonly actorUserId?: string;
 }
 
 /** The sync metadata a completed batch or page records (§12.5). */
@@ -99,6 +106,12 @@ export class DeviceService {
     private readonly host: PrismaHost,
     private readonly securitySink: SecurityEventSink,
     private readonly logger?: PinoLogger,
+    /**
+     * M2-S6: the transactional audit writer (§32.5's class-A failure policy).
+     * The production wiring always supplies it; a narrow unit construction
+     * without one keeps the class-B sink emissions of the earlier slices.
+     */
+    private readonly audit?: AuditStreamWriter,
   ) {}
 
   /**
@@ -165,12 +178,31 @@ export class DeviceService {
       },
     });
 
-    this.securitySink.record({
-      type: 'DEVICE_REGISTERED',
-      organizationId: input.organizationId,
-      deviceId: created.id,
-      ...(input.clientAddress === undefined ? {} : { clientAddress: input.clientAddress }),
-    });
+    // M2-S6: the registration event is class A — it commits with the
+    // registration row itself (§32.5: a protected state change and its audit
+    // event live or die together). A narrow unit construction without the
+    // writer falls back to the class-B sink port, exactly as before.
+    if (this.audit === undefined) {
+      this.securitySink.record({
+        type: 'DEVICE_REGISTERED',
+        organizationId: input.organizationId,
+        deviceId: created.id,
+        ...(input.actorUserId === undefined ? {} : { userId: input.actorUserId }),
+        ...(input.clientAddress === undefined ? {} : { clientAddress: input.clientAddress }),
+      });
+    } else {
+      await this.audit.appendSecurityEvent(tx, {
+        eventType: 'DEVICE_REGISTERED',
+        organizationId: input.organizationId,
+        actor:
+          input.actorUserId === undefined
+            ? { kind: 'DEVICE', deviceId: created.id }
+            : { kind: 'USER', userId: input.actorUserId, deviceId: created.id },
+        deviceId: created.id,
+        occurredAt: now,
+        ...(input.clientAddress === undefined ? {} : { clientAddress: input.clientAddress }),
+      });
+    }
 
     return toView(created);
   }
@@ -375,13 +407,39 @@ export class DeviceService {
           where: { deviceId: device.id, revokedAt: null },
           data: { revokedAt: now, revokedReason: 'DEVICE_REVOKED' },
         });
-        this.securitySink.record({
-          type: 'DEVICE_REVOKED',
-          userId: input.actorUserId,
-          organizationId: device.organizationId,
-          deviceId: device.id,
-          ...(input.clientAddress === undefined ? {} : { clientAddress: input.clientAddress }),
-        });
+        // M2-S6: the revocation is a class-A event pair inside the one
+        // transaction — the §32.3 security row and the §32.2 business row
+        // ("Device revoked: device id, label, actor") commit with the state
+        // change or not at all. Without the transactional writer, the
+        // earlier class-B sink record stands, as before.
+        if (this.audit === undefined) {
+          this.securitySink.record({
+            type: 'DEVICE_REVOKED',
+            userId: input.actorUserId,
+            organizationId: device.organizationId,
+            deviceId: device.id,
+            ...(input.clientAddress === undefined ? {} : { clientAddress: input.clientAddress }),
+          });
+        } else {
+          await this.audit.appendSecurityEvent(tx, {
+            eventType: 'DEVICE_REVOKED',
+            organizationId: device.organizationId,
+            actor: { kind: 'USER', userId: input.actorUserId, deviceId: device.id },
+            deviceId: device.id,
+            occurredAt: now,
+            ...(input.clientAddress === undefined ? {} : { clientAddress: input.clientAddress }),
+          });
+          await this.audit.appendAuditEvent(tx, {
+            eventType: 'DEVICE_REVOKED',
+            organizationId: device.organizationId,
+            actor: { kind: 'USER', userId: input.actorUserId, deviceId: device.id },
+            occurredAt: now,
+            targetType: 'DEVICE',
+            targetId: device.id,
+            documentRef: `device:${device.id}`,
+            payload: { label: device.label },
+          });
+        }
         this.logger?.info(
           {
             component: 'devices',

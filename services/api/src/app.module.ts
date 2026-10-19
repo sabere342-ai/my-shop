@@ -31,6 +31,7 @@ import { PushModule } from './common/sync/push/sync-push.module';
 import { IdentityModule } from './common/identity/identity.module';
 import { AuthorizationModule } from './common/authorization/authorization.module';
 import { DeviceModule } from './common/devices/device.module';
+import { AuditModule } from './common/audit/audit.module';
 import { ProblemDetailsFilter } from './common/errors/problem.filter';
 import { createValidationPipe } from './common/pipes/validation.pipe';
 import { APP_LOGGER, createAppLogger } from './app.providers';
@@ -77,7 +78,9 @@ export class AppModule {
       // revokes the tokens the sync guards consume (§10.1–§10.3, §40.6). The
       // device module (M2-S5, §12) owns device registration, the bind-session
       // route, the owner-visible device list, and revocation — and exports the
-      // production sync authenticator the push and pull guards bind.
+      // production sync authenticator the push and pull guards bind. The audit
+      // module (M2-S6, §32) exposes the business-history read route the
+      // durable streams feed.
       imports: [
         HealthModule,
         DatabaseModule.forRoot(config),
@@ -87,6 +90,7 @@ export class AppModule {
         IdentityModule.forRoot(config),
         AuthorizationModule.forRoot(config),
         DeviceModule.forRoot(config),
+        AuditModule.forRoot(config),
       ],
       providers: coreProviders(config),
       exports: [APP_CONFIG, APP_LOGGER],

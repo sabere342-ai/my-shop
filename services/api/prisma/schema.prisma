@@ -35,6 +35,16 @@
 // `0009_device_binding`); the five global identity tables remain
 // policy-free on purpose.
 //
+// M2-S6 adds the audit streams (section 40.6 row M2-S6; section 32): the
+// tenant-owned `audit_events` business history, `security_events` with its two
+// verified partitions (tenant rows + the documented GLOBAL pre-authentication
+// partition), and the `audit_stream_heads` allocation anchors — append-only by
+// privilege (§32.5: the application role holds INSERT + SELECT and nothing
+// else, revoked in migration `0010` against PostgreSQL itself), chained per
+// scope by `event_hash`, ordered by gapless-committed per-scope `sequence`,
+// with forced RLS (plus the two deliberate, documented exceptions of the
+// GLOBAL partition and its sentinel head row).
+//
 // M2-S4 turns the tenancy boundary into a database fact (section 40.6 row M2-S4;
 // section 8.1–8.3). Every tenant-owned table named in this file — including the
 // sync infrastructure tables of M1b-S4 — now carries ENABLE + FORCE row-level
@@ -412,6 +422,93 @@ model PermissionOverride {
   @@unique([organizationId, userId, permissionId])
   @@index([organizationId])
   @@map("permission_overrides")
+}
+
+/// section 32 / section 40.6 M2-S6: one allocation head per (stream, scope).
+/// `stream` is the closed `AUDIT`/`SECURITY` vocabulary; `scope` is an
+/// organization id, or the documented global sentinel
+/// `00000000-0000-0000-0000-000000000000` for the security stream's GLOBAL
+/// partition. `last_sequence` is the last **committed** chain position and
+/// `last_event_hash` the last committed row's hash, so allocation is a locked
+/// head read — never a free `MAX(sequence)` read — and a rolled-back
+/// allocation leaves no gap. The CHECKs in migration `0010` (not expressible
+/// here) forbid a nil scope on the AUDIT stream.
+model AuditStreamHead {
+  stream        String   @db.VarChar(16)
+  scope         String   @db.Uuid
+  lastSequence  BigInt   @default(0) @map("last_sequence")
+  lastEventHash String   @default("0000000000000000000000000000000000000000000000000000000000000000") @map("last_event_hash") @db.Char(64)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@id([stream, scope])
+  @@map("audit_stream_heads")
+}
+
+/// section 32.1/§32.2/§32.2A (server half) / §40.6 M2-S6: the business audit
+/// history — tenant-owned, `audit.view` readable, retained indefinitely as
+/// part of the financial record. Ordering is the per-organization
+/// gapless-committed `sequence`; integrity is the `prev_event_hash` →
+/// `event_hash` chain the migration anchors per scope. Append-only by
+/// privilege: the application role holds INSERT + SELECT and nothing else
+/// (migration `0010`'s §32.5 grants). Checked constraints (event grammar,
+/// actor shape, hash shapes) live in the migration, not here.
+model AuditEvent {
+  organizationId      String   @map("organization_id") @db.Uuid
+  sequence            BigInt
+  occurredAt          DateTime @map("occurred_at") @db.Timestamptz(6)
+  localOccurredAt     DateTime? @map("local_occurred_at") @db.Timestamptz(6)
+  eventType           String   @map("event_type") @db.VarChar(80)
+  actorKind           String   @map("actor_kind") @db.VarChar(16)
+  actorUserId         String?  @map("actor_user_id") @db.Uuid
+  actorDeviceId       String?  @map("actor_device_id") @db.Uuid
+  actorPrincipal      String?  @map("actor_principal") @db.VarChar(100)
+  targetType          String?  @map("target_type") @db.VarChar(64)
+  targetId            String?  @map("target_id") @db.VarChar(64)
+  documentRef         String?  @map("document_ref") @db.VarChar(100)
+  mutationId          String?  @map("mutation_id") @db.Uuid
+  deviceLocalSequence BigInt?  @map("device_local_sequence")
+  payload             Json?
+  prevEventHash       String   @map("prev_event_hash") @db.Char(64)
+  eventHash           String   @map("event_hash") @db.Char(64)
+
+  @@id([organizationId, sequence])
+  @@index([organizationId, occurredAt(sort: Desc)])
+  @@index([organizationId, eventType])
+  @@index([organizationId, targetType, targetId], map: "audit_events_organization_id_target_idx")
+  @@map("audit_events")
+}
+
+/// section 32.1/§32.3/§32.6/§40.6 M2-S6: the security audit history. Two
+/// verified partitions of one stream: TENANT rows (`organizationId` set) are
+/// fully tenant-isolated; GLOBAL rows (`organizationId` null) are the
+/// documented pre-authentication / per-identity partition — they carry no
+/// tenant fact and use the sentinel scope for their chain. Owner-only access
+/// is the application layer's obligation (no route in this slice). Chain,
+/// actor-shape, partition-shape, and grammar CHECKs live in migration `0010`.
+model SecurityEvent {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  partitionKind String   @map("partition_kind") @db.VarChar(16)
+  organizationId String? @map("organization_id") @db.Uuid
+  sequence       BigInt
+  occurredAt    DateTime @map("occurred_at") @db.Timestamptz(6)
+  eventType     String   @map("event_type") @db.VarChar(80)
+  actorKind     String   @map("actor_kind") @db.VarChar(16)
+  actorUserId   String?  @map("actor_user_id") @db.Uuid
+  actorDeviceId String?  @map("actor_device_id") @db.Uuid
+  actorPrincipal String? @map("actor_principal") @db.VarChar(100)
+  claimedUserId String?  @map("claimed_user_id") @db.Uuid
+  claimedEmail  String?  @map("claimed_email") @db.VarChar(320)
+  deviceId      String?  @map("device_id") @db.Uuid
+  reasonCode    String?  @map("reason_code") @db.VarChar(64)
+  clientAddress String?  @map("client_address") @db.VarChar(64)
+  payload       Json?
+  prevEventHash String   @map("prev_event_hash") @db.Char(64)
+  eventHash     String   @map("event_hash") @db.Char(64)
+
+  @@index([organizationId, occurredAt(sort: Desc)])
+  @@index([occurredAt(sort: Desc)])
+  @@map("security_events")
 }
 
 /// section 12 / section 40.6 M2-S5: one organization-scoped installation. The

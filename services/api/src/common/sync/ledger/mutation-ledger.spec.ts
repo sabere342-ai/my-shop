@@ -88,6 +88,25 @@ function fakeTransaction(initial: readonly StoredLedgerRow[] = []): FakeTx {
     changeLog: {
       create: jest.fn((args: { data: Record<string, unknown> }) => Promise.resolve(args.data)),
     },
+    // The §32.2A audit surface the ledger touches on the same transaction: the
+    // retry counter read (§38.13 replay of a stored rejection) and, should a
+    // spec ever wire the real writer, the row insert. Counting runs against a
+    // small in-memory store so `attemptNumber` tests stay observable.
+    auditEvent: (() => {
+      const auditRows: Record<string, unknown>[] = [];
+      const matches = (row: Record<string, unknown>, where: Record<string, unknown>): boolean =>
+        Object.entries(where).every(([field, value]) => row[field] === value);
+      return {
+        store: auditRows,
+        count: jest.fn((args: { where: Record<string, unknown> }) =>
+          Promise.resolve(auditRows.filter((row) => matches(row, args.where)).length),
+        ),
+        create: jest.fn((args: { data: Record<string, unknown> }) => {
+          auditRows.push(args.data);
+          return Promise.resolve(args.data);
+        }),
+      };
+    })(),
     $queryRaw: jest.fn((strings: TemplateStringsArray) => {
       const sql = strings.join('|').toLowerCase();
       if (sql.includes('sync_sequences')) {
