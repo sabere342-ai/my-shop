@@ -1,4 +1,4 @@
-# Row-level security inventory — tenant-owned tables (M2-S4, extended by M2-S5)
+# Row-level security inventory — tenant-owned tables (M2-S4, extended by M2-S5/M2-S6; M3-S1)
 
 Master Plan §8.1–§8.3 requires tenant isolation at the **database layer**. This
 document is the human-readable inventory of that enforcement; the machine
@@ -37,7 +37,7 @@ is absent; NULL keeps the predicate NULL, which filters the row out exactly
 like `false`. "No context" is therefore "no rows" for every connection: the
 application role mid-flight, an operator `psql`, a stray pooled session.
 
-## Table inventory — migrations `0008_tenant_row_level_security`, `0009_device_binding`, `0010_audit_streams` + `0011_audit_stream_head_grant`
+## Table inventory — migrations `0008_tenant_row_level_security`, `0009_device_binding`, `0010_audit_streams` + `0011_audit_stream_head_grant`, `0012_organization_settings`
 
 ### Tenant-owned (forced RLS + `tenant_isolation` policy)
 
@@ -53,9 +53,11 @@ application role mid-flight, an operator `psql`, a stray pooled session.
 | `device_sync_cursors` | `organization_id` | Symmetric tenant clause |
 | `sync_sequences` | `organization_id` | Symmetric tenant clause |
 | `devices` (M2-S5) | `organization_id` | Symmetric tenant clause — the identical `ENABLE` + `FORCE` + `tenant_isolation` posture, applied by `0009` |
+| `organization_settings` (M3-S1) | `organization_id` | Symmetric tenant clause — the §22.2/§22.4 settings singleton (one row per tenant), applied by `0012` |
+| `organization_feature_flags` (M3-S1) | `organization_id` | Symmetric tenant clause — the §22.2 typed flag rows, one FK step from the settings singleton, applied by `0012` |
 
 The tenant root needs no `organization_id` — its own `id` is the tenant
-column; the nine others key on `organization_id`.
+column; the eleven others key on `organization_id`.
 
 ### Explicitly global (no RLS, classified on purpose)
 
@@ -114,7 +116,7 @@ runs under table ownership before or without the policy.
 
 ## Operations
 
-- **Fresh install:** migrations `0001`–`0011` apply from empty (`node
+- **Fresh install:** migrations `0001`–`0012` apply from empty (`node
   scripts/db.mjs deploy`); the drift gate (`prisma migrate diff --exit-code`)
   still exits 0 — PostgreSQL policies, CHECK constraints, and grants do not
   appear in Prisma's diff.

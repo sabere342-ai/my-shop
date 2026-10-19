@@ -239,6 +239,29 @@ tampered payload, a foreign signature, an algorithm downgrade, an expired or
 wrong-issuer snapshot, an unknown catalog version, and any non-owner snapshot that
 names an owner-exclusive permission (§38.16.3, §38.17).
 
+### Typed organization settings (§22, slice M3-S1)
+
+Two org-scoped routes under the same `/api/v1/organizations/:organizationId`
+namespace:
+
+| Method | Path        | Required permission               | Purpose                                                                    |
+| ------ | ----------- | --------------------------------- | -------------------------------------------------------------------------- |
+| `GET`  | `/settings` | `settings.view`                   | The complete typed inventory with the §38.18 `settings_version` fingerprint. |
+| `PUT`  | `/settings` | per provided field (§22.2 column) | A field-authorized partial update, inside the write transaction.            |
+
+The settings are **typed columns** on one `organization_settings` row per tenant
+(migration `0012`) plus typed `organization_feature_flags` rows — never a
+key-value table. Every value is validated at three lines of defence: the wire
+validator, the service (§8.3), and the database CHECKs. `settingsVersion` in the
+body is the optimistic-concurrency token; a stale token answers `409
+SETTINGS_VERSION_CONFLICT` rather than performing a lost update, and the changed
+row, its version increment (§38.18's monotonic rule), and a `SETTINGS_UPDATED`
+audit event commit in one transaction. Owner-exclusive fields
+(`minorUnitExponent`, `roundingMode`, `offlineGraceDurationSeconds`,
+`reservedBlockSize`, `featureFlags`) require the owner; the M0-P2 amendment's
+`allow_negative_stock` does not exist and per-device `app_lock_enabled` is left
+to M9.
+
 ### Database-enforced tenancy and ingress re-validation (§8–§9.4, slice M2-S4)
 
 Tenancy enforcement now ends at the **database predicate**, not at a guard:

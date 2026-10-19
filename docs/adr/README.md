@@ -12,10 +12,12 @@ alternatives cannot be reviewed by someone who was not present.
 | [ADR-003](ADR-003-riverpod-and-no-global-singletons.md) | Riverpod with generated providers; no global mutable singletons                | Accepted | M1-S1   | M10     |
 | [ADR-004](ADR-004-go-router-with-redirect-guard.md)     | `go_router` with an auth/organization redirect guard                           | Accepted | M1-S1   | M10     |
 | [ADR-005](ADR-005-backend-stack.md)                     | NestJS, strict TypeScript, PostgreSQL 18, Prisma 6                             | Accepted | M1-S1   | M10     |
+| [ADR-006](ADR-006-client-auth-and-key-distribution.md)  | Client authentication: keystore-only token custody, pinned snapshot key, bound-session grace | Accepted | M2-S7 | M10 |
+| [ADR-023](ADR-023-typed-organization-settings.md)       | Typed organization settings, not a free-form key-value store                   | Accepted | M3-S1   | M10     |
 
 ## Not yet written
 
-ADR-006 through ADR-045 are listed in Master Plan §41 with their decisions, rationale, and
+ADR-007 through ADR-045 (less the completed rows above) are listed in Master Plan §41 with their decisions, rationale, and
 revisit triggers already stated. They are written in the slice that implements them rather
 than all at once here, so that each record reflects what was actually built and any
 deviation is caught while the code is still cheap to change.
