@@ -85,3 +85,14 @@ slice, and its only change is this document.
 issued for M2-S8: the milestone is formally absent from the governing plan, and establish-
 ing it requires an owner decision recorded in the plan (§43.1 G-11/G-12 discipline). The
 baseline of M2-S7 stands as accepted and untouched.
+
+## 7. Remote lock (verified after the push)
+
+| Item | Value |
+| --- | --- |
+| Substantive head this record audits | M2-S7 final `d08a6bbdac611278f4d5c17520206de2fda58b83`, CI runs `39262363810` (push) and `39262372433` (PR), both success 7/7 |
+| This audit branch's own remote-lock head | `a5b5ff0a5074918d2bf96849eaf1c6e4875f4a35` |
+| Push run | run id `39267778987`, workflow **CI**, conclusion **success**, 7/7 jobs green, head = the exact SHA above |
+| PR run | run id `39267824956`, workflow **CI**, conclusion **success**, 7/7 jobs green, head = the exact SHA above |
+| This audit's PR | **#24** — `https://github.com/sabere342-ai/my-shop/pull/24`, state **OPEN**, head `codex/my-shop-m2-s8-scope-proposal` at the exact SHA above, base `codex/my-shop-m2-s7-flutter-auth-session` (stacked; never merged by this audit) |
+| Predecessor lock | PR **#23** still OPEN, head `d08a6bbdac611278f4d5c17520206de2fda58b83`, base `codex/my-shop-m2-s6-audit-streams`, unchanged; PR **#22** still OPEN, head `3d1ce8fd36fb224ecd4bda0a43266541b8e15ec4`, unchanged (verified via `gh` before and after this push) |
