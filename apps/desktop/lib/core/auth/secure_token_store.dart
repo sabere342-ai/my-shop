@@ -107,19 +107,25 @@ class SecureTokenStore {
   /// outcome for the caller is the same session-less state either way.
   Future<StoredTokens?> read() async {
     final String? raw = await _keystore.read(_combinedKey.value);
-    if (raw == null) return null;
+    if (raw == null) {
+      return null;
+    }
     try {
       final Object? decoded = jsonDecode(raw);
       if (decoded is! Map) {
-        throw const SecureKeystoreException(
-          KeystoreFailureReason.corrupted,
-          'token record is not an object',
-        );
+        throw const FormatException('token record is not an object');
       }
       return StoredTokens.fromJson(Map<String, Object?>.from(decoded));
-    } on FormatException {
-      await _wipeBestEffort(raw);
-      rethrow;
+    } on FormatException catch (error) {
+      // The record existed but is not a controlled value any more (§13.4).
+      // It is wiped best effort, and the failure surfaces as the store's own
+      // closed exception — a caller that catches [SecureKeystoreException]
+      // catches both the platform fault and the tamper fault.
+      await _deleteBestEffort();
+      throw SecureKeystoreException(
+        KeystoreFailureReason.corrupted,
+        'the stored token record failed its shape check: ${error.message}',
+      );
     }
   }
 
@@ -136,7 +142,7 @@ class SecureTokenStore {
     await _keystore.delete(_combinedKey.value);
   }
 
-  Future<void> _wipeBestEffort(String raw) async {
+  Future<void> _deleteBestEffort() async {
     try {
       await _keystore.delete(_combinedKey.value);
     } on SecureKeystoreException {

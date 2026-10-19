@@ -237,7 +237,14 @@ class RsaSignedSnapshotVerifier {
         ? elements[1] as ASN1BitString
         : null;
     if (bitString == null) return null;
-    final Uint8List keyBytes = bitString.valueBytes ?? Uint8List(0);
+    final Uint8List valueBytes = bitString.valueBytes ?? Uint8List(0);
+    // SPKI carries whole-byte key material, so the bit string's unused-bits
+    // count must be zero and its content is that count byte *plus* the DER
+    // `RSAPublicKey` sequence. pointycastle's `valueBytes` is the raw
+    // content, so the count byte is stripped by hand (§13.6: fail closed
+    // on anything but the exact shape).
+    if (valueBytes.length < 2 || bitString.unusedbits != 0) return null;
+    final Uint8List keyBytes = Uint8List.sublistView(valueBytes, 1);
     final ASN1Parser innerParser = ASN1Parser(keyBytes);
     final ASN1Object? inner;
     try {
