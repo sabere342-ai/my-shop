@@ -78,6 +78,12 @@ export interface DeviceResponse {
   readonly clientAppVersion?: string;
 }
 
+/** OpenAPI schema `FeatureFlagUpdate` (Master Plan §7.1, ADR-001). */
+export interface FeatureFlagUpdate {
+  readonly key?: string;
+  readonly enabled?: boolean;
+}
+
 /** OpenAPI schema `LivenessReport` (Master Plan §7.1, ADR-001). */
 export interface LivenessReport {
   readonly status: 'ok';
@@ -125,6 +131,34 @@ export interface MutationPayload {
   readonly deviceIdempotencyKey: string;
 }
 
+/** OpenAPI schema `OrganizationSettingsResponse` (Master Plan §7.1, ADR-001). */
+export interface OrganizationSettingsResponse {
+  readonly organizationId: string;
+  readonly settingsVersion: number;
+  readonly organizationName: string;
+  readonly currency: 'EGP';
+  readonly minorUnitExponent: number;
+  readonly displayNumerals: 'WESTERN' | 'EASTERN_ARABIC';
+  readonly pricingMode: 'FIXED' | 'VARIABLE' | 'FIXED_WITH_DISCOUNT';
+  readonly maxDiscountPercentage: number;
+  readonly maxDiscountAmountMinor: string;
+  readonly discountApprovalThresholdMinor: string;
+  readonly discountAllowedForSalesperson: boolean;
+  readonly blockDiscountBelowCost: boolean;
+  readonly invoiceOutputDefault: 'ALWAYS_ASK' | 'PRINT_AUTOMATICALLY' | 'NO_AUTOMATIC_OUTPUT';
+  readonly invoiceFooter: string;
+  readonly invoiceShowLogo: boolean;
+  readonly customerRequiredOnCreditSale: boolean;
+  readonly roundingMode: 'HALF_UP' | 'HALF_EVEN';
+  readonly receivablesAgingEnabled: boolean;
+  readonly offlineGraceDurationSeconds: number;
+  readonly offlineReceiptIdFormat: 'ORG-DEV-SEQ';
+  readonly offlineReservedNumberBlocks: boolean;
+  readonly reservedBlockSize: number;
+  readonly featureFlags: readonly FeatureFlagUpdate[];
+  readonly updatedAt: string;
+}
+
 /** OpenAPI schema `PermissionOverrideWire` (Master Plan §7.1, ADR-001). */
 export interface PermissionOverrideWire {
   readonly permissionId: string;
@@ -151,6 +185,7 @@ export interface ProblemDocument {
     | 'DISCOUNT_FORBIDDEN'
     | 'DISCOUNT_LIMIT_EXCEEDED'
     | 'DISCOUNT_APPROVAL_REQUIRED'
+    | 'SETTINGS_VERSION_CONFLICT'
     | 'REPLAY'
     | 'MUTATION_CONTRADICTION'
     | 'INVENTORY_CONFLICT'
@@ -285,4 +320,30 @@ export interface TokenResponse {
   readonly expiresIn: number;
   readonly refreshToken: string;
   readonly refreshExpiresIn: number;
+}
+
+/** OpenAPI schema `UpdateOrganizationSettingsRequest` (Master Plan §7.1, ADR-001). */
+export interface UpdateOrganizationSettingsRequest {
+  readonly settingsVersion: number;
+  readonly organizationName?: string;
+  readonly currency?: 'EGP';
+  readonly minorUnitExponent?: number;
+  readonly displayNumerals?: 'WESTERN' | 'EASTERN_ARABIC';
+  readonly pricingMode?: 'FIXED' | 'VARIABLE' | 'FIXED_WITH_DISCOUNT';
+  readonly maxDiscountPercentage?: number;
+  readonly maxDiscountAmountMinor?: string;
+  readonly discountApprovalThresholdMinor?: string;
+  readonly discountAllowedForSalesperson?: boolean;
+  readonly blockDiscountBelowCost?: boolean;
+  readonly invoiceOutputDefault?: 'ALWAYS_ASK' | 'PRINT_AUTOMATICALLY' | 'NO_AUTOMATIC_OUTPUT';
+  readonly invoiceFooter?: string;
+  readonly invoiceShowLogo?: boolean;
+  readonly customerRequiredOnCreditSale?: boolean;
+  readonly roundingMode?: 'HALF_UP' | 'HALF_EVEN';
+  readonly receivablesAgingEnabled?: boolean;
+  readonly offlineGraceDurationSeconds?: number;
+  readonly offlineReceiptIdFormat?: 'ORG-DEV-SEQ';
+  readonly offlineReservedNumberBlocks?: boolean;
+  readonly reservedBlockSize?: number;
+  readonly featureFlags?: readonly FeatureFlagUpdate[];
 }

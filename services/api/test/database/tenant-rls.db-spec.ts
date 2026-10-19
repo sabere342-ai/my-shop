@@ -137,14 +137,16 @@ interface MigrationRow {
 /** The §4 classification, pinned as data so a change must be an explicit edit here. */
 const TENANT_ROOT_TABLE = 'organizations';
 
-/** The ten tenant tables whose isolation column is their `organization_id`. */
+/** The twelve tenant tables whose isolation column is their `organization_id`. */
 const TENANT_ORG_TABLES: readonly string[] = [
   'audit_events',
   'change_log',
   'device_sync_cursors',
   'devices',
   'mutation_ledger',
+  'organization_feature_flags',
   'organization_memberships',
+  'organization_settings',
   'permission_overrides',
   'role_permissions',
   'roles',
@@ -257,6 +259,25 @@ const CROSS_TENANT_INSERT: ReadonlyMap<string, { sql: string; params: readonly u
     },
   ],
   [
+    'organization_feature_flags',
+    {
+      // The key satisfies the grammar CHECK so the only possible refusal is the
+      // §8.2 policy itself (the unknown flag vocabulary is the service's gate).
+      sql: `INSERT INTO organization_feature_flags (organization_id, flag_key, enabled) VALUES ($1::uuid, 'RLS_PROBE', true)`,
+      params: [ORG_B],
+    },
+  ],
+  [
+    'organization_settings',
+    {
+      // Other columns default; the only named values are the tenant column and
+      // a version the schema would accept, so the With Check clause is the
+      // only thing that can refuse.
+      sql: `INSERT INTO organization_settings (organization_id, settings_version) VALUES ($1::uuid, 1)`,
+      params: [ORG_B],
+    },
+  ],
+  [
     'permission_overrides',
     {
       sql: `INSERT INTO permission_overrides (organization_id, user_id, permission_id, effect)
@@ -339,6 +360,20 @@ const CROSS_TENANT_MOVE: ReadonlyMap<string, { sql: string; params: readonly unk
     },
   ],
   [
+    'organization_feature_flags',
+    {
+      sql: `UPDATE organization_feature_flags SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
+      params: [ORG_B, ORG_A],
+    },
+  ],
+  [
+    'organization_settings',
+    {
+      sql: `UPDATE organization_settings SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
+      params: [ORG_B, ORG_A],
+    },
+  ],
+  [
     'permission_overrides',
     {
       sql: `UPDATE permission_overrides SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
@@ -376,7 +411,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
     urls = requireTestUrls();
 
     // Drop + create from empty, provision roles, and deploy the full
-    // `0001`–`0011` history: the fresh-install precondition (AC-07).
+    // `0001`–`0012` history: the fresh-install precondition (AC-07).
     dbScript('test-setup');
     setupRan = true;
 
@@ -570,6 +605,15 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
         USER_ID,
         MUTATION_ID,
         SEEDED_PAYLOAD_HASH,
+      );
+      // M3-S1 (§22.2): the tenant-A settings singleton and one real flag row,
+      // so the ownership-move probes against the two new tenant tables match
+      // rows the policies must refuse to move — the same zero-row-UPDATE
+      // argument the `devices` and `audit_events` seeds make.
+      await tx.$executeRawUnsafe(`INSERT INTO organization_settings (organization_id) VALUES ($1::uuid)`, ORG_A);
+      await tx.$executeRawUnsafe(
+        `INSERT INTO organization_feature_flags (organization_id, flag_key, enabled) VALUES ($1::uuid, 'RLS_FIXTURE', true)`,
+        ORG_A,
       );
     });
 
@@ -1095,8 +1139,8 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
     });
   });
 
-  describe('AC-07: the fresh install applied exactly the eleven-path history', () => {
-    it('records exactly 0001 through 0011, every one finished and never rolled back', async () => {
+  describe('AC-07: the fresh install applied exactly the twelve-path history', () => {
+    it('records exactly 0001 through 0012, every one finished and never rolled back', async () => {
       const rows = await migrator.$queryRawUnsafe<MigrationRow[]>(
         `SELECT migration_name FROM _prisma_migrations ORDER BY migration_name`,
       );
@@ -1113,6 +1157,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
         '0009_device_binding',
         '0010_audit_streams',
         '0011_audit_stream_head_grant',
+        '0012_organization_settings',
       ]);
     });
   });
