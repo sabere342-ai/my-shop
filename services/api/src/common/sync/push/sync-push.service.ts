@@ -25,6 +25,7 @@
 import type { Logger as PinoLogger } from 'pino';
 import { DomainError } from '../../errors/domain.error';
 import { ERROR_CODES } from '../../errors/problem';
+import type { SecurityEventSink } from '../../identity/security-event.sink';
 import { MutationContradictionError } from '../ledger/mutation-ledger.errors';
 import type { MutationLedgerService } from '../ledger/mutation-ledger.service';
 import { type MutationOutcome } from '../ledger/mutation-ledger.service';
@@ -54,6 +55,13 @@ export class SyncPushService {
      * supplies it.
      */
     private readonly devices?: DeviceService,
+    /**
+     * M2-S6 (§32.3): the durable security-event sink for the §38.16 identity
+     * refusals — the cross-organization and cross-device assertions this
+     * service refuses whole. Optional only for narrow unit wiring; production
+     * always supplies it (and its `record` is non-throwing either way).
+     */
+    private readonly securitySink?: SecurityEventSink,
   ) {}
 
   /**
@@ -113,6 +121,19 @@ export class SyncPushService {
         },
         'push batch asserted a device other than the authenticated one — 403 PERMISSION_DENIED',
       );
+      // M2-S6 (§32.3, §38.16): the refusal becomes a durable row too — the
+      // class-B sink persists it after this decision without ever throwing
+      // into it. The organization and device ids are the *verified* context's
+      // facts; only the mismatching assertion is labelled a claim.
+      this.securitySink?.record({
+        type: 'SYNC_IDENTITY_MISMATCH',
+        organizationId: context.organizationId,
+        deviceId: context.deviceId,
+        ...(context.actorUserId === undefined ? {} : { userId: context.actorUserId }),
+        errorCode: ERROR_CODES.PERMISSION_DENIED,
+        syncBatchId: request.syncBatchId,
+        assertedDeviceId: request.deviceId,
+      });
       throw new DomainError(
         ERROR_CODES.PERMISSION_DENIED,
         'the batch deviceId does not match the authenticated device (§38.16)',
@@ -132,6 +153,16 @@ export class SyncPushService {
           },
           'push mutation asserted another organization — 403 ORGANIZATION_FORBIDDEN',
         );
+        this.securitySink?.record({
+          type: 'SYNC_IDENTITY_MISMATCH',
+          organizationId: context.organizationId,
+          deviceId: context.deviceId,
+          ...(context.actorUserId === undefined ? {} : { userId: context.actorUserId }),
+          errorCode: ERROR_CODES.ORGANIZATION_FORBIDDEN,
+          mutationId: mutation.mutationId,
+          syncBatchId: request.syncBatchId,
+          assertedOrganizationId: mutation.organizationId,
+        });
         throw new DomainError(
           ERROR_CODES.ORGANIZATION_FORBIDDEN,
           'a mutation organizationId does not match the authenticated tenant (§38.16)',
@@ -149,6 +180,16 @@ export class SyncPushService {
           },
           'push mutation asserted another device — 403 PERMISSION_DENIED',
         );
+        this.securitySink?.record({
+          type: 'SYNC_IDENTITY_MISMATCH',
+          organizationId: context.organizationId,
+          deviceId: context.deviceId,
+          ...(context.actorUserId === undefined ? {} : { userId: context.actorUserId }),
+          errorCode: ERROR_CODES.PERMISSION_DENIED,
+          mutationId: mutation.mutationId,
+          syncBatchId: request.syncBatchId,
+          assertedDeviceId: mutation.deviceId,
+        });
         throw new DomainError(
           ERROR_CODES.PERMISSION_DENIED,
           'a mutation deviceId does not match the authenticated device (§38.16)',
@@ -197,6 +238,9 @@ export class SyncPushService {
         // mutation_id with any differing field is a §38.9.2 contradiction rather
         // than a misread replay.
         payload: mutationFingerprint(mutation),
+        // M2-S6 (§32.6): the verified actor the trusted context carries — the
+        // audit rows attribute this to, never the mutation's asserted one.
+        ...(context.actorUserId === undefined ? {} : { verifiedActorUserId: context.actorUserId }),
         apply: this.applier.effectFor(mutation, context),
         // §9.4 T-8/T-9 (M2-S4): current re-validation runs inside the ledger's
         // transaction — after its idempotency lookup (a stored replay is
@@ -236,8 +280,10 @@ export class SyncPushService {
   /**
    * §38.9.2 / F-14: the same `mutation_id` under a different payload is the
    * idempotency-bypass alarm. It is answered as a per-mutation `CONTRADICTION`
-   * (the batch continues, §38.10.3) and logged as a security event; the durable
-   * `security_events` sink is M2-S6 (§40.6, D-7).
+   * (the batch continues, §38.10.3). The ledger owns the durable history of
+   * the contradiction (M2-S6: the §32.2A audit row and the `SECURITY` stream
+   * event, both class B — this frame's transaction dies with the alarm); the
+   * structured warn line always accompanies it.
    */
   private contradictionOutcome(mutation: MutationPayload, error: MutationContradictionError): PushMutationOutcome {
     this.logger?.warn(

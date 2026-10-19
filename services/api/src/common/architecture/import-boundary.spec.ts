@@ -26,6 +26,12 @@ const COMMON_ROOT = path.resolve(__dirname, '..');
 interface ImportRule {
   readonly dir: string;
   readonly forbidden: readonly string[];
+  /**
+   * Files inside `dir` this rule does not apply to — every one must carry a
+   * written reason in the rule's comment. The M2-S6 audit read surface's two
+   * composition files are the whole list.
+   */
+  readonly except?: readonly string[];
 }
 
 const RULES: readonly ImportRule[] = [
@@ -38,6 +44,23 @@ const RULES: readonly ImportRule[] = [
   { dir: 'identity', forbidden: ['tenancy', 'bootstrap', 'authorization'] },
   // M2-S3: authorization composition layer must not import bootstrap
   { dir: 'authorization', forbidden: ['bootstrap'] },
+  // M2-S6 (§32 / the slice record): the audit domain is a leaf. It may be
+  // consumed by identity, devices, sync, and future modules; it imports none
+  // of them back — its only runtime edges are the database primitives and the
+  // logging helper (cross-cutting, not a context edge). Type-only imports are
+  // erased by the compiler (no runtime edge), so the durable sink's
+  // `import type { SecurityEventSink }` — the port it *serves* — keeps the
+  // leaf honest without re-declaring the contract two ways.
+  {
+    dir: 'audit',
+    forbidden: ['tenancy', 'devices', 'sync', 'bootstrap', 'identity', 'authorization'],
+    // The read surface's composition files are the edge where the leaf is
+    // served: the module wires the `@Authorize` composition graph and the
+    // controller carries the guard decorator. Named here on purpose and
+    // documented — a new composition file inside the context must edit this
+    // rule, and its reason, to be legitimate.
+    except: ['audit.controller.ts', 'audit.module.ts'],
+  },
 ];
 
 /** Every non-spec TypeScript file under `root`, recursively. */
@@ -58,12 +81,17 @@ function productionSources(root: string): string[] {
 
 /** The module specifiers a file imports, from `from '…'` and dynamic `import('…')`. */
 function importedSpecifiers(source: string): string[] {
+  // `import type …` statements are erased by the TypeScript compiler; they are
+  // a compile-time contract reference, not a runtime dependency edge. Stripping
+  // them first is what makes the leaf rule for `common/audit` and the port it
+  // serves expressible without duplicating the contract.
+  const runtime = source.replace(/import\s+type\s+[\s\S]*?from\s+['"][^'"]+['"];?/g, '');
   const specifiers: string[] = [];
   const staticImport = /\bfrom\s+['"]([^'"]+)['"]/g;
   const dynamicImport = /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   for (const pattern of [staticImport, dynamicImport]) {
     let match: RegExpExecArray | null;
-    while ((match = pattern.exec(source)) !== null) {
+    while ((match = pattern.exec(runtime)) !== null) {
       if (match[1] !== undefined) specifiers.push(match[1]);
     }
   }
@@ -102,6 +130,8 @@ describe('common/ architectural import boundaries (D-1)', () => {
       if (owner === undefined) continue;
       const rule = RULES.find((candidate) => candidate.dir === owner);
       if (rule === undefined) continue;
+      const fileName = relative[relative.length - 1];
+      if (fileName !== undefined && rule.except?.includes(fileName)) continue;
 
       const source = readFileSync(file, 'utf8');
       for (const specifier of importedSpecifiers(source)) {

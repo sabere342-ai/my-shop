@@ -12,6 +12,29 @@ export interface AssignMembershipAuthorizationRequest {
   readonly deny: readonly PermissionOverrideWire[];
 }
 
+/** OpenAPI schema `AuditEventPageResponse` (Master Plan §7.1, ADR-001). */
+export interface AuditEventPageResponse {
+  readonly events: readonly AuditEventResponse[];
+  readonly nextAfter?: string;
+}
+
+/** OpenAPI schema `AuditEventResponse` (Master Plan §7.1, ADR-001). */
+export interface AuditEventResponse {
+  readonly sequence: string;
+  readonly eventType: string;
+  readonly occurredAt: string;
+  readonly localOccurredAt?: string;
+  readonly actorKind: 'USER' | 'DEVICE' | 'SYSTEM' | 'UNVERIFIED';
+  readonly actorUserId?: string;
+  readonly actorDeviceId?: string;
+  readonly targetType?: string;
+  readonly targetId?: string;
+  readonly documentRef?: string;
+  readonly mutationId?: string;
+  readonly deviceLocalSequence?: string;
+  readonly payload?: object;
+}
+
 /** OpenAPI schema `AuthorizationMeResponse` (Master Plan §7.1, ADR-001). */
 export interface AuthorizationMeResponse {
   readonly permissionsVersion: number;

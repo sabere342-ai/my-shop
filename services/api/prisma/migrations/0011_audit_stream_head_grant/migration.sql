@@ -1,0 +1,55 @@
+-- Migration 0011 — the audit-stream allocation anchor keeps its head UPDATE.
+--
+-- Slice M2-S6 (Master Plan §32.5, §37.3 G-6).
+--
+-- Forward-only correction of the grant posture, in the same spirit as the
+-- §32.5 grant paragraph of migration 0010. Migration 0010 revokes UPDATE and
+-- DELETE from `my_shop_app` on all three audit-stream tables at once. For the
+-- two event tables that revocation is exactly the §32.5 law and it stays:
+-- event rows are history, and no application role ever rewrites or removes
+-- them. For `audit_stream_heads` the blanket revocation reached one table too
+-- far, and this migration restores exactly the one privilege the §32.5
+-- append needs — a forward-only correction, never a rewrite of 0010 (G-6):
+--
+--   GRANT UPDATE ON TABLE "audit_stream_heads" TO my_shop_app;
+--
+-- Why the heads UPDATE is not an erosion of the append-only law:
+--
+-- `audit_stream_heads` holds no event data. Each tenant row is the tail
+-- position — `last_sequence` and `last_event_hash` — of one organization's
+-- chains. The §32.5 append is row insert + head advance **inside one
+-- transaction**; that atomic pair is what makes an allocation gapless, so a
+-- rolled-back append leaves no gap and a concurrent one cannot double-allocate.
+-- A head update is therefore not a permissible-but-daunting rewriting of
+-- history: it *is* the second half of every append, the successor pointer of
+-- the chain the inserted row just extended.
+--
+-- The privilege-revoking alternatives would be a SECURITY DEFINER routine
+-- (forbidden, §8.3 gate G-9) or an unhonoured law. The rescoping below keeps
+-- the anchor's privilege explicit and bounded, and its safety is provable
+-- against PostgreSQL's own resolution rather than application discipline:
+--
+--   * a rewound or forged head cannot fabricate a valid chain — every event
+--     row's hash covers its `sequence` and the previous row's hash — and the
+--     §32.5 verifier names the disagreement (`HEAD_DISAGREEMENT`) instead of
+--     blessing the forgery;
+--   * a rewound or replayed head turns the next committed append into a
+--     collision with the row unique indexes (the PK
+--     `(organization_id, sequence)` on `audit_events`; the unique per-scope
+--     index on `security_events`) instead of a silent double-allocation;
+--   * the anchor keeps NO DELETE for the application role, and the event rows
+--     it points at remain untouchable by any non-superuser (0010's revocation
+--     on the two event tables is unchanged by this migration).
+--
+-- Scope boundaries, again deliberately narrow:
+--   * the migrator role keeps its full DML on every table;
+--   * no `GRANT ALL`, no role is granted, no ownership is shifted (G-9);
+--   * forced row-level security on all three tables (0010) is untouched —
+--     tenant rows still answer to `app.current_organization_id`, and the
+--     sentinel/singleton head posture remains the one documented exception.
+--
+-- Retention (`§32.1`) and the documented exceptions are recorded in the same
+-- layer migration 0010 created them, so one sentence governs both migrations:
+-- nothing in either scope is deletable by the application role.
+
+GRANT UPDATE ON TABLE "audit_stream_heads" TO my_shop_app;

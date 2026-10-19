@@ -22,6 +22,8 @@ import type { Logger as PinoLogger } from 'pino';
 import { APP_LOGGER, createAppLogger } from '../../../app.providers';
 import { APP_CONFIG, type AppConfigShape } from '../../config/app.config';
 import { PrismaService } from '../../database/prisma.service';
+import { AuditStreamWriter } from '../../audit/audit-stream-writer';
+import { DurableAuditRecorder } from '../../audit/durable-security-event-sink';
 import { MutationLedgerService } from './mutation-ledger.service';
 
 @Module({})
@@ -43,7 +45,17 @@ export class LedgerModule {
         {
           provide: MutationLedgerService,
           inject: [PrismaService, APP_LOGGER],
-          useFactory: (prisma: PrismaService, logger: PinoLogger) => new MutationLedgerService(prisma, logger),
+          useFactory: (prisma: PrismaService, logger: PinoLogger) =>
+            // M2-S6 (§32.2A): production binds the class-A transactional writer
+            // and the class-B durable recorder beside the host — the audit
+            // vocabulary is wired here and nowhere else. Both are stateless
+            // one-per-process collaborators over the same Prisma host.
+            new MutationLedgerService(
+              prisma,
+              logger,
+              new AuditStreamWriter(),
+              new DurableAuditRecorder(prisma, logger),
+            ),
         },
       ],
       exports: [MutationLedgerService],

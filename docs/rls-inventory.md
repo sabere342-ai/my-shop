@@ -37,7 +37,7 @@ is absent; NULL keeps the predicate NULL, which filters the row out exactly
 like `false`. "No context" is therefore "no rows" for every connection: the
 application role mid-flight, an operator `psql`, a stray pooled session.
 
-## Table inventory — migrations `0008_tenant_row_level_security` + `0009_device_binding`
+## Table inventory — migrations `0008_tenant_row_level_security`, `0009_device_binding`, `0010_audit_streams` + `0011_audit_stream_head_grant`
 
 ### Tenant-owned (forced RLS + `tenant_isolation` policy)
 
@@ -78,6 +78,26 @@ table-inventory test pins this classification so a future tenant column cannot
 silently appear without an explicit decision (and, the other direction, any
 future table carrying `organization_id` without forced RLS fails the suite).
 
+### The M2-S6 audit-stream class (forced RLS, scoped on purpose)
+
+| Table | Tenant column | Policy shape |
+| --- | --- | --- |
+| `audit_events` (M2-S6) | `organization_id` | Symmetric tenant clause; tenant-owned chain rows, no deliberate nil-scope admission |
+| `security_events` (M2-S6) | `organization_id` (NULL on the GLOBAL partition) | Tenant clause **plus** the documented GLOBAL admission: a context-free statement still reads/writes `organization_id IS NULL` rows; a tenant context never sees foreign tenant rows |
+| `audit_stream_heads` (M2-S6) | `scope` (organization id, or the single GLOBAL sentinel head) | `USING`/`WITH CHECK` on the scope id; the sentinel-scope head row is the one documented nil-scope admittance (fail-open by exactly one singleton, not by predicate absence) |
+
+Grant posture after migrations `0010` + `0011` (§32.5): `my_shop_app` holds
+INSERT + SELECT and **no UPDATE and no DELETE** on both event tables — the
+top of the table never gets touched by the application at privilege
+resolution. `audit_stream_heads` keeps exactly one bounded extra privilege,
+its head-row UPDATE: the anchor holds no event data, and the advance of
+`(last_sequence, last_event_hash)` inside the append transaction is the
+atomic companion of every insert — the gapless-rollback discipline itself.
+0011 records the full safety argument (a rewound anchor cannot forge a chain,
+collides with the unique indexes instead of double-allocating, and still
+carries no DELETE). This grant shape is a database fact asserted by the
+privilege-probe acceptance tests, not enforced by code convention.
+
 ## Uniqueness and ownership are unchanged
 
 `uq_organizations_single_owner`, `uq_roles_single_owner`, the composite tenant
@@ -94,10 +114,10 @@ runs under table ownership before or without the policy.
 
 ## Operations
 
-- **Fresh install:** migrations `0001`–`0009` apply from empty (`node
+- **Fresh install:** migrations `0001`–`0011` apply from empty (`node
   scripts/db.mjs deploy`); the drift gate (`prisma migrate diff --exit-code`)
-  still exits 0 — PostgreSQL policies and CHECK constraints do not appear in
-  Prisma's diff.
+  still exits 0 — PostgreSQL policies, CHECK constraints, and grants do not
+  appear in Prisma's diff.
 - **Upgrade:** `0008`/`0009` change no role, no grant, no owner, and no
   pre-existing data; the upgrade acceptance case (AC-08) seeds full
   predecessor-shaped data on `0001`–`0007`, applies the later migrations, and

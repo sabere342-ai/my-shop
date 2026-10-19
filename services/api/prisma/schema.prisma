@@ -437,7 +437,7 @@ model AuditStreamHead {
   stream        String   @db.VarChar(16)
   scope         String   @db.Uuid
   lastSequence  BigInt   @default(0) @map("last_sequence")
-  lastEventHash String   @default("") @map("last_event_hash") @db.Char(64)
+  lastEventHash String   @default("0000000000000000000000000000000000000000000000000000000000000000") @map("last_event_hash") @db.Char(64)
   createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt     DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
 
@@ -473,9 +473,9 @@ model AuditEvent {
   eventHash           String   @map("event_hash") @db.Char(64)
 
   @@id([organizationId, sequence])
-  @@index([organizationId, occurredAt])
+  @@index([organizationId, occurredAt(sort: Desc)])
   @@index([organizationId, eventType])
-  @@index([organizationId, targetType, targetId])
+  @@index([organizationId, targetType, targetId], map: "audit_events_organization_id_target_idx")
   @@map("audit_events")
 }
 
@@ -506,8 +506,8 @@ model SecurityEvent {
   prevEventHash String   @map("prev_event_hash") @db.Char(64)
   eventHash     String   @map("event_hash") @db.Char(64)
 
-  @@index([organizationId, occurredAt])
-  @@index([occurredAt])
+  @@index([organizationId, occurredAt(sort: Desc)])
+  @@index([occurredAt(sort: Desc)])
   @@map("security_events")
 }
 
