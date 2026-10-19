@@ -334,7 +334,6 @@ re-executing the `roles.sql` default-privilege statements for the three tables.
 5. Bootstrap-time owner provisioning is not yet audited (deferred, point 5/18).
 
 ## Final evidence (filled at slice completion)
-
 Executed locally on branch `codex/my-shop-m2-s6-audit-streams`
 (predecessor base M2-S5 HEAD `bf7663880a047c15e8107ac020e3b28785da219b`,
 commits `75401be` + `e32d7bd` already on the branch):
@@ -384,3 +383,17 @@ proven by the tests above):
    repository's global pipe runs with implicit conversion off; the query DTO
    now converts the limit explicitly (`@Type(() => Number)`), matching the
    `pull.contract.ts` precedent.
+
+## Remote lock (verified after the push)
+
+| Item | Value |
+| --- | --- |
+| Verifier CI head SHA | `4dec3993719eb502289c008d2bebbadf0a638023` |
+| Push run (`push` event) | run id `39183596713`, workflow **CI**, conclusion **success**, 7/7 jobs green (fast-checks, contract-drift, backend-unit, backend-integration-database, dependency-audit, flutter-build-windows, flutter-build-android), head = the exact SHA above |
+| PR run (`pull_request` event) | run id `39183623941`, workflow **CI**, conclusion **success**, same 7/7 green job set, head = the exact SHA above |
+| This slice's PR | **#22** — `https://github.com/sabere342-ai/my-shop/pull/22`, state **OPEN**, head branch `codex/my-shop-m2-s6-audit-streams` at the exact SHA above, base branch `codex/my-shop-m2-s5-device-binding` (primary: never merged by this slice) |
+| Predecessor lock | PR **#21** still OPEN, head `bf7663880a047c15e8107ac020e3b28785da219b`, base `codex/my-shop-m2-s4-tenancy-rls`, unchanged (verified via GitHub API before and after this slice's push) |
+| Merge/deploy actions | none: no merge, no force-push, no history rewrite, no deployment (G-12) |
+
+The closing commit of this record is docs-only; CI re-runs `push` and
+`pull_request` on it for the same 7/7 verification with no invalidating change.
