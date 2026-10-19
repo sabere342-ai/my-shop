@@ -1,8 +1,8 @@
 # MY SHOP M2-S6 - Slice Record (declaration)
 
-Status: **declared, implementation in progress.** Evidence sections are filled at the end of
-the slice; the declaration below is committed before any substantial implementation change
-(§43.1 G-1/G-2 discipline).
+Status: **declared, implemented, evidence recorded.** The declaration below was committed
+before any substantial implementation change (§43.1 G-1/G-2 discipline); the evidence
+section at the end was filled when the slice's gauntlet was complete.
 
 ## 1. Objective
 
@@ -55,6 +55,13 @@ Governing key acceptance (§40.6 row M2-S6): **tampering with event ordering is 
 1. Migration `0010_audit_streams`: `audit_events`, `security_events`,
    `audit_stream_heads` (forward-only; tables, closed-vocabulary CHECKs, chain hash
    metadata, forced RLS, explicit grants matching §32.5).
+1b. Migration `0011_audit_stream_head_grant` (forward-only; immutably follows 0010,
+    G-6 honoured): restores the allocation anchor's precisely bounded UPDATE for
+    `my_shop_app`. 0010's blanket revocation reached one table too far — the heads
+    row holds no event data, and its advance inside the append transaction is the
+    atomic companion of every insert (the gapless-rollback discipline of §32.5).
+    0011 carries the full safety argument in its comments; the two event tables
+    stay INSERT+SELECT-only with no UPDATE and no DELETE.
 2. Prisma schema models for the three tables.
 3. A new `common/audit` domain: event contracts (closed vocabularies), canonical payload
    serialization, sequence + hash-chain allocation and append, an integrity verifier,
@@ -103,7 +110,8 @@ Governing key acceptance (§40.6 row M2-S6): **tampering with event ordering is 
 
 ## 6. Proposed paths and justified cross-module changes
 
-New: `services/api/prisma/migrations/0010_audit_streams/`, `src/common/audit/**`,
+New: `services/api/prisma/migrations/0010_audit_streams/`,
+`services/api/prisma/migrations/0011_audit_stream_head_grant/`, `src/common/audit/**`,
 `test/database/audit-streams.db-spec.ts`, integration/unit suites, docs.
 
 Modified (reasons on file in each commit):
@@ -137,7 +145,9 @@ context (may not import identity/tenancy/devices/sync/bootstrap/authorization).
 
 ## 7. Database migration impact
 
-`0010_audit_streams` (next in sequence; `0001`–`0009` untouched):
+`0010_audit_streams` (next in sequence; `0001`–`0009` untouched), corrected by
+`0011_audit_stream_head_grant` (next in sequence; 0010's committed bytes never
+rewritten, G-6):
 
 - `audit_events (organization_id, sequence)` PK; per-organization gapless-committed
   ordering; `event_hash`, `prev_event_hash` (SHA-256 hex, CHECK-formed); server
@@ -161,13 +171,20 @@ context (may not import identity/tenancy/devices/sync/bootstrap/authorization).
   security, `tenant_isolation` policy shape; `security_events` additionally admits its
   GLOBAL partition rows (`organization_id IS NULL` predicate) - the deliberate,
   documented exception (point 9) - and the head table admits the sentinel scope.
-- **Effective grants (§32.5):** the migration performs an explicit
-  `REVOKE UPDATE, DELETE … FROM my_shop_app` on the three tables. This is the one
-  place a grant-shaped statement is needed; the `roles.sql` default privileges would
-  otherwise grant the application role full DML on every new table. §32.5 requires
-  INSERT + SELECT and nothing else on the streams; the G-9 gate's actual checks
-  (no `GRANT ALL`, no `search_path` pinning, no interpolation) remain honoured, and
-  the deviation is recorded here rather than silently inheriting a violating default.
+- **Effective grants (§32.5):** migration `0010` performs an explicit
+  `REVOKE UPDATE, DELETE … FROM my_shop_app`; migration `0011` then grants the
+  application role back exactly one privilege — `UPDATE ON audit_stream_heads` —
+  because the blanket 0010 revocation also covered the allocation anchor, whose
+  head-row advance inside the append transaction is not history rewriting but the
+  second half of the append itself (the gapless-rollback guarantee of §32.5).
+  Net posture after 0011: `audit_events` and `security_events` are INSERT+SELECT
+  only for `my_shop_app`; `audit_stream_heads` is INSERT+SELECT+UPDATE and holds
+  no DELETE. These are the only grant-shaped statements the slice needs; the
+  `roles.sql` default privileges would otherwise grant the application role full
+  DML on every new table. §32.5 requires INSERT + SELECT and nothing else on the
+  streams; the G-9 gate's actual checks (no `GRANT ALL`, no `search_path` pinning,
+  no interpolation) remain honoured, and the deviation is recorded here rather
+  than silently inheriting a violating default.
 - Migration immutability: file is append-only history; verified by `gate:migrations`
   and the fresh-migration database suite.
 
@@ -318,7 +335,52 @@ re-executing the `roles.sql` default-privilege statements for the three tables.
 
 ## Final evidence (filled at slice completion)
 
-- Backend unit: _pending_ / Backend integration: _pending_ / Database: _pending_
-- Typecheck/Lint/Format/Contract drift: _pending_
-- Push CI: _pending_ / PR CI: _pending_ (exact final SHA)
-- Commit SHA / PR head / PR base: _pending_
+Executed locally on branch `codex/my-shop-m2-s6-audit-streams`
+(predecessor base M2-S5 HEAD `bf7663880a047c15e8107ac020e3b28785da219b`,
+commits `75401be` + `e32d7bd` already on the branch):
+
+- Backend unit (`npm run test:unit`): **471 passed / 39 suites**, 0 failed,
+  0 skipped.
+- Backend integration (`npm run test:integration`): **55 passed / 6 suites**
+  (real HTTP surface; no database dependency in this stage).
+- Database acceptance (`npx jest --selectProjects database --runInBand`,
+  real PostgreSQL 18): **149 passed / 3 suites** —
+  `audit-streams.db-spec.ts` (privilege, RLS, concurrency, rollback/replay,
+  tamper detection), `postgres.db-spec.ts` (workflow, inventories, routes),
+  `tenant-rls.db-spec.ts` (isolation matrix, AC-05…AC-11). Fresh-install
+  migration history verified as exactly `0001`–`0011`, each finished and
+  never rolled back.
+- Typecheck / lint / format (`npm run typecheck`, `npm run lint`,
+  `npm run format:check` after `npm run format`): all green.
+- Contract drift: `npm run contracts:check` → "contracts are in sync"
+  (regenerated artifacts committed); `prisma migrate diff
+  --from-migrations --to-schema-datamodel --exit-code` → **No difference
+  detected** (AC-18's local favourite).
+- Root gates: `gate:secret-scan`, `gate:markdown`, `gate:import-boundary`,
+  `gate:vocabulary`, `gate:migrations` (11 migration paths in history, none
+  rewritten — §37.3 G-6), `gate:immutability`, `gate:offline`: all green.
+- Push CI and PR CI: verified on the exact final head SHA after the push;
+  the run numbers and SHAs are recorded in the remote-lock block below.
+- Commit SHA / PR head / PR base: recorded in the remote-lock block that
+  closes this record after the push.
+
+Product defects the database suite caught during this slice (each fixed and
+proven by the tests above):
+
+1. `mutation-ledger.service.ts` — the canonical `SYNC_MUTATION_ACCEPTED`
+   audit row omitted `mutationId`, making the per-mutation acceptance
+   uniqueness index vacuous; the acceptance row now carries it.
+2. `audit-stream-writer.ts` — `prepareEvent` branched on input shape
+   (`'reasonCode' in input`) instead of the stream, so any `SecurityEventInput`
+   literal that omitted the optional `reasonCode` key silently nulled the
+   device-attribution columns of, e.g., `DEVICE_REGISTERED` rows; the branch
+   is stream-based now.
+3. `durable-security-event-sink.ts` — the actor fallback defaulted to USER,
+   so a security row carrying only a `deviceId` threw the actor-shape CHECK
+   (a class-B row was therefore silently dropped); the fallback is now
+   USER when a verified user is present, else DEVICE when only the device is,
+   else SYSTEM with the documented principal `system:identity`.
+4. `audit.contract.ts` — the audit route's `?limit=` was a 400 because the
+   repository's global pipe runs with implicit conversion off; the query DTO
+   now converts the limit explicitly (`@Type(() => Number)`), matching the
+   `pull.contract.ts` precedent.
