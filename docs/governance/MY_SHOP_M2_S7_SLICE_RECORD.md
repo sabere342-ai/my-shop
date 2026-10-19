@@ -1,8 +1,8 @@
 # MY SHOP M2-S7 - Slice Record (declaration)
 
-Status: **declared** (this commit). Evidence sections are appended in the
-implementation and record commits that follow, per the G-1/G-2 discipline every
-predecessor record has used.
+Status: **declared, implemented, evidence recorded.** The declaration below was committed
+before any substantial implementation change (§43.1 G-1/G-2 discipline); the evidence
+section at the end was filled when the slice's gauntlet was complete.
 
 ## 1. Objective
 
@@ -230,3 +230,71 @@ The slice is additive on a stacked branch. Rollback = discard the branch and
 PR; `main` and predecessor branches untouched. No migration exists to revert.
 The new keystore state is device-local; a downgraded client simply stops
 reading it.
+
+## 10. Decisions recorded (rationale)
+
+The four register entries of §8 are decided and argued in full in
+[`docs/adr/ADR-006-client-auth-and-key-distribution.md`](../adr/ADR-006-client-auth-and-key-distribution.md):
+
+- **R-A → ADR-006 D-A**: `flutter_secure_storage` behind the `Keystore` port;
+  one JSON envelope record under the single key `auth.access_token`; fail
+  closed on read/write failure; a corrupted record is wiped best-effort and
+  then refused; sign-out wipes tokens, identity, and grace locally regardless
+  of the server logout outcome.
+- **R-B → ADR-006 D-B**: the snapshot public key is a build pin
+  (`MY_SHOP_SNAPSHOT_PUBLIC_KEY` dart-define); absent ⇒ no offline grace
+  session and an honestly neutral grace line — the no-accepting-default rule
+  applied at composition. The server origin (`MY_SHOP_API_BASE_URL`) is a
+  required define; composition fails fast naming it.
+- **R-C → ADR-006 D-C**: the grace record's device fact is the server-issued
+  bound device id joined locally with the signature-verified authorization
+  facts; the residual (the JWS does not bind the device id) is stated, not
+  hidden, and §38.16.3's device-id-in-signature refinement is deferred here.
+- **R-D → ADR-006 D-D**: organization selection offers exactly the verified
+  `/auth/me` memberships; no new backend route, no client-asserted tenant id.
+
+## Final evidence (filled at slice completion)
+
+Executed locally on branch `codex/my-shop-m2-s7-flutter-auth-session`
+(predecessor base M2-S6 HEAD `3d1ce8fd36fb224ecd4bda0a43266541b8e15ec4`;
+commits `4275831` deps → `2633808` auth core → `1c31e02` router+UI →
+`1bd01ff` fail-closed fixes → `f77d8fc` auth test suites → `f6aab03` widget
+suites → docs, in that order):
+
+- Flutter test suite (`./tool/flutterw test`): **403 passed / 1 skipped /
+  0 failed**. The single skip is the plan-deferred `DEFERRED_BY_PLAN` T-O6
+  transport test (unchanged from M1b). The suite includes this slice's:
+  - SecureTokenStore custody suite (AC-1: every write and read through the
+    keystore port; the cross-check finds no token material in any Drift
+    table, file, or plain map, including on failure paths; corrupted-record
+    wipe + refusal).
+  - Verifier rejection matrix (AC-6: tampered payload, foreign key, absent
+    algorithm, wrong issuer/audience, expired snapshot, non-owner snapshot
+    carrying the owner-exclusive id, fields disagreeing with signed claims,
+    malformed SPKI bit string).
+  - Auth service flow suites (AC-2/3/4/5/8/9: boot resolution, refused
+    logins, memberships-only selection, enrollment binding and its failure
+    atomicity, refresh rotation with a single stale retry then session end,
+    logout wiping locally regardless of server outcome).
+  - Widget suites (AC-3/4/7): the Arabic sign-in surface with its
+    rate-limited and withheld refusals, the organization-setup chooser with
+    verified-memberships-only and missing-session guards, and the shell grace
+    line across absent / active / read-only / unavailable states.
+  - Router redirect integration over the real `NavigationSession` states
+    (AC-2) and the boot fixture proving `bootPending` resolves through the
+    keystore read before the first frame.
+- Static analysis (`./tool/flutterw analyze --fatal-infos`): **No issues
+  found.**
+- Root gates (`npm run gates`): all nine green — secret-scan, markdown,
+  import-boundary, vocabulary, localization, design-system, immutability,
+  offline guards, migration immutability (12 migration paths in history,
+  none rewritten — §37.3 G-6).
+- Contract drift: `npm run contracts:check` → **"contracts are in sync"** —
+  the OpenAPI document and generated types are byte-identical to M2-S6's; a
+  client-only slice changed no contract byte.
+- Predecessor files untouched: `grace_signature_verifier.dart` and
+  `offline_grace_record.dart` are byte-identical to the M2-S6 head (the
+  concrete verifier lives beside them; the port is unchanged).
+- Push CI and PR CI: verified on the exact final head SHA after the push;
+  the run numbers and SHAs are recorded in the remote-lock block that closes
+  this record after the push.
