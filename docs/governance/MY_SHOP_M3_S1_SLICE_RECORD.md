@@ -108,7 +108,8 @@ empty and any flag attempt is structurally rejected).
    audit atomicity, RLS/tenant isolation, upgrade from the predecessor state), plus the
    M2 predecessor suites extended where the new table changes their inventories.
 8. **Documentation** — README surface note, `docs/rls-inventory.md` table inventory,
-   ADR-007 (this record's decisions), this record's evidence section.
+   ADR-023 (this record's decisions — the §41 register's ADR for typed organization
+   settings), this record's evidence section.
 
 ## 5. The typed settings inventory (implemented exactly)
 
@@ -141,7 +142,7 @@ and contract use camelCase):
 | `reservedBlockSize` | `reserved_block_size` | int 1..10000 | `1000` | range CHECK; meaningful only while the blocks are enabled | **owner** |
 | `featureFlags` | `organization_feature_flags` rows | typed rows, empty | `[]` | `flag_key` validated against the in-code vocabulary (empty in V1 → no flag may exist) | **owner** |
 
-Decision references embedded above are recorded in ADR-007 with their reasoning
+Decision references embedded above are recorded in ADR-023 with their reasoning
 (D-A … D-G).
 
 ## 6. Explicit exclusions (non-scope, each with its governing reference)
@@ -217,3 +218,63 @@ The §40.7 row's acceptance ("invalid values rejected; every change audited") is
 demonstrated by the suites above on the final implementation SHA, all gates green,
 the PR created stacked on the M2-S7 base with no merge performed, and the remote CI
 evidence recorded on the exact final SHA in this record's evidence section.
+
+## Final evidence (filled at slice completion)
+
+Executed locally on branch `codex/my-shop-m3-s1-typed-organization-settings`
+(predecessor base M2-S7 HEAD `d08a6bbdac611278f4d5c17520206de2fda58b83`,
+verified local == remote before the first commit; commits `7842a49` migration →
+`7892395` settings surface → `688236a` contracts → `9a46242` tests → `e2da979`
+docs, in that order, each master-plan-scoped as the M2 slices were):
+
+- Migration and schema: `0012_organization_settings` is additive only;
+  migrations `0001`–`0011` untouched (gate-verified); `prisma migrate diff` clean.
+- Contract drift: `npm run contracts:check` → **"contracts are in sync"**
+  (OpenAPI and the generated client schemas regenerated through the official
+  scripts for the two-route settings surface).
+- Backend unit tests (`npm run test:unit`): **40 suites / 495 tests passed** —
+  including the settings domain suite (24 tests: per-field validation, the
+  wire→bigint offer conversion, version classification, the prototype-safe
+  field-gate map where `__proto__` cannot forge a bypass) and the extended
+  organization-bootstrap suite (default settings row, version 1, same
+  transaction).
+- Backend integration tests (`npm run test:integration`): **7 suites / 60 tests
+  passed** — including the no-database settings e2e (route+guard order,
+  problem-mapping surface).
+- Backend database tests against real PostgreSQL 18
+  (`npm run test:database`, serial): **4 suites / 164 tests passed** — including
+  the new `organization-settings.db-spec.ts` acceptance suite (15 tests:
+  migration shape and §22.4 removed-column proof, RLS posture fail-closed and
+  cross-tenant insert/update/delete/move refusals, CHECK refusals on every bound,
+  defaults and lazy materialization, version conflict with no partial write, the
+  D-G accepted-write version bump, field authorization inside the tenant
+  transaction including owner-exclusive and partially-authorized multi-field
+  writes, unknown flag-key refusal, and the advisory-lock serialization race with
+  exactly one winner), plus the extended `tenant-rls` (12 tenant tables) and
+  `postgres` (12 migrations) inventories.
+- Flutter untouched: `npm run flutter:test` → **403 passed / 1 skipped / 0
+  failed** (the skip is the plan-deferred T-O6 transport test, unchanged);
+  `npm run flutter:analyze --fatal-infos` → **"No issues found!"**.
+- Root gates (`npm run gates`): all green — ends with migration-immutability:
+  **12 migration path(s) in history, none rewritten** (§37.3 G-6). Toolchain pin
+  re-verified PASS (node 22.22.3, npm 10.9.8, flutter 3.47.5, dart 3.13.4).
+- Documentation: README settings section (two-route table), `docs/rls-inventory.md`
+  (12 tenant tables including `organization_settings` and
+  `organization_feature_flags`, fresh install `0001`–`0012`), and ADR-023
+  (`docs/adr/ADR-023-typed-organization-settings.md`) written in the plan-§41 slot
+  reserved for this decision; the `docs/adr/README.md` index row added. The two
+  "ADR-007" references in this record's declaration were corrected to ADR-023 at
+  the record commit (declaration-time slip; §41's register names ADR-023).
+- Predecessor surface untouched: zero changes under `apps/desktop/` and `tool/`
+  Flutter code; no contract byte of a predecessor route changed; PR #21/#22/#23
+  branches untouched, no force-push, no merges.
+
+## Remote lock (verified after the push)
+
+| Item | Value |
+| --- | --- |
+| Verifier CI head SHA | `e2da9793932e838a30a83dc3d419f1e639ba0db3` |
+| Push run (`push` event) | run id `39293919766`, workflow **CI**, conclusion **success**, 7/7 jobs green (fast-checks, backend-unit, backend-integration-database, dependency-audit, contract-drift, flutter-build-windows, flutter-build-android), head = the exact SHA above |
+| PR run (`pull_request` event) | run id `39294212261`, workflow **CI**, conclusion **success**, same 7/7 green job set, head = the exact SHA above |
+| This slice's PR | **#25** — `https://github.com/sabere342-ai/my-shop/pull/25`, state **OPEN**, head branch `codex/my-shop-m3-s1-typed-organization-settings` at the exact SHA above, base branch `codex/my-shop-m2-s7-flutter-auth-session` (stacked; never merged by this slice) |
+| Predecessor lock | PR **#23** still OPEN, head `d08a6bbdac611278f4d5c17520206de2fda58b83`, base `codex/my-shop-m2-s6-audit-streams`, unchanged; PR **#22** still OPEN, head `3d1ce8fd36fb224ecd4bda0a43266541b8e15ec4`, base `codex/my-shop-m2-s5-device-binding`, unchanged (verified via `gh` before and after this slice's push) |
