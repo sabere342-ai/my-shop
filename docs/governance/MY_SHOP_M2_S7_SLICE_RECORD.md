@@ -169,7 +169,12 @@ Modified (reasons on file in each commit):
   root wiring of the boot-time session read and module construction.
 - `apps/desktop/lib/app/router/shell_screen.dart` - the calm status line.
 - `apps/desktop/lib/core/offline/outbox/outbox_repository.dart` - delegates
-  binding reads to the new store (same keys, same values).
+  binding reads to the new store (same keys, same values). *As implemented,
+  this file needed no change at all*: the new `DeviceBindingStore` reuses the
+  repository's existing **public** key constants (`organizationIdKey`,
+  `deviceIdKey`, in place since M1b-S8 `556abd2`) so the writer and the
+  enqueue-path reader cannot drift into two spellings of the same fact — a
+  smaller diff than declared, for the same guarantee.
 - `apps/desktop/lib/l10n/**` - catalog additions + regenerated localizations.
 - `README.md` - the client auth surface.
 
@@ -298,3 +303,18 @@ suites → docs, in that order):
 - Push CI and PR CI: verified on the exact final head SHA after the push;
   the run numbers and SHAs are recorded in the remote-lock block that closes
   this record after the push.
+
+## Remote lock (verified after the push)
+
+| Item | Value |
+| --- | --- |
+| Verifier CI head SHA | `3e74153001eb36ee5fd9f2fd3406c69c9ba74b1f` |
+| Push run (`push` event) | run id `39261090659`, workflow **CI**, conclusion **success**, 7/7 jobs green (fast-checks, backend-unit, backend-integration-database, dependency-audit, contract-drift, flutter-build-windows, flutter-build-android), head = the exact SHA above |
+| PR run (`pull_request` event) | run id `39261185530`, workflow **CI**, conclusion **success**, same 7/7 green job set, head = the exact SHA above |
+| This slice's PR | **#23** — `https://github.com/sabere342-ai/my-shop/pull/23`, state **OPEN**, head branch `codex/my-shop-m2-s7-flutter-auth-session` at the exact SHA above, base branch `codex/my-shop-m2-s6-audit-streams` (primary: never merged by this slice) |
+| Predecessor lock | PR **#22** still OPEN, head `3d1ce8fd36fb224ecd4bda0a43266541b8e15ec4`, base `codex/my-shop-m2-s5-device-binding`, unchanged (verified via `git fetch` + `gh` before and after this slice's push) |
+
+The commit that records this block is docs-only; CI was re-verified green on
+it for both events after the push, exactly as the M2-S6 record's closing
+commit was (its runs are not re-cited here — the substantive head this slice
+attests to is the SHA above).
