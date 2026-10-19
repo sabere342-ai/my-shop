@@ -65,6 +65,13 @@
 // rebound to `MIGRATION_DATABASE_URL`, so the migrator role is selected by the
 // process environment rather than by a second block in this file — one datasource
 // block, one schema, and no ambient way for a migration to run as the application.
+//
+// M3-S1 adds the typed settings surface (section 40.7 row M3-S1; section 22):
+// the tenant-owned `organization_settings` singleton row and the
+// `organization_feature_flags` typed rows. Both carry ENABLE + FORCE row-level
+// security with the one `tenant_isolation` policy (migration `0012`'s posture,
+// extending `0008`); the bounds and vocabularies the service enforces are
+// restated by CHECKs so the database is the last line of defence.
 
 generator client {
   provider = "prisma-client-js"
@@ -198,6 +205,7 @@ model Organization {
   memberships OrganizationMembership[]
   roles       Role[]
   devices     Device[]
+  settings    OrganizationSettings?
 
   @@map("organizations")
 }
@@ -509,6 +517,87 @@ model SecurityEvent {
   @@index([organizationId, occurredAt(sort: Desc)])
   @@index([occurredAt(sort: Desc)])
   @@map("security_events")
+}
+
+/// section 40.7 row M3-S1 / §22: the tenant's typed configuration — one row per
+/// organization, never a key-value table (§22.1). Every column is a typed,
+/// CHECK-constrained setting with the exact default and bound the Master Plan
+/// fixes; the service layer refuses a value outside the §22.2/§22.4 vocabulary
+/// before a statement is attempted, and the database CHECK restates the bound
+/// so a writer that bypasses the service cannot store a foreign shape (the
+/// same F-3/M2-S2 discipline as the password-hash algorithm prefix). A removed
+/// setting is a notable absence: `allow_negative_stock` was removed by the
+/// M0-P2 amendment (§22.4), so no column for it exists and none may be added
+/// without a governing decision.
+///
+/// `settings_version` is §38.18's monotonic per-organization integer: it
+/// advances by one on every accepted update transaction and on nothing else —
+/// a refused, conflicting, or rolled-back write never advances it. The cached
+/// copy's version classifies staleness; the value itself is never authority
+/// server-side (§22.3: the server reads the row on every dependent decision).
+///
+/// `organization_name` is intentionally **not** a column here: the tenant
+/// root's `name` is the single source of truth (§9.2), the write goes through
+/// the tenancy seam inside the same update transaction (D-7), and the settings
+/// request/response carry it so callers need no second round trip.
+/// `app_lock_enabled` is intentionally absent as well: §22.2 scopes it per
+/// device, and its producing slice (M9) owns where it lands.
+///
+/// Like every tenant-owned table, forced row-level security with the one
+/// `tenant_isolation` policy of migration `0012` (migration `0008`'s posture,
+/// extended): a missing or foreign context reads nothing and writes nothing.
+model OrganizationSettings {
+  organizationId                     String      @id @map("organization_id") @db.Uuid
+  settingsVersion                    BigInt      @default(1) @map("settings_version")
+  currency                           String      @default("EGP") @db.VarChar(3)
+  minorUnitExponent                  Int         @default(2) @map("minor_unit_exponent")
+  displayNumerals                    String      @default("WESTERN") @map("display_numerals") @db.VarChar(16)
+  pricingMode                        String      @default("FIXED") @map("pricing_mode") @db.VarChar(24)
+  maxDiscountPercentage              Decimal     @default(0) @map("max_discount_percentage") @db.Decimal(5, 2)
+  maxDiscountAmountMinor             BigInt      @default(0) @map("max_discount_amount_minor")
+  discountApprovalThresholdMinor     BigInt?     @map("discount_approval_threshold_minor")
+  discountAllowedForSalesperson      Boolean     @default(false) @map("discount_allowed_for_salesperson")
+  blockDiscountBelowCost             Boolean     @default(false) @map("block_discount_below_cost")
+  invoiceOutputDefault               String      @default("ALWAYS_ASK") @map("invoice_output_default") @db.VarChar(24)
+  invoiceFooter                      String      @default("") @map("invoice_footer")
+  invoiceShowLogo                    Boolean     @default(true) @map("invoice_show_logo")
+  customerRequiredOnCreditSale       Boolean     @default(true) @map("customer_required_on_credit_sale")
+  roundingMode                       String      @default("HALF_UP") @map("rounding_mode") @db.VarChar(16)
+  receivablesAgingEnabled            Boolean     @default(true) @map("receivables_aging_enabled")
+  offlineGraceDurationSeconds        BigInt      @default(259200) @map("offline_grace_duration_seconds")
+  offlineReceiptIdFormat             String      @default("ORG-DEV-SEQ") @map("offline_receipt_id_format") @db.VarChar(32)
+  offlineReservedNumberBlocks        Boolean     @default(false) @map("offline_reserved_number_blocks")
+  reservedBlockSize                  Int         @default(1000) @map("reserved_block_size")
+  updatedAt                          DateTime    @updatedAt @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  flags        OrganizationFeatureFlag[]
+
+  @@map("organization_settings")
+}
+
+/// section 40.7 row M3-S1 / §22.2 row `feature_flags`: the setting arrives as
+/// **typed rows**, never an untyped JSON map. One row is one flag named
+/// (`flag_key`) and one boolean; the vocabulary of keys is a versioned catalog
+/// in application code (the §11.2 permission-catalog discipline — the data
+/// dictionary lives in code so a vocabulary growth is no migration), and the
+/// the database CHECK restates the key **grammar** the catalog itself follows.
+/// The plan defines no flag in V1, so an organization's honest state is zero
+/// rows and the service refuses every unknown key.
+///
+/// `settings_version` covers the flags too: an owner's flag change is a
+/// settings change and bumps the same version in the same transaction, so a
+/// pull that classifies one cannot miss the other.
+model OrganizationFeatureFlag {
+  organizationId String   @map("organization_id") @db.Uuid
+  flagKey        String   @map("flag_key") @db.VarChar(64)
+  enabled        Boolean
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+
+  organization OrganizationSettings @relation(fields: [organizationId], references: [organizationId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([organizationId, flagKey])
+  @@map("organization_feature_flags")
 }
 
 /// section 12 / section 40.6 M2-S5: one organization-scoped installation. The
