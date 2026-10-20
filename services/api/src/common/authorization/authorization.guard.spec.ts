@@ -57,6 +57,7 @@ function effective(
     isOwner: false,
     role: { id: '55555555-5555-4555-8555-555555555555', key: 'manager', name: 'Manager' },
     permissions,
+    deniedPermissionIds: [],
     permissionsVersion: 1,
     ...overrides,
   };

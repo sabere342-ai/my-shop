@@ -83,6 +83,7 @@ const effectiveWith = (permissions: readonly string[]): EffectiveAuthorization =
   isOwner: false,
   role: null,
   permissions,
+  deniedPermissionIds: [],
   permissionsVersion: 0,
 });
 
