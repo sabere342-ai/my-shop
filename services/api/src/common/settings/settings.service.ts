@@ -155,10 +155,22 @@ export class SettingsService {
    * posture read from the server side).
    */
   async get(organizationId: string): Promise<SettingsView> {
-    return withTenantTransaction(this.host, organizationId, async (tx) => {
-      const { row, organizationName } = await this.ensureSettingsRow(tx, organizationId);
-      return this.toView(row, organizationName);
-    });
+    return withTenantTransaction(this.host, organizationId, async (tx) => this.readInTransaction(tx, organizationId));
+  }
+
+  /**
+   * Reads the settings **inside a transaction the caller already owns** (M3-S2,
+   * §22.3's "the server reads them from the database on every transaction that
+   * depends on them"). A pricing decision, a future sale posting, or a sync
+   * ingress re-validation must see the settings exactly as its transaction
+   * will commit them — not through a second transaction's snapshot, and never
+   * through a cache (§22.3). Same materialization rule as `get`: an
+   * organization without a row receives its version-1 defaults inside this
+   * transaction, never a missing answer.
+   */
+  async readInTransaction(tx: Tx, organizationId: string): Promise<SettingsView> {
+    const { row, organizationName } = await this.ensureSettingsRow(tx, organizationId);
+    return this.toView(row, organizationName);
   }
 
   /**
