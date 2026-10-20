@@ -280,9 +280,9 @@ admitted. The boundary:
   (`403 PRICE_OVERRIDE_FORBIDDEN`, both directions); `VARIABLE` requires
   `sales.create` for a manually entered price (`403 PERMISSION_DENIED`), keeps
   list and applied as two distinct snapshot values (§16.2), and flags
-  `BELOW_COST` warn-only against a known cost; `FIXED_WITH_DISCOUNT` refuses a
-  reduction below the list price to **every** actor in this slice — the
-  reduction path is the §18 discount machinery (M3-S3) — and requires
+  `BELOW_COST` warn-only against a known cost; `FIXED_WITH_DISCOUNT` refuses an
+  offer-less manual reduction below the list price to **every** actor — the
+  only reduction path is the §18 discount machinery (M3-S3) — and requires
   `pricing.override` for an increase;
 - refuses malformed money before any policy: a negative applied price is a
   client fault (`400 VALIDATION_FAILED`); a negative stored list price or cost
@@ -297,7 +297,60 @@ admitted. The boundary:
 A refusal throws inside the caller's transaction, so nothing is written; a
 refused decision leaves the settings row, its version, and the audit chain
 untouched. The device-side half of §38.19 (the signed cached settings and the
-device rule) and the discount path are M3-S3/M3-S4 scope.
+device rule) is M3-S4 scope.
+
+### Discount policy (§18, §30.6, slice M3-S3)
+
+The §18 discount machinery now lives behind the same boundary: a sale line may
+carry a **discount offer** — `PERCENTAGE` (exact decimal string, at most two
+fraction digits), `FIXED_AMOUNT`, or `FIXED_PRICE` (decimal-string minor
+units). The offer is only ever an offer: the **applied price and the discount
+amount are derived server-side** in exact integer minor-unit arithmetic
+(§30.1 — no binary float anywhere; percentages scale ×100 so an offered
+percentage and the stored decimal(5,2) `max_discount_percentage` ceiling
+compare exactly), and the caller's applied value is a hint that must agree
+with the derivation or the request is refused (`400 VALIDATION_FAILED`).
+Offers are mode-gated: `FIXED` answers `403 PRICE_OVERRIDE_FORBIDDEN`,
+`VARIABLE` answers `403 DISCOUNT_FORBIDDEN` (free price entry plus a discount
+source would be a double-application bypass), and only `FIXED_WITH_DISCOUNT`
+runs the §18.2 resolution, in order:
+
+1. **Hard ceilings** (`403 DISCOUNT_LIMIT_EXCEEDED`, every actor — the owner
+   included): the offered percentage against `max_discount_percentage`; the
+   computed **reduction** against `max_discount_amount_minor` (a
+   `FIXED_PRICE` whose final price is small is still refused when the
+   reduction is not); a fixed amount larger than the price it discounts, and
+   with `block_discount_below_cost` set, a discount reaching strictly below a
+   snapshotted cost (approval does not lift the floor; an absent cost
+   invents neither the flag nor the refusal).
+2. **Authority** (`403 DISCOUNT_FORBIDDEN`): `pricing.discount.apply` resolved
+   live in-transaction; `discount_allowed_for_salesperson` opens the same
+   authority for the **server-resolved** `salesperson` role key, never over an
+   explicit `DENY`, and for no other role.
+3. **Approval** (`403 DISCOUNT_APPROVAL_REQUIRED`): a discount strictly above
+   `discount_approval_threshold_minor` requires `pricing.discount.approve` in
+   the deciding transaction. Approval is never a client input — there is
+   nothing to forge, reuse, or revoke; an approved decision carries a
+   server-minted attribution reference
+   (`disc-appr:org=…:approver=…:settings=…:permissions=…`, §32.2's facts, never
+   a credential).
+4. **Derivation** — the percentage divides exactly once, rounded by the
+   organization's §30.6 `rounding_mode` (`HALF_UP`/`HALF_EVEN`).
+
+Each line's decision records the §16.2 discount facts (type, offered value,
+derived amount, approval state, reference) beside the snapshot values, and the
+decision contract is versioned (`PRICING_POLICY_CONTRACT_VERSION = 2`). Offline
+reconciliation re-validates recorded discount lines under the **then-current**
+policy (§38.19): a line the current policy would refuse — a tightened ceiling,
+a changed rounding mode, a flipped pricing mode — is **accepted and flagged
+`PRICING_POLICY_DRIFT`**, snapshots untouched, never re-priced; a recorded
+line inconsistent with its own discount (the §16.2 identity violated, an
+above-list fixed price, malformed values) is corruption and is refused
+`400 VALIDATION_FAILED` in both entry points. The below-cost flag, the
+settings surface (`pricing.policy.edit` gate), and the §18 refusals are all
+registered in the problem-code vocabulary; the settings row's discount columns fail closed (`500 INTERNAL_ERROR`) if a stored
+value is unreadable. Sale-line persistence and a per-line approval history are
+M5 scope.
 
 ### Database-enforced tenancy and ingress re-validation (§8–§9.4, slice M2-S4)
 
