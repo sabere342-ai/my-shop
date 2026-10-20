@@ -271,7 +271,9 @@ describe('pricing policy acceptance (real PostgreSQL, §17/§38.19)', () => {
       );
       expect(result.pricingMode).toBe('FIXED');
       expect(result.settingsVersion).toBe(version);
-      expect(result.contractVersion).toBe(1);
+      // M3-S3 bumps the decision contract to version 2 (the §18 discount
+      // facts); v1 recorded decisions are never re-interpreted.
+      expect(result.contractVersion).toBe(2);
       expect(result.lines[0]?.flags).toEqual([]);
       expect(result.lines[0]?.unitPriceListMinor).toBe(LIST);
     });
