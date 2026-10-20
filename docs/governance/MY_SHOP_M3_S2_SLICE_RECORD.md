@@ -202,7 +202,49 @@ section.
 
 ## Final evidence (filled at slice completion)
 
-(to be filled on completion)
+Executed locally on branch `codex/my-shop-m3-s2-pricing-mode-enforcement`
+(predecessor base M3-S1 HEAD `d64db8f14a356df5eb24367112baf19d7ef51971`,
+local == remote verified before the first commit; commits `fbb2fca`
+declaration → `88c76e7` implementation+domain-unit-suite → `a934fee` database
+acceptance suite → this docs commit, each master-plan-scoped as the M3-S1
+commits were). Changed paths: `services/api/src/common/pricing/` (new),
+`services/api/src/app.module.ts` (module wiring),
+`services/api/src/common/settings/settings.service.ts`
+(`readInTransaction` seam), `services/api/test/database/pricing-policy.db-spec.ts`
+(new), README, and this record. Zero changes under `apps/`, `packages/`, `tool/`,
+`prisma/` — no migration, no contract byte, no Flutter file.
+
+- Toolchain: `npm run toolchain:verify` → **PASS** (node 22.22.3, npm 10.9.8,
+  flutter 3.47.5, dart 3.13.4).
+- Backend typecheck, lint, format:check: clean.
+- Contract drift: `npm run build` + `npm run contracts:check` → **"contracts are
+  in sync"** — correct by design: the boundary adds no HTTP route, so the
+  OpenAPI surface is unchanged.
+- Backend unit tests (`npm run test:unit`): **41 suites / 531 tests passed** —
+  including the new `pricing.domain.spec.ts` acceptance matrix (36 tests: every
+  mode's permission and refusal paths, the three-distinct-refusals structural
+  matrix, the strict below-cost comparison with the unknown-cost suppression,
+  the 18-digit bigint exactness probe, and the §38.19 drift-vs-refusal pair
+  proven from one shared classifier).
+- Backend integration tests (`npm run test:integration`): **7 suites / 60 tests
+  passed** (route surfaces unchanged; no new route exists).
+- Backend database tests against real PostgreSQL 18 (`npm run test:database`,
+  serial): **5 suites / 187 tests passed** — including the new
+  `pricing-policy.db-spec.ts` (**23 tests**): all three modes enforced through
+  the transactional service, the documented 403/400/500 codes, the owner's
+  settings update racing an in-flight evaluation (seen at statement time, each
+  decision stamped with its own `settings_version`), in-transaction permission
+  overrides (allow → deny-beats-allow → removal), tenant-isolation fail-closed,
+  offline reconciliation drift flagging, and the M3-S1 regression (read parity,
+  refused decisions leave settings/version/audit untouched). The predecessor
+  suites — `postgres` (13 migrations), `tenant-rls`, `audit-streams`,
+  `organization-settings` — remain green: 164 predecessor tests untouched.
+- Flutter untouched: `npm run flutter:test` → **403 passed / 1 skipped / 0
+  failed** (the skip is the plan-deferred T-O6 transport test, unchanged);
+  `npm run flutter:analyze --fatal-infos` → **"No issues found!"**.
+- Root gates (`npm run gates`): all green — ending with migration-immutability:
+  **13 migration path(s) in history, none rewritten** (§37.3 G-6; this slice
+  adds none).
 
 ## Remote lock (verified after the push)
 
