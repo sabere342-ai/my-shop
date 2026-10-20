@@ -33,6 +33,7 @@ import { AuthorizationModule } from './common/authorization/authorization.module
 import { DeviceModule } from './common/devices/device.module';
 import { AuditModule } from './common/audit/audit.module';
 import { SettingsModule } from './common/settings/settings.module';
+import { PricingModule } from './common/pricing/pricing.module';
 import { ProblemDetailsFilter } from './common/errors/problem.filter';
 import { createValidationPipe } from './common/pipes/validation.pipe';
 import { APP_LOGGER, createAppLogger } from './app.providers';
@@ -93,6 +94,7 @@ export class AppModule {
         DeviceModule.forRoot(config),
         AuditModule.forRoot(config),
         SettingsModule.forRoot(config),
+        PricingModule.forRoot(config),
       ],
       providers: coreProviders(config),
       exports: [APP_CONFIG, APP_LOGGER],

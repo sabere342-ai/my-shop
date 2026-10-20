@@ -262,6 +262,43 @@ audit event commit in one transaction. Owner-exclusive fields
 `allow_negative_stock` does not exist and per-device `app_lock_enabled` is left
 to M9.
 
+### Pricing-mode enforcement (§17, §38.19, slice M3-S2)
+
+The three §17 pricing modes — `FIXED`, `VARIABLE`, `FIXED_WITH_DISCOUNT` — are
+enforced **server-side** by a transactional boundary (`common/pricing/`), invoked
+inside the caller's own tenant transaction by the entry points that admit a sale
+(the M5 posting route and the sync ingress). It publishes no HTTP route of its
+own: enforcement is not a resource, it is a check that runs where a sale is
+admitted. The boundary:
+
+- reads the **live** typed settings row and the actor's **effective**
+  permissions inside the deciding transaction — never a cache (§22.3) — and
+  stamps every decision with the `settings_version` it decided under
+  (§38.18's fingerprint);
+- applies one deterministic rule set per mode (§17.1–§17.3): `FIXED` refuses any
+  applied≠list alteration without `pricing.override`
+  (`403 PRICE_OVERRIDE_FORBIDDEN`, both directions); `VARIABLE` requires
+  `sales.create` for a manually entered price (`403 PERMISSION_DENIED`), keeps
+  list and applied as two distinct snapshot values (§16.2), and flags
+  `BELOW_COST` warn-only against a known cost; `FIXED_WITH_DISCOUNT` refuses a
+  reduction below the list price to **every** actor in this slice — the
+  reduction path is the §18 discount machinery (M3-S3) — and requires
+  `pricing.override` for an increase;
+- refuses malformed money before any policy: a negative applied price is a
+  client fault (`400 VALIDATION_FAILED`); a negative stored list price or cost
+  is server corruption (`500 INTERNAL_ERROR`); all money is **bigint minor
+  units** (§30.1, ADR-016);
+- re-validates offline-recorded lines on sync against the **then-current**
+  policy (§38.19): a line the current policy would refuse is **accepted and
+  flagged `PRICING_POLICY_DRIFT`** — never refused (a completed physical sale
+  never blocks), never silently voided — with the drift count surfaced to the
+  owner.
+
+A refusal throws inside the caller's transaction, so nothing is written; a
+refused decision leaves the settings row, its version, and the audit chain
+untouched. The device-side half of §38.19 (the signed cached settings and the
+device rule) and the discount path are M3-S3/M3-S4 scope.
+
 ### Database-enforced tenancy and ingress re-validation (§8–§9.4, slice M2-S4)
 
 Tenancy enforcement now ends at the **database predicate**, not at a guard:
