@@ -149,7 +149,55 @@ class RemoteAppliedChanges extends Table {
   Set<Column> get primaryKey => {entityType, entityId};
 }
 
-@DriftDatabase(tables: [LocalMeta, Outbox, LocalAuditEvents, RemoteAppliedChanges])
+/// The versioned settings snapshot cache — Master Plan §38.18, §22.3.
+///
+/// One row per organization: the **authoritative server answer** (the GET
+/// settings response, stored verbatim as its payload JSON), the §38.18
+/// `settings_version` it was fetched at, when the device fetched it, and the
+/// actor the fetch ran for. This table is a *read-only replica* of
+/// server-owned data, not a business entity, and its whole reason to exist is
+/// the offline display mandate of §38.18:
+///
+/// - **Versioned.** The stored `settings_version` is what the UI reports as
+///   the cached truth's fingerprint, and the store keeps the monotonic rule:
+///   a fetched snapshot older than the stored one never replaces it.
+/// - **Organization-keyed.** The primary key is the organization id, so a
+///   snapshot for organization A is structurally invisible to a request for
+///   organization B — cross-tenant cache leakage is refused by the schema
+///   shape itself, not by a courtesy check.
+/// - **Not the outbox.** Nothing here is enqueueable, nothing is a mutation,
+///   no row ever becomes an outgoing change (§38.12.1: remote-origin data
+///   stays read-only on the client). The single-door rule of the remote-apply
+///   boundary still owns every *change-log* apply; this store is a declared,
+///   narrowly-scoped companion for fetched GET replicas (its gate exemption
+///   records the reason).
+/// - **Durable across restart.** The store survives the process (T-O10's
+///   local persistence discipline), so an offline restart still finds the
+///   versioned settings it was last told.
+class SettingsSnapshots extends Table {
+  /// The organization the snapshot belongs to (§38.18 "associate the cache
+  /// with the correct organization").
+  TextColumn get organizationId => text()();
+
+  /// The §38.18 monotonic version this payload was fetched at.
+  IntColumn get settingsVersion => integer()();
+
+  /// The verbatim canonical GET response, JSON-encoded.
+  TextColumn get payloadJson => text()();
+
+  /// When the device fetched it (§38.18's meaningful last-sync metadata).
+  DateTimeColumn get fetchedAt => dateTime()();
+
+  /// The authenticated user the fetch ran for — recorded for the
+  /// session-gating contract (display bound to a matching signed-in
+  /// session), never a secret.
+  TextColumn get fetchedByUserId => text()();
+
+  @override
+  Set<Column> get primaryKey => {organizationId};
+}
+
+@DriftDatabase(tables: [LocalMeta, Outbox, LocalAuditEvents, RemoteAppliedChanges, SettingsSnapshots])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
@@ -159,9 +207,10 @@ class AppDatabase extends _$AppDatabase {
 
   /// Local schema version (§38.6.2). v1 created `local_meta` (M1b-S1); v2
   /// adds the durable outbox and its audit log (M1b-S3); v3 adds the
-  /// applied-sequence guard state for remote applies (M1b-S7).
+  /// applied-sequence guard state for remote applies (M1b-S7); v4 adds the
+  /// §38.18 settings snapshot cache (M3-S4). Every step is additive.
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration {
@@ -181,6 +230,10 @@ class AppDatabase extends _$AppDatabase {
         }
         if (from < 3 && to >= 3) {
           await m.createTable(remoteAppliedChanges);
+          await recordLocalSchemaVersion(this, to);
+        }
+        if (from < 4 && to >= 4) {
+          await m.createTable(settingsSnapshots);
           await recordLocalSchemaVersion(this, to);
         }
       },
