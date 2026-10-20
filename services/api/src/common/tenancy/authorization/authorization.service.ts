@@ -61,6 +61,16 @@ export interface EffectiveAuthorization {
   readonly isOwner: boolean;
   readonly role: { readonly id: string; readonly key: string; readonly name: string } | null;
   readonly permissions: readonly PermissionId[];
+  /**
+   * The known catalog ids this membership carries an explicit `DENY` override
+   * for, in catalog order (M3-S3, additive). The effective set already has
+   * them removed — this list exists so a policy that *grants* an authority by
+   * rule (the §18.2 `discount_allowed_for_salesperson` gate) can keep the
+   * §11.4 deny-over-allow precedence instead of resurrecting a denied
+   * permission. An owner's set is the whole catalog by structure and the
+   * write path refuses an owner override, so this is always empty for one.
+   */
+  readonly deniedPermissionIds: readonly PermissionId[];
   readonly permissionsVersion: number;
 }
 
@@ -415,6 +425,14 @@ export class AuthorizationService {
       })),
     });
 
+    // The M3-S3 additive deny set: the known ids the overrides explicitly
+    // deny, in catalog order. The effective set above already removed them;
+    // carrying the fact separately keeps deny-over-allow intact when a
+    // rule-based policy grant (the §18.2 salesperson gate) composes on top.
+    const deniedPermissionIds = orderPermissionIds(
+      overrides.filter((override) => override.effect === 'DENY').map((override) => override.permissionId),
+    );
+
     const user = await tx.user.findUniqueOrThrow({
       where: { id: userId },
       select: { permissionsVersion: true },
@@ -426,6 +444,7 @@ export class AuthorizationService {
       isOwner: membership.isOwner,
       role,
       permissions,
+      deniedPermissionIds,
       permissionsVersion: user.permissionsVersion,
     };
   }

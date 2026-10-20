@@ -40,11 +40,18 @@ import type { Logger as PinoLogger } from 'pino';
 
 import { DomainError } from '../errors/domain.error';
 import { ERROR_CODES } from '../errors/problem';
-import type { AuthorizationService } from '../tenancy/authorization/authorization.service';
-import type { SettingsService } from '../settings/settings.service';
+import { DECIMAL_MINORS_WIRE_PATTERN } from '../settings/settings.domain';
+import { ROUNDING_MODE_VALUES, type RoundingModeValue } from '../settings/settings.contract';
+import type { AuthorizationService, EffectiveAuthorization } from '../tenancy/authorization/authorization.service';
+import type { SettingsService, SettingsView } from '../settings/settings.service';
 import {
+  DISCOUNT_PERCENTAGE_WIRE_PATTERN,
+  PERCENTAGE_SCALED_MAX,
+  PERCENTAGE_SCALE,
   PRICING_MODE_VALUES,
   PRICING_POLICY_CONTRACT_VERSION,
+  type DiscountLineDecision,
+  type DiscountPolicyFacts,
   type PricingFlagValue,
   type PricingModeValue,
   type SaleLinePriceOffer,
@@ -62,6 +69,8 @@ export interface SaleLinePricingEvaluation {
   readonly settingsVersion: bigint;
   /** The pricing mode the line's decision was made under. */
   readonly pricingMode: string;
+  /** The §18 discount decision facts, present exactly when the line carried a discount offer. */
+  readonly discount?: DiscountLineDecision;
 }
 
 /** The answer to one online evaluation call (§17.4). */
@@ -106,20 +115,35 @@ export class PricingPolicyService {
   /**
    * Evaluates sale lines against the live pricing policy and the actor's
    * effective permissions, inside the caller's transaction. Any refused line
-   * throws — `PRICE_OVERRIDE_FORBIDDEN`, `PERMISSION_DENIED`,
+   * throws — `PRICE_OVERRIDE_FORBIDDEN`, `DISCOUNT_LIMIT_EXCEEDED`,
+   * `DISCOUNT_FORBIDDEN`, `DISCOUNT_APPROVAL_REQUIRED`, `PERMISSION_DENIED`,
    * `VALIDATION_FAILED`, or `INTERNAL_ERROR` — so the caller's transaction
-   * rolls back before a line is written.
+   * rolls back before a line is written. A line the decision approved above
+   * the §18.2 threshold carries the server-minted authorization reference
+   * (§18.3).
    */
   async evaluateSaleLinesInTransaction(tx: Tx, input: PricingLinesInput): Promise<PricingEvaluationResult> {
-    const { pricingMode, settingsVersion, effective } = await this.readPolicyFacts(tx, input);
+    const { pricingMode, settingsVersion, effective, discountPolicy } = await this.readPolicyFacts(tx, input);
     const lines = input.lines.map((line) => {
-      const outcome = evaluateSaleLinePricing({ pricingMode, permissions: effective }, line);
+      const outcome = evaluateSaleLinePricing(
+        {
+          pricingMode,
+          permissions: effective.permissions,
+          discount: discountPolicy,
+          actorRoleKey: effective.role?.key ?? null,
+          deniedPermissions: effective.deniedPermissionIds,
+        },
+        line,
+      );
       return {
         unitPriceListMinor: outcome.unitPriceListMinor,
         unitPriceAppliedMinor: outcome.unitPriceAppliedMinor,
         flags: outcome.flags,
         settingsVersion,
         pricingMode,
+        ...(outcome.discount === undefined
+          ? {}
+          : { discount: this.withMintedApprovalRef(outcome.discount, input, effective, settingsVersion) }),
       };
     });
     return {
@@ -139,15 +163,28 @@ export class PricingPolicyService {
    * reports the drift count for the owner-visible exception surface.
    */
   async reconcileOfflineSaleLinesInTransaction(tx: Tx, input: PricingLinesInput): Promise<PricingReconciliationResult> {
-    const { pricingMode, settingsVersion, effective } = await this.readPolicyFacts(tx, input);
+    const { pricingMode, settingsVersion, effective, discountPolicy } = await this.readPolicyFacts(tx, input);
     const lines = input.lines.map((line) => {
-      const outcome = reconcileOfflineSaleLinePricing({ pricingMode, permissions: effective }, line);
+      const outcome = reconcileOfflineSaleLinePricing(
+        {
+          pricingMode,
+          permissions: effective.permissions,
+          discount: discountPolicy,
+          actorRoleKey: effective.role?.key ?? null,
+          deniedPermissions: effective.deniedPermissionIds,
+        },
+        line,
+      );
       return {
         unitPriceListMinor: outcome.unitPriceListMinor,
         unitPriceAppliedMinor: outcome.unitPriceAppliedMinor,
         flags: outcome.flags,
         settingsVersion,
         pricingMode,
+        // The re-validation's discount facts; the recorded actor and
+        // authorization reference ride the mutation payload (§32.2A) and M5
+        // stamps them on the persisted line — no reference is re-minted here.
+        ...(outcome.discount === undefined ? {} : { discount: outcome.discount }),
       };
     });
     const result: PricingReconciliationResult = {
@@ -182,12 +219,19 @@ export class PricingPolicyService {
    * the live typed settings row and the actor's effective authorization. Both
    * refusals are the caller's to see — a missing membership resolves to
    * `ORGANIZATION_FORBIDDEN`, an RLS-refused foreign read fails closed — and
-   * neither reads from a cache (§22.3).
+   * neither reads from a cache (§22.3). The settings row's discount columns
+   * are parsed into the exact §18.2 policy facts here, once, failing closed
+   * on any stored value this server cannot read.
    */
   private async readPolicyFacts(
     tx: Tx,
     input: PricingLinesInput,
-  ): Promise<{ pricingMode: PricingModeValue; settingsVersion: bigint; effective: readonly string[] }> {
+  ): Promise<{
+    pricingMode: PricingModeValue;
+    settingsVersion: bigint;
+    effective: EffectiveAuthorization;
+    discountPolicy: DiscountPolicyFacts;
+  }> {
     if (input.lines.length === 0) {
       throw new DomainError(ERROR_CODES.VALIDATION_FAILED, 'the evaluation carries no sale line', [
         { field: 'lines', messages: ['the evaluation carries no sale line'] },
@@ -205,7 +249,104 @@ export class PricingPolicyService {
     return {
       pricingMode: storedMode as PricingModeValue,
       settingsVersion: view.settingsVersion,
-      effective: effective.permissions,
+      effective,
+      discountPolicy: this.discountPolicyFromView(view),
+    };
+  }
+
+  /**
+   * The §18.2 policy, exact: the stored decimal(5,2) percentage parses into
+   * the same ×100 integer space the offered percentage uses, the stored
+   * minor-unit strings parse through the shared wire grammar, and every
+   * unknown or unreadable stored value refuses `INTERNAL_ERROR` — never a
+   * guessed default (the M3-S2 fail-closed posture, extended to the discount
+   * columns).
+   */
+  private discountPolicyFromView(view: SettingsViewShape): DiscountPolicyFacts {
+    const roundingMode = view.roundingMode;
+    if (!ROUNDING_MODE_VALUES.includes(roundingMode as RoundingModeValue)) {
+      throw new DomainError(ERROR_CODES.INTERNAL_ERROR, 'the stored rounding mode is not a mode this server knows');
+    }
+    const percentageText = view.maxDiscountPercentage;
+    if (!DISCOUNT_PERCENTAGE_WIRE_PATTERN.test(percentageText)) {
+      throw new DomainError(
+        ERROR_CODES.INTERNAL_ERROR,
+        'the stored maximum discount percentage is not a readable percentage',
+      );
+    }
+    // Exact scale to hundredths of a percent, whatever the stored decimal's
+    // textual scale is ("12.5" and "12.50" are the same 1250).
+    const dot = percentageText.indexOf('.');
+    const maxDiscountPercentageScaled =
+      dot === -1
+        ? BigInt(percentageText) * PERCENTAGE_SCALE
+        : BigInt(percentageText.slice(0, dot)) * PERCENTAGE_SCALE +
+          BigInt(percentageText.slice(dot + 1).padEnd(2, '0'));
+    if (maxDiscountPercentageScaled > PERCENTAGE_SCALED_MAX) {
+      throw new DomainError(
+        ERROR_CODES.INTERNAL_ERROR,
+        'the stored maximum discount percentage is outside the 0–100 range',
+      );
+    }
+    const maxDiscountAmountMinor = this.parseStoredMinors('maxDiscountAmountMinor', view.maxDiscountAmountMinor);
+    const threshold = view.discountApprovalThresholdMinor;
+    return {
+      maxDiscountPercentageScaled,
+      maxDiscountAmountMinor,
+      discountApprovalThresholdMinor:
+        threshold === null ? null : this.parseStoredMinors('discountApprovalThresholdMinor', threshold),
+      discountAllowedForSalesperson: view.discountAllowedForSalesperson,
+      blockDiscountBelowCost: view.blockDiscountBelowCost,
+      roundingMode: roundingMode as RoundingModeValue,
+    };
+  }
+
+  /** A stored minor-unit string through the shared wire grammar, digits only, fail closed. */
+  private parseStoredMinors(field: string, text: string): bigint {
+    if (!DECIMAL_MINORS_WIRE_PATTERN.test(text)) {
+      throw new DomainError(ERROR_CODES.INTERNAL_ERROR, `the stored ${field} is not a readable minor-unit amount`);
+    }
+    return BigInt(text);
+  }
+
+  /**
+   * The §18.3/§32.2 approval reference, minted by the server from
+   * authenticated facts when an above-threshold discount was decided by an
+   * actor holding `pricing.discount.approve`: the organization, the approver
+   * the trusted context resolved, and the settings and permissions versions
+   * of the exact authorization moment. Attribution, not a credential — its
+   * content is provable from the audit and permission state, and no client
+   * ever supplies it.
+   */
+  private withMintedApprovalRef(
+    decision: DiscountLineDecision,
+    input: PricingLinesInput,
+    effective: EffectiveAuthorization,
+    settingsVersion: bigint,
+  ): DiscountLineDecision {
+    if (!decision.approved) {
+      return decision;
+    }
+    return {
+      ...decision,
+      authorizationRef: [
+        'disc-appr',
+        `org=${input.organizationId}`,
+        `approver=${input.actorUserId}`,
+        `settings=${settingsVersion.toString()}`,
+        `permissions=${effective.permissionsVersion.toString()}`,
+      ].join(':'),
     };
   }
 }
+
+/** The settings view's read shape, narrowed to the fields the policy facts need. */
+type SettingsViewShape = Pick<
+  SettingsView,
+  | 'maxDiscountPercentage'
+  | 'maxDiscountAmountMinor'
+  | 'discountApprovalThresholdMinor'
+  | 'discountAllowedForSalesperson'
+  | 'blockDiscountBelowCost'
+  | 'roundingMode'
+>;

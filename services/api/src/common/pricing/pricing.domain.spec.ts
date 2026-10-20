@@ -403,7 +403,11 @@ describe('offline reconciliation (§38.19)', () => {
   });
 
   it('reports the contract version the decision shape belongs to', () => {
-    expect(PRICING_POLICY_CONTRACT_VERSION).toBe(1);
+    // Bumped 1 → 2 by M3-S3 (the recorded §18 discount decision facts and the
+    // FIXED_WITH_DISCOUNT reduction semantics change); a recorded v1 decision
+    // is never silently reinterpreted by this contract. See the M3-S3 slice
+    // record §4.1.
+    expect(PRICING_POLICY_CONTRACT_VERSION).toBe(2);
   });
 });
 
