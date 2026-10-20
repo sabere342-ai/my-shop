@@ -204,4 +204,61 @@ final SHA (`fast-checks`, `backend-unit`, `backend-integration-database`,
 
 ## 8. Execution record (evidence, §43.1/G-13)
 
-Filled on completion; see §9 below.
+### 8.1 The gauntlet, run and green locally (Windows, local PostgreSQL 18)
+
+| Gate | Result |
+| --- | --- |
+| `flutter analyze --fatal-infos` | **No issues found** (pinned 3.47.5 / dart 3.13.4) |
+| Full Flutter suite | **484 passed / ~1 skipped / 0 failed** on the branch head (predecessor M3-S3 record: 403 passed / 1 skipped — 81 new tests, predecessor suites untouched in semantics) |
+| Settings/offline unit + cache + migration tests | 71 green: the strict `OrganizationSettings` parser matrix, `SettingsApi`/`AuthorizationApi` wire surfaces, `SettingsSnapshotCache` versioned semantics (older-refused / equal-refresh / newer-accepted, corruption named not served, org-keyed reads), the T-O19-style v3→v4 additive migration with data preserved, and the T-O7-analogue outbox-count-unchanged assertions |
+| Widget suites (`test/settings/settings_surfaces_test.dart`) | 13 green across hub/general/pricing: live and denied hub states, offline-with-no-cache honesty, cached banner with version metadata, owner/viewer affordance gating from `authorization/me`, unsaved-changes indication, save crossing only touched fields with the version token, explicit material-save confirmation, §38.18 conflict → keep draft → reload reconcile, refused saves keep the draft, cached editors locked read-only |
+| `node tool/ci/offline-guards.mjs` | OK — 94 dart files scanned, 2 generated `*.g.dart` exempt; stage-23 outbox-deletion and stage-24 single-remote-apply-door guards armed with the declared M3-S4 settings-store exemption |
+| Backend `test:unit` | **580/580** tests, 42/42 suites (backend sources byte-unchanged in this slice — re-run, not assumed) |
+| Backend `test:integration` | **60/60** tests, 7/7 suites |
+| Backend `test:database` (real PostgreSQL) | **231/231** tests, 6/6 suites, on the fixed `my_shop_test` database recreated via the supported `node scripts/db.mjs test-setup` flow (`ADMIN_DATABASE_URL` privilege separation, roles from `prisma/roles.sql`, migrator-role deploys) |
+| Backend `typecheck` / `lint` / `format:check` | pass (root workspaces) |
+| `npm run contracts:check` | contracts are in sync — no regeneration noise, contract-drift clean by construction |
+| Dependency audit posture | client-only changes (one Flutter dev-dep `sqlite3` for the native test runner); the npm dependency-audit gate is unaffected |
+
+### 8.2 Real-backend gated integration (A4's online-posture proof)
+
+An env-gated suite, `apps/desktop/test/settings/real_backend_settings_test.dart`,
+drives the **real client stack** (AuthApi → AuthorizationApi → SettingsApi →
+SettingsRepository → SettingsSnapshotCache over a memory Drift database)
+against the **real NestJS server** on local PostgreSQL, with no scripted
+server anywhere. It runs only when `MY_SHOP_E2E_URL`, `MY_SHOP_E2E_EMAIL`, and
+`MY_SHOP_E2E_PASSWORD` name a live local API and is skipped honestly
+otherwise, so CI and ordinary runs never depend on a server process.
+
+Local run (server built from this branch, started with the required
+`DATABASE_URL` / separated `MIGRATION_DATABASE_URL` / base64 PEM
+`JWT_PRIVATE_KEY`/`JWT_PUBLIC_KEY`; owner seeded through the supported
+`bootstrap:org` + `provision:credential` operator commands, ≥12-char password):
+
+- login → token pair; `POST /auth/me` answers the session's organization
+  (§9.3 derivation);
+- `GET …/authorization/me` → `isOwner: true` for the seeded owner;
+- `GET …/settings` → the typed §22.2 inventory, strictly parsed client-side,
+  and the cache records the verbatim payload at its version;
+- `PUT …/settings {organizationName, settingsVersion}` → 200 with
+  `settings_version` advanced 1 → 2, `changedFields: ["organizationName"]`
+  audited server-side; a fresh authoritative re-read answers the new name;
+- a stale version token PUT → **`409 SETTINGS_VERSION_CONFLICT`**, classified
+  client-side as the §38.18 conflict, never softened into an offline or
+  refused state;
+- the versioned cache afterwards holds exactly the saved snapshot (name,
+  version, fetched-by answered by the server's canonical write);
+- the original name is restored (version 3), leaving the database as found.
+
+One honest environment note: the very first invocation classified a login as a
+transport withholding at the client's 20 s budget while the server itself
+logged `LOGIN_SUCCEEDED` (a cold-path timing artifact this machine produced
+once); the suite now provisions a 60 s local-API budget and the re-run passed
+cleanly end to end. The run is repeatable by following §8.2's provisioning
+description against a local Postgres.
+
+### 8.3 Remote CI on the exact implementation head
+
+Filled in the record commit below, after the acceptance push; the slice is
+locked only when both the `push` and the `pull_request` events show the seven
+required jobs green on the exact final SHA.
