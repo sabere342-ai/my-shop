@@ -63,8 +63,11 @@ void main() {
       expect(Directionality.of(context), TextDirection.rtl);
 
       expect(find.text('My Shop'), findsOneWidget);
-      expect(find.text('الأساس الجاهز'), findsOneWidget);
-      expect(find.text('لا توجد شاشات عمل في هذه النسخة.'), findsOneWidget);
+      // The shell copy (the catalog renamed the workspace copy when the
+      // settings entry was added in M3-S4).
+      expect(find.text('مساحة العمل'), findsOneWidget);
+      expect(find.text('اختر مكان العمل من القائمة.'), findsOneWidget);
+      expect(find.text('الإعدادات'), findsOneWidget);
     },
   );
 
