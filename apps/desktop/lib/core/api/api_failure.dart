@@ -54,6 +54,11 @@ enum ApiErrorCode {
   internalError,
   serviceUnavailable,
 
+  /// The §38.18 settings concurrency verdict (409): the caller presented a
+  /// stale `settingsVersion` token, and the server refused the silent lost
+  /// update. M3-S4 adds this member; the wire vocabulary itself is unchanged.
+  settingsVersionConflict,
+
   /// Responses this client could not classify as a server decision: either a
   /// problem document was absent (an unparseable body) or, in the one
   /// [ApiFailure.unmapped] case, its `code` was outside the mapped vocabulary.
@@ -78,6 +83,7 @@ ApiErrorCode? apiErrorCodeFromWire(String? code) => switch (code) {
   'DISCOUNT_FORBIDDEN' => ApiErrorCode.discountForbidden,
   'DISCOUNT_LIMIT_EXCEEDED' => ApiErrorCode.discountLimitExceeded,
   'DISCOUNT_APPROVAL_REQUIRED' => ApiErrorCode.discountApprovalRequired,
+  'SETTINGS_VERSION_CONFLICT' => ApiErrorCode.settingsVersionConflict,
   'REPLAY' => ApiErrorCode.replay,
   'MUTATION_CONTRADICTION' => ApiErrorCode.mutationContradiction,
   'INVENTORY_CONFLICT' => ApiErrorCode.inventoryConflict,
