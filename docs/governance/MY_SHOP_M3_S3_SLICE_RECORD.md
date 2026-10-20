@@ -1,7 +1,8 @@
-# MY SHOP M3-S3 - Slice Record (declaration)
+# MY SHOP M3-S3 - Slice Record (declaration + execution record)
 
-Status: **declared** (§43.1 G-1/G-2: this record precedes any feature file touch; the
-evidence section is filled when the slice's gauntlet is complete).
+Status: **executed** (§43.1 G-1/G-2: declared before any feature file touch at
+`bc33f4a`; the evidence section below was filled when the slice's gauntlet
+completed).
 
 ## 1. Objective
 
@@ -290,3 +291,48 @@ record's evidence section.
   organization, and the settings and permissions versions of the deciding
   transaction — provable from the audit and permission state, never a bearer
   secret, never client-asserted.
+
+## 11. Execution record (evidence, §43.2)
+
+### 11.1 The gauntlet, run and green locally (Windows, PostgreSQL 18 local)
+
+| Gate | Result |
+| --- | --- |
+| `test:unit` | **580/580** tests, **42/42** suites (includes the 49-test pure-domain discount acceptance matrix `pricing-discount.domain.spec.ts`; predecessor pin on `PRICING_POLICY_CONTRACT_VERSION` moved to 2) |
+| `test:integration` | **60/60** tests, 7/7 suites |
+| `test:database` | **231/231** tests, 6/6 suites — includes the new 44-test M3-S3 real-PostgreSQL discount acceptance suite (`pricing-discount.db-spec.ts`, §7's matrix) and the predecessor `pricing-policy.db-spec.ts` with its contract-version pin updated to 2 (231 = 187 predecessor + 44 new) |
+| `typecheck` | pass (`tsc --build` + `tsconfig.test.json`) |
+| `lint` | pass |
+| `format:check` | pass |
+| migrations | none added — `0001`–`0012` byte-untouched (G-6 held in CI) |
+| Flutter | zero changes; unchanged suites green in CI |
+
+### 11.2 Remote CI on the exact implementation head
+
+Branch `codex/my-shop-m3-s3-discount-policy`, implementation head
+`91673cc660899480e6c709da8dc35bd880ace263` (commits `bc33f4a` → `91673cc`,
+descending from the accepted M3-S2 head `bfc92ffbda18f9f2d80745ce9b14d489b0637365`:
+
+| Event | Run | Conclusion | Jobs |
+| --- | --- | --- | --- |
+| `push` | **39480083164** | ✅ success | 7/7: `fast-checks`, `backend-unit`, `backend-integration-database`, `contract-drift`, `dependency-audit`, `flutter-build-windows`, `flutter-build-android` |
+| `pull_request` | **39480145557** | ✅ success | 7/7, same required set |
+
+PR **#27** (head `codex/my-shop-m3-s3-discount-policy`, base
+`codex/my-shop-m3-s2-pricing-mode-enforcement`) created and left open; PR #26
+untouched; **no merge performed, no deployment**.
+
+### 11.3 The record itself
+
+This section is the record commit that locks the slice: after it lands, remote
+CI is verified green for **both** the `push` and the `pull_request` event on
+its exact head SHA — all seven required jobs — and no commit follows (any
+later change would restart the evidence chain). The §40.7 acceptance ("a
+discount ceiling breach returns the documented error") is demonstrated on that
+head by the suites above: the DB suite answers
+`403 DISCOUNT_LIMIT_EXCEEDED` for a percentage over `max_discount_percentage`
+(§18.2), a fixed amount over `max_discount_amount_minor` (owner included), a
+`FIXED_PRICE` whose computed reduction exceeds the amount ceiling, and a
+discount reaching below a snapshotted cost under `block_discount_below_cost`
+— with authority, approval, mode gating, tenant isolation, drift
+reconciliation, and the M3-S2 offer-less refusal proven beside them.
