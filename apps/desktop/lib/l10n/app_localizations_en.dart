@@ -298,6 +298,17 @@ class AppLocalizationsEn extends AppLocalizations {
       'No flags are defined in this version.';
 
   @override
+  String settingsFeatureFlagRow(Object key, Object state) {
+    return '$key — $state';
+  }
+
+  @override
+  String get settingsFeatureFlagOn => 'On';
+
+  @override
+  String get settingsFeatureFlagOff => 'Off';
+
+  @override
   String get settingsFieldNameError =>
       'The name is required and cannot be empty.';
 

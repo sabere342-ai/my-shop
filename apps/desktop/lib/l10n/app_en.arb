@@ -93,6 +93,15 @@
   "settingsRoundingHalfEven": "Half even (HALF_EVEN)",
   "settingsFeatureFlagsHeading": "Feature flags",
   "settingsFeatureFlagsEmpty": "No flags are defined in this version.",
+  "settingsFeatureFlagRow": "{key} — {state}",
+  "@settingsFeatureFlagRow": {
+    "placeholders": {
+      "key": { "type": "Object" },
+      "state": { "type": "Object" }
+    }
+  },
+  "settingsFeatureFlagOn": "On",
+  "settingsFeatureFlagOff": "Off",
   "settingsFieldNameError": "The name is required and cannot be empty.",
   "settingsFieldFooterError": "The footer is longer than the accepted bound (2000 characters).",
   "settingsFieldPricingMode": "Pricing mode",

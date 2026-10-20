@@ -561,8 +561,15 @@ class _GeneralSettingsScreenState extends ConsumerState<GeneralSettingsScreen> {
                           children: <Widget>[
                             for (final FeatureFlagState flag
                                 in settings.featureFlags)
-                              Text('${flag.key}: ${flag.enabled}',
-                                  style: AppTypography.caption),
+                              Text(
+                                l10n.settingsFeatureFlagRow(
+                                  flag.key,
+                                  flag.enabled
+                                      ? l10n.settingsFeatureFlagOn
+                                      : l10n.settingsFeatureFlagOff,
+                                ),
+                                style: AppTypography.caption,
+                              ),
                           ],
                         ),
                       ),

@@ -614,6 +614,24 @@ abstract class AppLocalizations {
   /// **'لا توجد أعلام معرّفة في هذه النسخة.'**
   String get settingsFeatureFlagsEmpty;
 
+  /// No description provided for @settingsFeatureFlagRow.
+  ///
+  /// In ar, this message translates to:
+  /// **'{key} — {state}'**
+  String settingsFeatureFlagRow(Object key, Object state);
+
+  /// No description provided for @settingsFeatureFlagOn.
+  ///
+  /// In ar, this message translates to:
+  /// **'مُفعّل'**
+  String get settingsFeatureFlagOn;
+
+  /// No description provided for @settingsFeatureFlagOff.
+  ///
+  /// In ar, this message translates to:
+  /// **'معطّل'**
+  String get settingsFeatureFlagOff;
+
   /// No description provided for @settingsFieldNameError.
   ///
   /// In ar, this message translates to:

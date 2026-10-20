@@ -292,6 +292,17 @@ class AppLocalizationsAr extends AppLocalizations {
   String get settingsFeatureFlagsEmpty => 'لا توجد أعلام معرّفة في هذه النسخة.';
 
   @override
+  String settingsFeatureFlagRow(Object key, Object state) {
+    return '$key — $state';
+  }
+
+  @override
+  String get settingsFeatureFlagOn => 'مُفعّل';
+
+  @override
+  String get settingsFeatureFlagOff => 'معطّل';
+
+  @override
   String get settingsFieldNameError => 'الاسم مطلوب ولا يكون فراغًا.';
 
   @override
