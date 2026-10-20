@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:my_shop_desktop/app/router/route_paths.dart';
 import 'package:my_shop_desktop/core/auth/app_session_notifier.dart';
 import 'package:my_shop_desktop/core/offline/grace/offline_grace_service.dart';
+import 'package:my_shop_desktop/core/ui/components/app_button.dart';
 import 'package:my_shop_desktop/core/ui/components/app_empty_state.dart';
 import 'package:my_shop_desktop/core/ui/theme/app_spacing.dart';
 import 'package:my_shop_desktop/core/ui/theme/app_typography.dart';
@@ -35,9 +38,16 @@ class ShellScreen extends ConsumerWidget {
             child: Center(
               child: Padding(
                 padding: const EdgeInsets.all(AppSpacing.three),
-                child: AppEmptyState(
-                  title: l10n.shellTitle,
-                  description: l10n.shellBody,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    AppEmptyState(title: l10n.shellTitle, description: l10n.shellBody),
+                    const SizedBox(height: AppSpacing.two),
+                    AppButton(
+                      label: l10n.shellOpenSettings,
+                      onPressed: () => context.go(RoutePaths.settings),
+                    ),
+                  ],
                 ),
               ),
             ),
