@@ -248,4 +248,17 @@ commits were). Changed paths: `services/api/src/common/pricing/` (new),
 
 ## Remote lock (verified after the push)
 
-(to be filled on completion)
+| Item | Value |
+| --- | --- |
+| Verifier CI head SHA | `bd39acfe9bc11da872f76d81a58e5747b129a184` |
+| Push run (`push` event) | run id `39448252184`, workflow **CI**, conclusion **success**, 7/7 jobs green (fast-checks, backend-unit, backend-integration-database, contract-drift, dependency-audit, flutter-build-windows, flutter-build-android), head = the exact SHA above |
+| PR run (`pull_request` event) | run id `39448377043`, workflow **CI**, conclusion **success**, same 7/7 green job set, head = the exact SHA above |
+| This slice's PR | **#26** — `https://github.com/sabere342-ai/my-shop/pull/26`, state **OPEN**, head branch `codex/my-shop-m3-s2-pricing-mode-enforcement` at the exact SHA above, base branch `codex/my-shop-m3-s1-typed-organization-settings` (stacked; never merged by this slice) |
+| Predecessor lock | PR **#25** still OPEN, head `d64db8f14a356df5eb24367112baf19d7ef51971`, base `codex/my-shop-m2-s7-flutter-auth-session`, unchanged; PR **#23** still OPEN, head `d08a6bbdac611278f4d5c17520206de2fda58b83`, base `codex/my-shop-m2-s6-audit-streams`, unchanged; PR **#22** still OPEN, head `3d1ce8fd36fb224ecd4bda0a43266541b8e15ec4`, base `codex/my-shop-m2-s5-device-binding`, unchanged (verified via `gh` and `git ls-remote` after this slice's push) |
+
+## Verdict
+
+```
+NO MERGE PERFORMED — OWNER MERGE AUTHORIZATION REQUIRED
+PASS_MY_SHOP_M3_S2_PRICING_MODE_ENFORCEMENT_REMOTE_LOCKED
+```
