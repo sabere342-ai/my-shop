@@ -259,6 +259,37 @@ description against a local Postgres.
 
 ### 8.3 Remote CI on the exact implementation head
 
-Filled in the record commit below, after the acceptance push; the slice is
-locked only when both the `push` and the `pull_request` events show the seven
-required jobs green on the exact final SHA.
+Branch `codex/my-shop-m3-s4-flutter-settings` at `c4737cf42f44975e5c605b88f4c6cf62d6a71767`
+(the localization-gate repair `c4737cf` being the final code-touching commit,
+descending from the record commit `467034d` and the accepted M3-S3 head
+`1b674f950e627b7b3178bd752db3da16fc518ef0`). One finding-and-repair cycle
+existed before the lock: the head `467034d` run failed the §6.8 stage-13
+localization gate on one hardcoded feature-flag row literal
+(`general_settings_screen.dart:564`), repaired in `c4737cf` by moving the row,
+its key, and its on/off states into both ARB catalogs (re-run locally:
+analyze clean, 484 passed / ~1 skipped, `gate:localization` and
+`gate:design-system` OK, plus every other `gate:*` stage green locally).
+
+| Event | Run | Conclusion | Jobs |
+| --- | --- | --- | --- |
+| `push` | **39514581853** | success | 7/7: `fast-checks`, `backend-unit`, `backend-integration-database`, `contract-drift`, `dependency-audit`, `flutter-build-windows`, `flutter-build-android` |
+| `pull_request` | **39514588210** | success | 7/7, same required set |
+
+PR **#28** (head `codex/my-shop-m3-s4-flutter-settings` at `c4737cf`, base
+`codex/my-shop-m3-s3-discount-policy` at `1b674f9`, MERGEABLE) created and left
+open; PR #27 untouched and open; **no merge performed, no deployment**.
+
+### 8.4 The record itself
+
+This section is the record commit that locks the slice: remote CI is verified
+green for **both** the `push` and the `pull_request` event on the exact final
+SHA `c4737cf` — all seven required jobs — and no implementation commit follows
+(the documentation-only record commit that carries this file's final state
+changes no source, so the implementation evidence above remains the evidence
+for the deliverable; §43.1 G-2 keeps the record commit honest by naming the
+exact locked SHA). The §40.7 acceptance ("settings drive real behaviour online;
+the cache is versioned offline") is demonstrated on that head by the suites in
+§8.1 and the real-backend integration in §8.2: the live GET/PUT round-trip
+against the real server advances the version and refuses a stale token with
+`409 SETTINGS_VERSION_CONFLICT`, and the versioned cache holds exactly the
+saved snapshot afterward — read-only, per-organization, and never a save path.
