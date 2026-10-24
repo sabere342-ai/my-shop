@@ -259,37 +259,55 @@ description against a local Postgres.
 
 ### 8.3 Remote CI on the exact implementation head
 
-Branch `codex/my-shop-m3-s4-flutter-settings` at `c4737cf42f44975e5c605b88f4c6cf62d6a71767`
-(the localization-gate repair `c4737cf` being the final code-touching commit,
-descending from the record commit `467034d` and the accepted M3-S3 head
-`1b674f950e627b7b3178bd752db3da16fc518ef0`). One finding-and-repair cycle
-existed before the lock: the head `467034d` run failed the §6.8 stage-13
-localization gate on one hardcoded feature-flag row literal
-(`general_settings_screen.dart:564`), repaired in `c4737cf` by moving the row,
-its key, and its on/off states into both ARB catalogs (re-run locally:
-analyze clean, 484 passed / ~1 skipped, `gate:localization` and
-`gate:design-system` OK, plus every other `gate:*` stage green locally).
+Branch `codex/my-shop-m3-s4-flutter-settings`. Two bounded, justified
+evidence-repair cycles occurred before the lock, each with its cause, local
+verification, and required CI rounds:
 
-| Event | Run | Conclusion | Jobs |
+1. **Stage-13 localization finding** (head `467034d`, runs
+   `39513267248`/`39513294971` failed on one hardcoded feature-flag row
+   literal): repaired in `c4737cf` by moving the row, its key, and its on/off
+   states into both ARB catalogs; re-verified locally (`--fatal-infos` clean,
+   484 passed / ~1 skipped, `gate:localization`, `gate:design-system`, and
+   every other `gate:*` stage OK). Runs `39514581853` (push) and
+   `39514588210` (pull_request) then passed **7/7** at `c4737cf`.
+2. **Upstream supply-chain drift** (record commit `c163f42`'s push run
+   `40100235282` failed `dependency-audit` only): newly published npm
+   advisories — `body-parser` DoS (GHSA-27r3-jxmh-p828, high) and `multer`
+   DoS (GHSA-q7qp-rjg7-q26m, high, transitively via
+   `@nestjs/platform-express` 11.2.7) — landed after the earlier green runs;
+   no M3-S4 source was involved. Repaired at `7481747` with the smallest
+   governed change: the direct `body-parser` pin raised `2.3.0 → 2.4.0`, a
+   root `overrides` block pinning `multer 2.5.0` (the resolved fixed release)
+   over the transitive range, and the regenerated lockfile. Locally verified:
+   `npm audit --audit-level=high` exits 0 (the remaining two moderates are
+   below the gate), `npm ci` reproduces the tree, `npm ls` shows
+   `multer@2.5.0 overridden` / `body-parser@2.4.0 overridden`, the full
+   backend gauntlet re-ran green (**580 unit / 60 integration / 231 database**
+   against a freshly provisioned `my_shop_test`), and `typecheck`, `gates`
+   (all nine stage guards), and `format:check` passed. Runs `40104738234`
+   (push) and `40104742124` (pull_request) then passed **7/7** at `7481747`.
+
+| Event | Run | Head | Conclusion |
 | --- | --- | --- | --- |
-| `push` | **39514581853** | success | 7/7: `fast-checks`, `backend-unit`, `backend-integration-database`, `contract-drift`, `dependency-audit`, `flutter-build-windows`, `flutter-build-android` |
-| `pull_request` | **39514588210** | success | 7/7, same required set |
+| `push` | **40104738234** | `7481747` | success — 7/7: `fast-checks`, `backend-unit`, `backend-integration-database`, `contract-drift`, `dependency-audit`, `flutter-build-windows`, `flutter-build-android` |
+| `pull_request` | **40104742124** | `7481747` | success — 7/7, same required set |
 
-PR **#28** (head `codex/my-shop-m3-s4-flutter-settings` at `c4737cf`, base
-`codex/my-shop-m3-s3-discount-policy` at `1b674f9`, MERGEABLE) created and left
-open; PR #27 untouched and open; **no merge performed, no deployment**.
+PR **#28** (head `codex/my-shop-m3-s4-flutter-settings`, base
+`codex/my-shop-m3-s3-discount-policy` at `1b674f9`, MERGEABLE) created and
+left open; PR #27 untouched and open; **no merge performed, no deployment**.
 
 ### 8.4 The record itself
 
 This section is the record commit that locks the slice: remote CI is verified
 green for **both** the `push` and the `pull_request` event on the exact final
-SHA `c4737cf` — all seven required jobs — and no implementation commit follows
-(the documentation-only record commit that carries this file's final state
-changes no source, so the implementation evidence above remains the evidence
-for the deliverable; §43.1 G-2 keeps the record commit honest by naming the
-exact locked SHA). The §40.7 acceptance ("settings drive real behaviour online;
-the cache is versioned offline") is demonstrated on that head by the suites in
-§8.1 and the real-backend integration in §8.2: the live GET/PUT round-trip
-against the real server advances the version and refuses a stale token with
-`409 SETTINGS_VERSION_CONFLICT`, and the versioned cache holds exactly the
-saved snapshot afterward — read-only, per-organization, and never a save path.
+implementation and dependency head `7481747` — all seven required jobs — and
+no source commit follows (the documentation-only record commit that carries
+this file's final state changes no source and no dependency, so the evidence
+above remains the evidence for the deliverable; §43.1 G-2 keeps the record
+commit honest by naming the exact locked SHA). The §40.7 acceptance ("settings
+drive real behaviour online; the cache is versioned offline") is demonstrated
+on that head by the suites in §8.1 and the real-backend integration in §8.2:
+the live GET/PUT round-trip against the real server advances the version and
+refuses a stale token with `409 SETTINGS_VERSION_CONFLICT`, and the versioned
+cache holds exactly the saved snapshot afterward — read-only,
+per-organization, and never a save path.
