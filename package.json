@@ -46,5 +46,9 @@
     "verify": "npm run toolchain:verify && npm run gates && npm run format:check && npm run lint && npm run typecheck && npm run contracts:check && npm run test && npm run flutter:analyze && npm run flutter:test",
     "verify:node": "npm run toolchain:verify && npm run gates && npm run format:check && npm run lint && npm run typecheck && npm run contracts:check && npm run test",
     "verify:flutter": "npm run flutter:analyze && npm run flutter:test"
+  },
+  "overrides": {
+    "multer": "2.5.0",
+    "body-parser": "2.4.0"
   }
 }
