@@ -59,6 +59,12 @@ dev_dependencies:
   # Riverpod 3.x generator line; requires analyzer >=13, which clears the
   # Dart 3.13 dot-shorthand crash that blocked generation (see 6.4 note).
   riverpod_generator: ^4.0.9
+  # M3-S4: the migration acceptance tests (test/offline/
+  # settings_snapshot_migration_test.dart) build and inspect v3-shaped files
+  # byte-exactly; the Dart sqlite3 package is already in the dependency graph
+  # as drift's driver (drift ^2.19 -> sqlite3), this only declares it for dev
+  # use. Same resolved version as the lockfile holds.
+  sqlite3: ^3.7.0
 
 # Pin `analyzer` to 14.4.0. build_runner 2.16.1 (the current 2.x line) declares
 # `analyzer >=13.3 <15`, but its resolver still assigns

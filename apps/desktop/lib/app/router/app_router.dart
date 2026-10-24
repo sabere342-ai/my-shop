@@ -8,6 +8,9 @@ import 'package:my_shop_desktop/app/router/shell_screen.dart';
 import 'package:my_shop_desktop/core/auth/app_session_notifier.dart';
 import 'package:my_shop_desktop/core/auth/auth_session.dart';
 import 'package:my_shop_desktop/core/auth/session_state.dart';
+import 'package:my_shop_desktop/features/settings/screens/general_settings_screen.dart';
+import 'package:my_shop_desktop/features/settings/screens/pricing_settings_screen.dart';
+import 'package:my_shop_desktop/features/settings/screens/settings_hub_screen.dart';
 import 'package:my_shop_desktop/features/auth/organization_setup_screen.dart';
 import 'package:my_shop_desktop/features/auth/sign_in_screen.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
@@ -61,6 +64,24 @@ GoRouter appRouter(Ref ref) {
         name: 'signIn',
         builder: (BuildContext context, GoRouterState state) =>
             const SignInScreen(),
+      ),
+      GoRoute(
+        path: RoutePaths.settingsGeneral,
+        name: 'settingsGeneral',
+        builder: (BuildContext context, GoRouterState state) =>
+            const GeneralSettingsScreen(),
+      ),
+      GoRoute(
+        path: RoutePaths.settingsPricing,
+        name: 'settingsPricing',
+        builder: (BuildContext context, GoRouterState state) =>
+            const PricingSettingsScreen(),
+      ),
+      GoRoute(
+        path: RoutePaths.settings,
+        name: 'settings',
+        builder: (BuildContext context, GoRouterState state) =>
+            const SettingsHubScreen(),
       ),
       GoRoute(
         path: RoutePaths.organizationSetup,

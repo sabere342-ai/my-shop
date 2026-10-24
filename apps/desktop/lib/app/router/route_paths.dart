@@ -19,6 +19,15 @@ abstract final class RoutePaths {
   /// [signIn].
   static const String organizationSetup = '/organization-setup';
 
+  /// The settings surfaces (M3-S4).
+  static const String settings = '/settings';
+
+  /// The general settings editor.
+  static const String settingsGeneral = '/settings/general';
+
+  /// The pricing & discount editor.
+  static const String settingsPricing = '/settings/pricing';
+
   /// The catch-all screen an unmatched location resolves to.
   static const String notFound = '/not-found';
 }

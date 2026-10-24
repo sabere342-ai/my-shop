@@ -2070,6 +2070,412 @@ class RemoteAppliedChangesCompanion
   }
 }
 
+class $SettingsSnapshotsTable extends SettingsSnapshots
+    with TableInfo<$SettingsSnapshotsTable, SettingsSnapshot> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $SettingsSnapshotsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _organizationIdMeta = const VerificationMeta(
+    'organizationId',
+  );
+  @override
+  late final GeneratedColumn<String> organizationId = GeneratedColumn<String>(
+    'organization_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _settingsVersionMeta = const VerificationMeta(
+    'settingsVersion',
+  );
+  @override
+  late final GeneratedColumn<int> settingsVersion = GeneratedColumn<int>(
+    'settings_version',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _payloadJsonMeta = const VerificationMeta(
+    'payloadJson',
+  );
+  @override
+  late final GeneratedColumn<String> payloadJson = GeneratedColumn<String>(
+    'payload_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _fetchedAtMeta = const VerificationMeta(
+    'fetchedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> fetchedAt = GeneratedColumn<DateTime>(
+    'fetched_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _fetchedByUserIdMeta = const VerificationMeta(
+    'fetchedByUserId',
+  );
+  @override
+  late final GeneratedColumn<String> fetchedByUserId = GeneratedColumn<String>(
+    'fetched_by_user_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    organizationId,
+    settingsVersion,
+    payloadJson,
+    fetchedAt,
+    fetchedByUserId,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'settings_snapshots';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<SettingsSnapshot> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('organization_id')) {
+      context.handle(
+        _organizationIdMeta,
+        organizationId.isAcceptableOrUnknown(
+          data['organization_id']!,
+          _organizationIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_organizationIdMeta);
+    }
+    if (data.containsKey('settings_version')) {
+      context.handle(
+        _settingsVersionMeta,
+        settingsVersion.isAcceptableOrUnknown(
+          data['settings_version']!,
+          _settingsVersionMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_settingsVersionMeta);
+    }
+    if (data.containsKey('payload_json')) {
+      context.handle(
+        _payloadJsonMeta,
+        payloadJson.isAcceptableOrUnknown(
+          data['payload_json']!,
+          _payloadJsonMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_payloadJsonMeta);
+    }
+    if (data.containsKey('fetched_at')) {
+      context.handle(
+        _fetchedAtMeta,
+        fetchedAt.isAcceptableOrUnknown(data['fetched_at']!, _fetchedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_fetchedAtMeta);
+    }
+    if (data.containsKey('fetched_by_user_id')) {
+      context.handle(
+        _fetchedByUserIdMeta,
+        fetchedByUserId.isAcceptableOrUnknown(
+          data['fetched_by_user_id']!,
+          _fetchedByUserIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_fetchedByUserIdMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {organizationId};
+  @override
+  SettingsSnapshot map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return SettingsSnapshot(
+      organizationId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}organization_id'],
+      )!,
+      settingsVersion: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}settings_version'],
+      )!,
+      payloadJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}payload_json'],
+      )!,
+      fetchedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}fetched_at'],
+      )!,
+      fetchedByUserId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}fetched_by_user_id'],
+      )!,
+    );
+  }
+
+  @override
+  $SettingsSnapshotsTable createAlias(String alias) {
+    return $SettingsSnapshotsTable(attachedDatabase, alias);
+  }
+}
+
+class SettingsSnapshot extends DataClass
+    implements Insertable<SettingsSnapshot> {
+  /// The organization the snapshot belongs to (§38.18 "associate the cache
+  /// with the correct organization").
+  final String organizationId;
+
+  /// The §38.18 monotonic version this payload was fetched at.
+  final int settingsVersion;
+
+  /// The verbatim canonical GET response, JSON-encoded.
+  final String payloadJson;
+
+  /// When the device fetched it (§38.18's meaningful last-sync metadata).
+  final DateTime fetchedAt;
+
+  /// The authenticated user the fetch ran for — recorded for the
+  /// session-gating contract (display bound to a matching signed-in
+  /// session), never a secret.
+  final String fetchedByUserId;
+  const SettingsSnapshot({
+    required this.organizationId,
+    required this.settingsVersion,
+    required this.payloadJson,
+    required this.fetchedAt,
+    required this.fetchedByUserId,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['organization_id'] = Variable<String>(organizationId);
+    map['settings_version'] = Variable<int>(settingsVersion);
+    map['payload_json'] = Variable<String>(payloadJson);
+    map['fetched_at'] = Variable<DateTime>(fetchedAt);
+    map['fetched_by_user_id'] = Variable<String>(fetchedByUserId);
+    return map;
+  }
+
+  SettingsSnapshotsCompanion toCompanion(bool nullToAbsent) {
+    return SettingsSnapshotsCompanion(
+      organizationId: Value(organizationId),
+      settingsVersion: Value(settingsVersion),
+      payloadJson: Value(payloadJson),
+      fetchedAt: Value(fetchedAt),
+      fetchedByUserId: Value(fetchedByUserId),
+    );
+  }
+
+  factory SettingsSnapshot.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return SettingsSnapshot(
+      organizationId: serializer.fromJson<String>(json['organizationId']),
+      settingsVersion: serializer.fromJson<int>(json['settingsVersion']),
+      payloadJson: serializer.fromJson<String>(json['payloadJson']),
+      fetchedAt: serializer.fromJson<DateTime>(json['fetchedAt']),
+      fetchedByUserId: serializer.fromJson<String>(json['fetchedByUserId']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'organizationId': serializer.toJson<String>(organizationId),
+      'settingsVersion': serializer.toJson<int>(settingsVersion),
+      'payloadJson': serializer.toJson<String>(payloadJson),
+      'fetchedAt': serializer.toJson<DateTime>(fetchedAt),
+      'fetchedByUserId': serializer.toJson<String>(fetchedByUserId),
+    };
+  }
+
+  SettingsSnapshot copyWith({
+    String? organizationId,
+    int? settingsVersion,
+    String? payloadJson,
+    DateTime? fetchedAt,
+    String? fetchedByUserId,
+  }) => SettingsSnapshot(
+    organizationId: organizationId ?? this.organizationId,
+    settingsVersion: settingsVersion ?? this.settingsVersion,
+    payloadJson: payloadJson ?? this.payloadJson,
+    fetchedAt: fetchedAt ?? this.fetchedAt,
+    fetchedByUserId: fetchedByUserId ?? this.fetchedByUserId,
+  );
+  SettingsSnapshot copyWithCompanion(SettingsSnapshotsCompanion data) {
+    return SettingsSnapshot(
+      organizationId: data.organizationId.present
+          ? data.organizationId.value
+          : this.organizationId,
+      settingsVersion: data.settingsVersion.present
+          ? data.settingsVersion.value
+          : this.settingsVersion,
+      payloadJson: data.payloadJson.present
+          ? data.payloadJson.value
+          : this.payloadJson,
+      fetchedAt: data.fetchedAt.present ? data.fetchedAt.value : this.fetchedAt,
+      fetchedByUserId: data.fetchedByUserId.present
+          ? data.fetchedByUserId.value
+          : this.fetchedByUserId,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SettingsSnapshot(')
+          ..write('organizationId: $organizationId, ')
+          ..write('settingsVersion: $settingsVersion, ')
+          ..write('payloadJson: $payloadJson, ')
+          ..write('fetchedAt: $fetchedAt, ')
+          ..write('fetchedByUserId: $fetchedByUserId')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    organizationId,
+    settingsVersion,
+    payloadJson,
+    fetchedAt,
+    fetchedByUserId,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is SettingsSnapshot &&
+          other.organizationId == this.organizationId &&
+          other.settingsVersion == this.settingsVersion &&
+          other.payloadJson == this.payloadJson &&
+          other.fetchedAt == this.fetchedAt &&
+          other.fetchedByUserId == this.fetchedByUserId);
+}
+
+class SettingsSnapshotsCompanion extends UpdateCompanion<SettingsSnapshot> {
+  final Value<String> organizationId;
+  final Value<int> settingsVersion;
+  final Value<String> payloadJson;
+  final Value<DateTime> fetchedAt;
+  final Value<String> fetchedByUserId;
+  final Value<int> rowid;
+  const SettingsSnapshotsCompanion({
+    this.organizationId = const Value.absent(),
+    this.settingsVersion = const Value.absent(),
+    this.payloadJson = const Value.absent(),
+    this.fetchedAt = const Value.absent(),
+    this.fetchedByUserId = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  SettingsSnapshotsCompanion.insert({
+    required String organizationId,
+    required int settingsVersion,
+    required String payloadJson,
+    required DateTime fetchedAt,
+    required String fetchedByUserId,
+    this.rowid = const Value.absent(),
+  }) : organizationId = Value(organizationId),
+       settingsVersion = Value(settingsVersion),
+       payloadJson = Value(payloadJson),
+       fetchedAt = Value(fetchedAt),
+       fetchedByUserId = Value(fetchedByUserId);
+  static Insertable<SettingsSnapshot> custom({
+    Expression<String>? organizationId,
+    Expression<int>? settingsVersion,
+    Expression<String>? payloadJson,
+    Expression<DateTime>? fetchedAt,
+    Expression<String>? fetchedByUserId,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (organizationId != null) 'organization_id': organizationId,
+      if (settingsVersion != null) 'settings_version': settingsVersion,
+      if (payloadJson != null) 'payload_json': payloadJson,
+      if (fetchedAt != null) 'fetched_at': fetchedAt,
+      if (fetchedByUserId != null) 'fetched_by_user_id': fetchedByUserId,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  SettingsSnapshotsCompanion copyWith({
+    Value<String>? organizationId,
+    Value<int>? settingsVersion,
+    Value<String>? payloadJson,
+    Value<DateTime>? fetchedAt,
+    Value<String>? fetchedByUserId,
+    Value<int>? rowid,
+  }) {
+    return SettingsSnapshotsCompanion(
+      organizationId: organizationId ?? this.organizationId,
+      settingsVersion: settingsVersion ?? this.settingsVersion,
+      payloadJson: payloadJson ?? this.payloadJson,
+      fetchedAt: fetchedAt ?? this.fetchedAt,
+      fetchedByUserId: fetchedByUserId ?? this.fetchedByUserId,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (organizationId.present) {
+      map['organization_id'] = Variable<String>(organizationId.value);
+    }
+    if (settingsVersion.present) {
+      map['settings_version'] = Variable<int>(settingsVersion.value);
+    }
+    if (payloadJson.present) {
+      map['payload_json'] = Variable<String>(payloadJson.value);
+    }
+    if (fetchedAt.present) {
+      map['fetched_at'] = Variable<DateTime>(fetchedAt.value);
+    }
+    if (fetchedByUserId.present) {
+      map['fetched_by_user_id'] = Variable<String>(fetchedByUserId.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SettingsSnapshotsCompanion(')
+          ..write('organizationId: $organizationId, ')
+          ..write('settingsVersion: $settingsVersion, ')
+          ..write('payloadJson: $payloadJson, ')
+          ..write('fetchedAt: $fetchedAt, ')
+          ..write('fetchedByUserId: $fetchedByUserId, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -2080,6 +2486,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   );
   late final $RemoteAppliedChangesTable remoteAppliedChanges =
       $RemoteAppliedChangesTable(this);
+  late final $SettingsSnapshotsTable settingsSnapshots =
+      $SettingsSnapshotsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -2089,6 +2497,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     outbox,
     localAuditEvents,
     remoteAppliedChanges,
+    settingsSnapshots,
   ];
 }
 
@@ -3152,6 +3561,236 @@ typedef $$RemoteAppliedChangesTableProcessedTableManager =
       RemoteAppliedChange,
       PrefetchHooks Function()
     >;
+typedef $$SettingsSnapshotsTableCreateCompanionBuilder =
+    SettingsSnapshotsCompanion Function({
+      required String organizationId,
+      required int settingsVersion,
+      required String payloadJson,
+      required DateTime fetchedAt,
+      required String fetchedByUserId,
+      Value<int> rowid,
+    });
+typedef $$SettingsSnapshotsTableUpdateCompanionBuilder =
+    SettingsSnapshotsCompanion Function({
+      Value<String> organizationId,
+      Value<int> settingsVersion,
+      Value<String> payloadJson,
+      Value<DateTime> fetchedAt,
+      Value<String> fetchedByUserId,
+      Value<int> rowid,
+    });
+
+class $$SettingsSnapshotsTableFilterComposer
+    extends Composer<_$AppDatabase, $SettingsSnapshotsTable> {
+  $$SettingsSnapshotsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get organizationId => $composableBuilder(
+    column: $table.organizationId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get settingsVersion => $composableBuilder(
+    column: $table.settingsVersion,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get payloadJson => $composableBuilder(
+    column: $table.payloadJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get fetchedAt => $composableBuilder(
+    column: $table.fetchedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get fetchedByUserId => $composableBuilder(
+    column: $table.fetchedByUserId,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$SettingsSnapshotsTableOrderingComposer
+    extends Composer<_$AppDatabase, $SettingsSnapshotsTable> {
+  $$SettingsSnapshotsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get organizationId => $composableBuilder(
+    column: $table.organizationId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get settingsVersion => $composableBuilder(
+    column: $table.settingsVersion,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get payloadJson => $composableBuilder(
+    column: $table.payloadJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get fetchedAt => $composableBuilder(
+    column: $table.fetchedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get fetchedByUserId => $composableBuilder(
+    column: $table.fetchedByUserId,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$SettingsSnapshotsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $SettingsSnapshotsTable> {
+  $$SettingsSnapshotsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get organizationId => $composableBuilder(
+    column: $table.organizationId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get settingsVersion => $composableBuilder(
+    column: $table.settingsVersion,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get payloadJson => $composableBuilder(
+    column: $table.payloadJson,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get fetchedAt =>
+      $composableBuilder(column: $table.fetchedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get fetchedByUserId => $composableBuilder(
+    column: $table.fetchedByUserId,
+    builder: (column) => column,
+  );
+}
+
+class $$SettingsSnapshotsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $SettingsSnapshotsTable,
+          SettingsSnapshot,
+          $$SettingsSnapshotsTableFilterComposer,
+          $$SettingsSnapshotsTableOrderingComposer,
+          $$SettingsSnapshotsTableAnnotationComposer,
+          $$SettingsSnapshotsTableCreateCompanionBuilder,
+          $$SettingsSnapshotsTableUpdateCompanionBuilder,
+          (
+            SettingsSnapshot,
+            BaseReferences<
+              _$AppDatabase,
+              $SettingsSnapshotsTable,
+              SettingsSnapshot
+            >,
+          ),
+          SettingsSnapshot,
+          PrefetchHooks Function()
+        > {
+  $$SettingsSnapshotsTableTableManager(
+    _$AppDatabase db,
+    $SettingsSnapshotsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$SettingsSnapshotsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$SettingsSnapshotsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$SettingsSnapshotsTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> organizationId = const Value.absent(),
+                Value<int> settingsVersion = const Value.absent(),
+                Value<String> payloadJson = const Value.absent(),
+                Value<DateTime> fetchedAt = const Value.absent(),
+                Value<String> fetchedByUserId = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => SettingsSnapshotsCompanion(
+                organizationId: organizationId,
+                settingsVersion: settingsVersion,
+                payloadJson: payloadJson,
+                fetchedAt: fetchedAt,
+                fetchedByUserId: fetchedByUserId,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String organizationId,
+                required int settingsVersion,
+                required String payloadJson,
+                required DateTime fetchedAt,
+                required String fetchedByUserId,
+                Value<int> rowid = const Value.absent(),
+              }) => SettingsSnapshotsCompanion.insert(
+                organizationId: organizationId,
+                settingsVersion: settingsVersion,
+                payloadJson: payloadJson,
+                fetchedAt: fetchedAt,
+                fetchedByUserId: fetchedByUserId,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<$SettingsSnapshotsTable, SettingsSnapshot>(table),
+                  BaseReferences<
+                    _$AppDatabase,
+                    $SettingsSnapshotsTable,
+                    SettingsSnapshot
+                  >(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$SettingsSnapshotsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $SettingsSnapshotsTable,
+      SettingsSnapshot,
+      $$SettingsSnapshotsTableFilterComposer,
+      $$SettingsSnapshotsTableOrderingComposer,
+      $$SettingsSnapshotsTableAnnotationComposer,
+      $$SettingsSnapshotsTableCreateCompanionBuilder,
+      $$SettingsSnapshotsTableUpdateCompanionBuilder,
+      (
+        SettingsSnapshot,
+        BaseReferences<
+          _$AppDatabase,
+          $SettingsSnapshotsTable,
+          SettingsSnapshot
+        >,
+      ),
+      SettingsSnapshot,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -3164,4 +3803,6 @@ class $AppDatabaseManager {
       $$LocalAuditEventsTableTableManager(_db, _db.localAuditEvents);
   $$RemoteAppliedChangesTableTableManager get remoteAppliedChanges =>
       $$RemoteAppliedChangesTableTableManager(_db, _db.remoteAppliedChanges);
+  $$SettingsSnapshotsTableTableManager get settingsSnapshots =>
+      $$SettingsSnapshotsTableTableManager(_db, _db.settingsSnapshots);
 }

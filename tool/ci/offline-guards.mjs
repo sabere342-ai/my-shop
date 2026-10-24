@@ -51,6 +51,22 @@ const APPLY_ENTRY = 'lib/core/offline/apply/apply_remote_without_outbox.dart';
 /** Stage 24: the one declared non-apply local-write door (M1b-S8 grace store). */
 const GRACE_STORE = 'lib/core/offline/grace/offline_grace_store.dart';
 
+/**
+ * Stage 24: the second declared non-apply local-write door (M3-S4 settings
+ * snapshot cache). `lib/core/offline/settings/settings_snapshot_cache.dart`
+ * writes remote-origin data — but it is the §38.18 settings *replica*, not a
+ * change-log apply: rows enter only from successfully fetched authoritative
+ * GET responses, are keyed by a monotonic `settings_version` whose regression
+ * is refused, are never enqueueable, and are per-organization structurally
+ * validated on every read. §38.12.1's loop threat is a write made *in
+ * response to a sync change*, which this store cannot produce; the T-O7
+ * behavioural proof stays where it belongs (outbox count unchanged across the
+ * cache lifecycle, asserted in the M3-S4 suite). One named file, like the
+ * grace store — every other file under `settings/` is still held to the
+ * single-door rule.
+ */
+const SETTINGS_SNAPSHOT_CACHE = 'lib/core/offline/settings/settings_snapshot_cache.dart';
+
 /** Stage 23: any deletion of outbox rows outside the outbox module. */
 const OUTBOX_DELETE_RULES = [
   { name: 'outbox-delete-path', re: /\b\w*outbox\w*\s*\.\s*(?:delete|deleteWhere|deleteAll|clear)\s*\(/gi },
@@ -86,6 +102,8 @@ for (const rel of dartFiles) {
   const isMigration = relFromLib.includes('/migrations/');
   const isApplyEntry = relFromLib === APPLY_ENTRY.replace(/^lib\//, '');
   const isGraceStore = relFromLib === GRACE_STORE.replace(/^lib\//, '');
+  const isSettingsSnapshotCache =
+    relFromLib === SETTINGS_SNAPSHOT_CACHE.replace(/^lib\//, '');
 
   /** @param {string} rule @param {string} detail */
   const add = (rule, detail, index) => {
@@ -105,7 +123,8 @@ for (const rel of dartFiles) {
     }
   }
 
-  if (isOffline && !isOutbox && !isMigration && !isApplyEntry && !isGraceStore) {
+  if (isOffline && !isOutbox && !isMigration && !isApplyEntry && !isGraceStore && !isSettingsSnapshotCache) {
+
     for (const rule of LOCAL_WRITE_RULES) {
       for (const match of text.matchAll(rule.re)) {
         add(rule.name, 'local write outside the applyRemoteWithoutOutbox door (stage 24)', match.index ?? 0);

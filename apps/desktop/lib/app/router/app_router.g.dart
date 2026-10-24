@@ -12,9 +12,11 @@ part of 'app_router.dart';
 ///
 /// Riverpod owns the value and `go_router` only ever sees it as an argument to
 /// a pure function, which is what keeps routing testable without a widget
-/// tree. The value is `notProvisioned` because no session store exists yet;
-/// the first slice that persists a session replaces this provider's body, not
-/// its consumers.
+/// tree. The value is derived from the M2-S7 [appSessionProvider]: the boot
+/// instant (`SessionPhase.bootPending`) maps to `notProvisioned` — the router
+/// holds the honest first frame instead of guessing — and every resolved
+/// session maps onto the guard's three-way contract. A session change rebuilds
+/// the router with the new decision instead of nudging an already-built one.
 
 @ProviderFor(navigationSession)
 final navigationSessionProvider = NavigationSessionProvider._();
@@ -23,9 +25,11 @@ final navigationSessionProvider = NavigationSessionProvider._();
 ///
 /// Riverpod owns the value and `go_router` only ever sees it as an argument to
 /// a pure function, which is what keeps routing testable without a widget
-/// tree. The value is `notProvisioned` because no session store exists yet;
-/// the first slice that persists a session replaces this provider's body, not
-/// its consumers.
+/// tree. The value is derived from the M2-S7 [appSessionProvider]: the boot
+/// instant (`SessionPhase.bootPending`) maps to `notProvisioned` — the router
+/// holds the honest first frame instead of guessing — and every resolved
+/// session maps onto the guard's three-way contract. A session change rebuilds
+/// the router with the new decision instead of nudging an already-built one.
 
 final class NavigationSessionProvider
     extends
@@ -39,9 +43,11 @@ final class NavigationSessionProvider
   ///
   /// Riverpod owns the value and `go_router` only ever sees it as an argument to
   /// a pure function, which is what keeps routing testable without a widget
-  /// tree. The value is `notProvisioned` because no session store exists yet;
-  /// the first slice that persists a session replaces this provider's body, not
-  /// its consumers.
+  /// tree. The value is derived from the M2-S7 [appSessionProvider]: the boot
+  /// instant (`SessionPhase.bootPending`) maps to `notProvisioned` — the router
+  /// holds the honest first frame instead of guessing — and every resolved
+  /// session maps onto the guard's three-way contract. A session change rebuilds
+  /// the router with the new decision instead of nudging an already-built one.
   NavigationSessionProvider._()
     : super(
         from: null,
@@ -76,37 +82,37 @@ final class NavigationSessionProvider
   }
 }
 
-String _$navigationSessionHash() => r'60dc1ee1a28f312af05aed650e235373f1879de0';
+String _$navigationSessionHash() => r'd1e7e21b7dd578a2619adfd968604dcb506073ac';
 
 /// The client's single `GoRouter` (Master Plan section 6.6).
 ///
-/// The route table is deliberately thin: the shell at `/`, the catch-all at
-/// `/not-found`, and a `redirect` that delegates to
-/// [resolveRouterRedirect]. Because the provider watches
-/// [navigationSessionProvider], a session change rebuilds the router with the
-/// new decision instead of nudging an already-built one.
+/// The route table is deliberately thin: the shell at `/`, the two session
+/// screens the M2-S7 flow drives, the catch-all at `/not-found`, and a
+/// `redirect` that delegates to [resolveRouterRedirect]. Because the provider
+/// watches [navigationSessionProvider], a session change rebuilds the router
+/// with the new decision instead of nudging an already-built one.
 
 @ProviderFor(appRouter)
 final appRouterProvider = AppRouterProvider._();
 
 /// The client's single `GoRouter` (Master Plan section 6.6).
 ///
-/// The route table is deliberately thin: the shell at `/`, the catch-all at
-/// `/not-found`, and a `redirect` that delegates to
-/// [resolveRouterRedirect]. Because the provider watches
-/// [navigationSessionProvider], a session change rebuilds the router with the
-/// new decision instead of nudging an already-built one.
+/// The route table is deliberately thin: the shell at `/`, the two session
+/// screens the M2-S7 flow drives, the catch-all at `/not-found`, and a
+/// `redirect` that delegates to [resolveRouterRedirect]. Because the provider
+/// watches [navigationSessionProvider], a session change rebuilds the router
+/// with the new decision instead of nudging an already-built one.
 
 final class AppRouterProvider
     extends $FunctionalProvider<GoRouter, GoRouter, GoRouter>
     with $Provider<GoRouter> {
   /// The client's single `GoRouter` (Master Plan section 6.6).
   ///
-  /// The route table is deliberately thin: the shell at `/`, the catch-all at
-  /// `/not-found`, and a `redirect` that delegates to
-  /// [resolveRouterRedirect]. Because the provider watches
-  /// [navigationSessionProvider], a session change rebuilds the router with the
-  /// new decision instead of nudging an already-built one.
+  /// The route table is deliberately thin: the shell at `/`, the two session
+  /// screens the M2-S7 flow drives, the catch-all at `/not-found`, and a
+  /// `redirect` that delegates to [resolveRouterRedirect]. Because the provider
+  /// watches [navigationSessionProvider], a session change rebuilds the router
+  /// with the new decision instead of nudging an already-built one.
   AppRouterProvider._()
     : super(
         from: null,
@@ -140,4 +146,4 @@ final class AppRouterProvider
   }
 }
 
-String _$appRouterHash() => r'0cc491fc4359f7f78c05e034c663e0b037eb48ac';
+String _$appRouterHash() => r'a161768b17fe4f16376fd2affdd1be2bfb46587d';

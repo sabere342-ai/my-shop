@@ -347,10 +347,58 @@ a changed rounding mode, a flipped pricing mode — is **accepted and flagged
 line inconsistent with its own discount (the §16.2 identity violated, an
 above-list fixed price, malformed values) is corruption and is refused
 `400 VALIDATION_FAILED` in both entry points. The below-cost flag, the
-settings surface (`pricing.policy.edit` gate), and the §18 refusals are all
-registered in the problem-code vocabulary; the settings row's discount columns fail closed (`500 INTERNAL_ERROR`) if a stored
 value is unreadable. Sale-line persistence and a per-line approval history are
 M5 scope.
+
+### The settings client surface and the versioned offline cache (§22, §38.18, slice M3-S4)
+
+The Flutter client gains the settings feature — a settings hub, a general
+settings editor (§22.2 identity, currency and display numerals, invoice
+defaults, footer and logo visibility, customer-required-on-credit, receivables
+aging, the receipt presentation fields), and a pricing & discount editor (§17
+mode selection with per-mode explanations plus the five §18 policy fields,
+nullable threshold included). Both hang off the existing go_router shell behind
+the redirect guard and are wired to the server's own wire surfaces:
+
+- **Server-owned values, strict parsing.** `lib/features/settings/models/`
+  parses the canonical `OrganizationSettingsResponse` field by field — 64-bit
+  money as exact minor-unit integers from decimal strings, the §18 percentage
+  compared in integer hundredths, closed enums mirrored from the server
+  vocabulary, and an unknown member refusing the whole snapshot (§22.1 fail
+  closed). What the UI shows as live truth is the server's own answer, never a
+  locally computed value.
+- **Affordances from the effective set.** A feature-level provider loads
+  `GET …/authorization/me` (effective permissions, `permissionsVersion`,
+  `isOwner`) and derives which affordances render; owner-exclusive fields stay
+  visible but disabled for non-owners with a caption. This is presentation
+  gating only — every decision is re-checked server-side inside the PUT.
+- **Saves cross only what changed.** A save PUTs only the touched fields plus
+  the body's `settingsVersion` token; a material policy change asks for an
+  explicit confirmation first. A stale token is answered by the server's `409
+  SETTINGS_VERSION_CONFLICT`: the dialog keeps the draft, and reconciliation is
+  a fresh authoritative read — never a silent retry of the lost write.
+- **The versioned offline cache (§38.18, local Drift schema v4, additive).**
+  A per-organization snapshot table stores exactly what a successful GET
+  answered: the verbatim payload, its `settings_version`, fetch time, and
+  fetching user. A newer version alone replaces an older one; a stale response
+  can never overwrite a newer snapshot; a corrupted or structurally invalid
+  row is refused as a named corruption, not silently served; rows are keyed by
+  organization and displayed only to a matching signed-in session. When the
+  network withholds an attempt, the cached values are shown read-only with
+  their version and last-sync metadata, and every mutation affordance is
+  disabled — a cache is a display source, never an authority and never a save
+  path. Nothing here enqueues an outbox row or performs any upward
+  synchronization: the store is a declared, narrowly-scoped stage-24 exemption
+  in the offline guards, written only from fetched GET replicas and rejected
+  version regressions.
+
+The real-backend connection is exercised end to end by an env-gated integration
+suite (`test/settings/real_backend_settings_test.dart`), skipped for ordinary
+runs and CI: with `MY_SHOP_E2E_URL`, `MY_SHOP_E2E_EMAIL`, and
+`MY_SHOP_E2E_PASSWORD` naming a live local API, it drives the real client stack
+against the real NestJS server — login, owner authorization, typed GET, a
+persisted rename, the 409 on a stale token, and the cache holding the saved
+snapshot.
 
 ### Database-enforced tenancy and ingress re-validation (§8–§9.4, slice M2-S4)
 

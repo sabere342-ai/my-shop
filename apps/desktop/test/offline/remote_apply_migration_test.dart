@@ -11,6 +11,10 @@ import 'package:path/path.dart' as p;
 // table (`remote_applied_changes`). The migration is forward-only and
 // additive: it creates one table and rewrites the version stamp, leaving every
 // existing row — including the durable outbox — exactly as it was.
+//
+// The migrated stamp assertions below pin the schema *current* at M3-S4 (v4,
+// which appends the §38.18 settings-snapshot table); the seeded files are
+// still v1/v2, so every open runs the whole forward-only chain 2 → 3 → 4.
 void main() {
   group('T-O19: local schema migration v2 → v3 (§38.6, M1b-S7)', () {
     late Directory tempDir;
@@ -110,15 +114,16 @@ void main() {
       final db = AppDatabase.forTesting(seedDatabase(dbFile));
       addTearDown(() async => db.close());
 
-      expect(await userVersion(db), 3,
-          reason: 'opening a v2 file must run onUpgrade(2 → 3)');
+      expect(await userVersion(db), 4,
+          reason: 'opening a v2 file must run the forward-only steps '
+              '(2 → 3 → 4; M3-S4 appends the v4 step)');
 
       final metaRows = await db.select(db.localMeta).get();
       expect(
         {for (final row in metaRows) row.key: row.value},
         {
           'seed_key': 'v2-survivor',
-          'local_schema_version': '3',
+          'local_schema_version': '4',
         },
         reason: '§38.6.2: the version row is rewritten, all other rows survive',
       );
@@ -138,7 +143,7 @@ void main() {
         'decimal string', () async {
       final db = AppDatabase.forTesting(seedDatabase(dbFile));
       addTearDown(() async => db.close());
-      expect(await userVersion(db), 3);
+      expect(await userVersion(db), 4);
 
       await db.into(db.remoteAppliedChanges).insert(
             RemoteAppliedChangesCompanion.insert(
@@ -153,15 +158,16 @@ void main() {
           reason: '2^53 + 1 survives exactly; a numeric column would not');
     });
 
-    test('a fresh v3 database stamps local_schema_version = 3', () async {
+    test('a fresh database stamps local_schema_version = 4 (the current '
+        'schema)', () async {
       final db = AppDatabase.forTesting(NativeDatabase(dbFile));
       addTearDown(() async => db.close());
 
-      expect(await userVersion(db), 3);
+      expect(await userVersion(db), 4);
       final version = await db.customSelect(
         "SELECT value FROM local_meta WHERE key = 'local_schema_version'",
       ).getSingle();
-      expect(version.read<String>('value'), '3');
+      expect(version.read<String>('value'), '4');
     });
 
     test('a second open does not re-run or duplicate the version stamp',
@@ -172,22 +178,22 @@ void main() {
 
       db = AppDatabase.forTesting(NativeDatabase(dbFile));
       addTearDown(() async => db.close());
-      expect(await userVersion(db), 3);
+      expect(await userVersion(db), 4);
 
       final stamps = await db.customSelect(
         "SELECT value FROM local_meta WHERE key = 'local_schema_version'",
       ).get();
       expect(stamps, hasLength(1),
           reason: 'insertOrReplace keeps exactly one version row');
-      expect(stamps.single.read<String>('value'), '3');
+      expect(stamps.single.read<String>('value'), '4');
     });
 
     test('a v1 database upgrades all the way to v3', () async {
       final db = AppDatabase.forTesting(seedDatabase(dbFile, migrateFromV1: true));
       addTearDown(() async => db.close());
 
-      expect(await userVersion(db), 3,
-          reason: 'v1 → v2 → v3 runs both forward-only steps');
+      expect(await userVersion(db), 4,
+          reason: 'v1 → v2 → v3 → v4 runs every forward-only step');
       expect(await db.select(db.outbox).get(), isEmpty);
       expect(await db.select(db.localAuditEvents).get(), isEmpty);
       expect(await db.select(db.remoteAppliedChanges).get(), isEmpty);
@@ -197,7 +203,7 @@ void main() {
         {for (final row in metaRows) row.key: row.value},
         {
           'seed_key': 'v1-survivor',
-          'local_schema_version': '3',
+          'local_schema_version': '4',
         },
       );
     });

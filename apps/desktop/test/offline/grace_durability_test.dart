@@ -32,11 +32,12 @@ void main() {
     await db.close();
   });
 
-  group('no schema change (§38.6.2, §39.6)', () {
-    test('the local schema version is unchanged and there is no grace table',
-        () async {
-      expect(db.schemaVersion, 3,
-          reason: 'M1b-S8 adds no local schema (v1 local_meta, v2 outbox, v3 guard)');
+  group('the schema the grace store leans on (§38.6.2, §39.6)', () {
+    test('the local schema version names the current schema, and there is no '
+        'grace table', () async {
+      expect(db.schemaVersion, 4,
+          reason: 'M1b-S8 added no local schema (v1 local_meta, v2 outbox, '
+              'v3 guard); M3-S4 appended v4 (§38.18 settings snapshots)');
       expect(
         db.allTables.map((table) => table.actualTableName).where((name) => name.contains('grace')),
         isEmpty,
