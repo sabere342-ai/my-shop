@@ -29,7 +29,7 @@ import { PERMISSION_METADATA_KEY, AuthorizationGuard } from '../authorization/au
 import { ERROR_CODES } from '../errors/problem';
 import type { AuthenticatedPrincipal } from '../identity/auth.service';
 import type { AuthorizationService, EffectiveAuthorization } from '../tenancy/authorization/authorization.service';
-import { InventoryController } from './inventory.controller';
+import { InventoryController, requiredCostingPermissions } from './inventory.controller';
 
 const USER_ID = '11111111-1111-4111-8111-111111111111';
 const ORG_ID = '22222222-2222-4222-8222-222222222222';
@@ -97,11 +97,16 @@ function contextFor(route: InventoryRoute): {
 }
 
 describe('the inventory permission wall (§17: a viewer cannot move stock)', () => {
-  it('declares inventory.view on every read route and inventory.adjust on the movement write', () => {
+  it('declares inventory.view on every quantity read route, inventory.adjust on the movement write, and catalog.cost.edit on the cost reads', () => {
     expect(declaredPermission('listLocations')).toBe('inventory.view');
     expect(declaredPermission('listLevels')).toBe('inventory.view');
     expect(declaredPermission('listMovements')).toBe('inventory.view');
     expect(declaredPermission('submitMovement')).toBe('inventory.adjust');
+    // The M4-S3 costing face (§38.5's "when a cost is involved"): the
+    // inventory.view quantity reads carry no cost member, so the valuation and
+    // the cost snapshots are read only by the cost authority itself.
+    expect(declaredPermission('listValuation')).toBe('catalog.cost.edit');
+    expect(declaredPermission('listCostSnapshots')).toBe('catalog.cost.edit');
   });
 
   it('refuses the movement write to a member whose grants stop at inventory.view', async () => {
@@ -122,17 +127,17 @@ describe('the inventory permission wall (§17: a viewer cannot move stock)', () 
     }
   });
 
-  it('refuses every read route to a member without inventory.view', async () => {
-    const guard = guardFor(effective(['catalog.view', 'sales.create']));
+  it('refuses the costing reads to a member whose grants stop at inventory.view — cost is not a side effect of viewing stock', async () => {
+    const guard = guardFor(effective(['inventory.view']));
 
-    for (const route of ['listLocations', 'listLevels', 'listMovements'] as const) {
+    for (const route of ['listValuation', 'listCostSnapshots'] as const) {
       await expect(guard.canActivate(contextFor(route) as never)).rejects.toMatchObject({
         code: ERROR_CODES.PERMISSION_DENIED,
       });
     }
   });
 
-  it('admits a view-only member through every read route — view is exactly view', async () => {
+  it('admits a view-only member through every quantity read route — view is exactly view', async () => {
     const guard = guardFor(effective(['inventory.view']));
 
     for (const route of ['listLocations', 'listLevels', 'listMovements'] as const) {
@@ -144,5 +149,34 @@ describe('the inventory permission wall (§17: a viewer cannot move stock)', () 
     const guard = guardFor(effective(['inventory.view', 'inventory.adjust']));
 
     await expect(guard.canActivate(contextFor('submitMovement') as never)).resolves.toBe(true);
+  });
+
+  it('admits a member holding only the cost authority through both costing reads — the wall is granular, not bundled', async () => {
+    const guard = guardFor(effective(['catalog.cost.edit']));
+
+    for (const route of ['listValuation', 'listCostSnapshots'] as const) {
+      await expect(guard.canActivate(contextFor(route) as never)).resolves.toBe(true);
+    }
+  });
+});
+
+describe('the §38.5 cost escalation matrix (the controller’s cause decision)', () => {
+  it('demands the receiving authority and the cost authority of a purchase receipt', () => {
+    expect(requiredCostingPermissions('PURCHASE_RECEIPT', '100')).toEqual(['inventory.receive', 'catalog.cost.edit']);
+  });
+
+  it('demands the cost authority of the cost-imposing causes, regardless of a cost offer', () => {
+    expect(requiredCostingPermissions('OPENING_BALANCE', undefined)).toEqual(['catalog.cost.edit']);
+    expect(requiredCostingPermissions('REVALUATION', '500')).toEqual(['catalog.cost.edit']);
+  });
+
+  it('escalates an adjustment only when its wire carries a cost', () => {
+    expect(requiredCostingPermissions('MANUAL_ADJUSTMENT', undefined)).toEqual([]);
+    expect(requiredCostingPermissions('MANUAL_ADJUSTMENT', null)).toEqual([]);
+    expect(requiredCostingPermissions('MANUAL_ADJUSTMENT', '0')).toEqual(['catalog.cost.edit']);
+  });
+
+  it('names no escalation for an unknown cause — the canonicalizer owns that refusal', () => {
+    expect(requiredCostingPermissions('SALE', undefined)).toEqual([]);
   });
 });

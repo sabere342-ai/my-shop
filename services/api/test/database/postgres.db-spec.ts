@@ -341,7 +341,9 @@ describe('database acceptance (real PostgreSQL)', () => {
       // attributes, §15.2 typed units — all forced-RLS tenant tables). M4-S2
       // adds `0014_inventory_core` (§15.4 the three inventory tables — the
       // locations, the authoritative movement ledger, the derived levels —
-      // plus the additive composite target on `product_variants`).
+      // plus the additive composite target on `product_variants`). M4-S3 adds
+      // `0015_inventory_costing` (§30.2 the derived level's moving-average
+      // member, the bounds its fold restates — no new table, no policy edit).
       // Every applied migration must be finished and never rolled back
       // (migration history is append-only, Master Plan §44.1).
       expect(rows.map((row) => row.migration_name)).toEqual([
@@ -359,6 +361,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         '0012_organization_settings',
         '0013_product_catalog',
         '0014_inventory_core',
+        '0015_inventory_costing',
       ]);
       for (const row of rows) {
         expect(row.finished_at).not.toBeNull();
@@ -426,7 +429,7 @@ describe('database acceptance (real PostgreSQL)', () => {
       dbScript('deploy');
 
       const rows = await migrator.$queryRaw<MigrationRow[]>`SELECT migration_name FROM _prisma_migrations`;
-      expect(rows).toHaveLength(14);
+      expect(rows).toHaveLength(15);
     });
   });
 
