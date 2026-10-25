@@ -15,7 +15,7 @@ export interface EmitSchemaProperty {
   type?: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object';
   enum?: ReadonlyArray<string | number>;
   items?: EmitSchemaRef | { type: 'string' };
-  additionalProperties?: EmitSchemaRef | { type: 'string' };
+  additionalProperties?: EmitSchemaRef | { type: 'string' } | boolean;
   $ref?: string;
 }
 
@@ -63,6 +63,17 @@ function itemsType(items: EmitSchemaProperty['items']): string {
 function additionalType(additional: EmitSchemaProperty['additionalProperties']): string {
   if (additional === undefined) {
     return 'object';
+  }
+  // OpenAPI's `true` ("any value allowed") is what a free-form object such as
+  // the variant attribute map documents; the emitted type says exactly that.
+  if (additional === true) {
+    return 'Readonly<Record<string, unknown>>';
+  }
+  if (additional === false) {
+    // OpenAPI's `false` closes the object to exactly its declared properties
+    // — a construct the emitter has no caller for yet; refuse it loudly so a
+    // future document forces the decision instead of silently degrading.
+    throw new Error('additionalProperties: false is not supported by the emitter yet');
   }
   if ('$ref' in additional) {
     return `Readonly<Record<string, ${schemaName(additional.$ref)}>>`;

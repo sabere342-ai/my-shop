@@ -37,7 +37,7 @@ is absent; NULL keeps the predicate NULL, which filters the row out exactly
 like `false`. "No context" is therefore "no rows" for every connection: the
 application role mid-flight, an operator `psql`, a stray pooled session.
 
-## Table inventory — migrations `0008_tenant_row_level_security`, `0009_device_binding`, `0010_audit_streams` + `0011_audit_stream_head_grant`, `0012_organization_settings`
+## Table inventory — migrations `0008_tenant_row_level_security`, `0009_device_binding`, `0010_audit_streams` + `0011_audit_stream_head_grant`, `0012_organization_settings`, `0013_product_catalog`
 
 ### Tenant-owned (forced RLS + `tenant_isolation` policy)
 
@@ -55,9 +55,12 @@ application role mid-flight, an operator `psql`, a stray pooled session.
 | `devices` (M2-S5) | `organization_id` | Symmetric tenant clause — the identical `ENABLE` + `FORCE` + `tenant_isolation` posture, applied by `0009` |
 | `organization_settings` (M3-S1) | `organization_id` | Symmetric tenant clause — the §22.2/§22.4 settings singleton (one row per tenant), applied by `0012` |
 | `organization_feature_flags` (M3-S1) | `organization_id` | Symmetric tenant clause — the §22.2 typed flag rows, one FK step from the settings singleton, applied by `0012` |
+| `products` (M4-S1) | `organization_id` | Symmetric tenant clause — the §15.1/§15.3A product root, applied by `0013` |
+| `product_variants` (M4-S1) | `organization_id` | Symmetric tenant clause — the §15.3A typed-attribute variant rows, per-organization SKU unique index, applied by `0013` |
+| `product_units` (M4-S1) | `organization_id` | Symmetric tenant clause — the §15.2 unit rows (at most one `BASE` and one `PURCHASING` per product), applied by `0013` |
 
 The tenant root needs no `organization_id` — its own `id` is the tenant
-column; the eleven others key on `organization_id`.
+column; the fourteen others key on `organization_id`.
 
 ### Explicitly global (no RLS, classified on purpose)
 

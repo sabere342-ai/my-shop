@@ -58,6 +58,30 @@ export interface BindSessionResponse {
   readonly expiresIn: number;
 }
 
+/** OpenAPI schema `CreateProductRequest` (Master Plan §7.1, ADR-001). */
+export interface CreateProductRequest {
+  readonly nameAr: string;
+  readonly nameEn?: string;
+  readonly category?: string;
+  readonly brand?: string;
+  readonly unitPriceMinor?: string;
+  readonly baseUnit?: object;
+  readonly purchasingUnit?: object;
+}
+
+/** OpenAPI schema `CreateVariantRequest` (Master Plan §7.1, ADR-001). */
+export interface CreateVariantRequest {
+  readonly sku: string;
+  readonly attributes?: object;
+  readonly priceMinor?: string;
+  readonly isActive?: boolean;
+}
+
+/** OpenAPI schema `DeleteProductRequest` (Master Plan §7.1, ADR-001). */
+export interface DeleteProductRequest {
+  readonly reason: string;
+}
+
 /** OpenAPI schema `DeviceResponse` (Master Plan §7.1, ADR-001). */
 export interface DeviceResponse {
   readonly deviceId: string;
@@ -186,6 +210,7 @@ export interface ProblemDocument {
     | 'DISCOUNT_LIMIT_EXCEEDED'
     | 'DISCOUNT_APPROVAL_REQUIRED'
     | 'SETTINGS_VERSION_CONFLICT'
+    | 'CATALOG_SKU_DUPLICATE'
     | 'REPLAY'
     | 'MUTATION_CONTRADICTION'
     | 'INVENTORY_CONFLICT'
@@ -206,6 +231,64 @@ export interface ProblemDocument {
 export interface ProblemFieldError {
   readonly field: string;
   readonly messages: readonly string[];
+}
+
+/** OpenAPI schema `ProductListResponse` (Master Plan §7.1, ADR-001). */
+export interface ProductListResponse {
+  readonly products: readonly ProductSummaryResponse[];
+}
+
+/** OpenAPI schema `ProductResponse` (Master Plan §7.1, ADR-001). */
+export interface ProductResponse {
+  readonly id: string;
+  readonly organizationId: string;
+  readonly nameAr: string;
+  readonly nameEn: string;
+  readonly category: string;
+  readonly brand: string;
+  readonly unitPriceMinor: string;
+  readonly isActive: boolean;
+  readonly units: readonly ProductUnitWire[];
+  readonly variants: readonly ProductVariantResponse[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** OpenAPI schema `ProductSummaryResponse` (Master Plan §7.1, ADR-001). */
+export interface ProductSummaryResponse {
+  readonly id: string;
+  readonly nameAr: string;
+  readonly nameEn: string;
+  readonly category: string;
+  readonly brand: string;
+  readonly unitPriceMinor: string;
+  readonly isActive: boolean;
+  readonly variantCount: number;
+  readonly hasPurchasingUnit: boolean;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** OpenAPI schema `ProductUnitWire` (Master Plan §7.1, ADR-001). */
+export interface ProductUnitWire {
+  readonly kind: 'BASE' | 'PURCHASING';
+  readonly code: string;
+  readonly name: string;
+  readonly baseQuantityFactor: string;
+}
+
+/** OpenAPI schema `ProductVariantResponse` (Master Plan §7.1, ADR-001). */
+export interface ProductVariantResponse {
+  readonly id: string;
+  readonly sku: string;
+  readonly attributes: Readonly<Record<string, unknown>>;
+  readonly priceMinor: string;
+  readonly isActive: boolean;
+  readonly effectivePriceMinor: string;
+  readonly priceSource: 'VARIANT' | 'PRODUCT' | 'UNSET';
+  readonly hasCost: boolean;
+  readonly createdAt: string;
+  readonly updatedAt: string;
 }
 
 /** OpenAPI schema `PullChange` (Master Plan §7.1, ADR-001). */
@@ -346,4 +429,28 @@ export interface UpdateOrganizationSettingsRequest {
   readonly offlineReservedNumberBlocks?: boolean;
   readonly reservedBlockSize?: number;
   readonly featureFlags?: readonly FeatureFlagUpdate[];
+}
+
+/** OpenAPI schema `UpdateProductRequest` (Master Plan §7.1, ADR-001). */
+export interface UpdateProductRequest {
+  readonly nameAr?: string;
+  readonly nameEn?: string;
+  readonly category?: string;
+  readonly brand?: string;
+  readonly unitPriceMinor?: string;
+  readonly isActive?: boolean;
+}
+
+/** OpenAPI schema `UpdateUnitsRequest` (Master Plan §7.1, ADR-001). */
+export interface UpdateUnitsRequest {
+  readonly baseUnit?: object;
+  readonly purchasingUnit?: object;
+}
+
+/** OpenAPI schema `UpdateVariantRequest` (Master Plan §7.1, ADR-001). */
+export interface UpdateVariantRequest {
+  readonly sku?: string;
+  readonly attributes?: object;
+  readonly priceMinor?: string;
+  readonly isActive?: boolean;
 }

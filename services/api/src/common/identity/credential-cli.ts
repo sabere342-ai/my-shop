@@ -27,8 +27,13 @@
  * Output contract: exactly one JSON line on stdout for success, exactly one JSON
  * object on stderr for a refusal. Exit codes: `0` success, `1` runtime failure,
  * `2` usage/input/configuration. Nothing here writes a password or a hash.
+ *
+ * The graph itself carries decorator metadata consumers (class-transformer in
+ * the configuration module), so the Reflect test-polyfill is loaded here
+ * first — the same first line `main.ts` runs for the server process.
  */
 
+import 'reflect-metadata';
 import { PrismaClient } from '@prisma/client';
 
 import { ConfigurationError, loadConfig } from '../config/app.config';

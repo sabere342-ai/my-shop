@@ -48,6 +48,15 @@ export const ERROR_CODES = {
   /** Master Plan section 22 / section 38.18 (M3-S1): an accepted write raced another; the token is stale. */
   SETTINGS_VERSION_CONFLICT: 'SETTINGS_VERSION_CONFLICT',
 
+  /**
+   * Master Plan section 15.3A / section 40.8 (M4-S1): the SKU a variant is
+   * offered already names another variant **of the same organization**. Uniqueness
+   * is per tenant (§9.2 T-7), so the same SKU in two different organizations is two
+   * unrelated answers — never a conflict. The database unique index enforces this;
+   * this code names the business refusal the constraint produces.
+   */
+  CATALOG_SKU_DUPLICATE: 'CATALOG_SKU_DUPLICATE',
+
   // --- Offline mutation ingress (Master Plan section 38) ---
   /** Master Plan section 38.9: an identical mutation_id was already accepted. */
   REPLAY: 'REPLAY',
@@ -116,6 +125,7 @@ const MESSAGE_BY_CODE: Readonly<Record<ErrorCode, string>> = {
   OFFLINE_GRACE_EXPIRED: 'The offline authorization window has expired.',
   DEVICE_REVOKED: 'This device has been revoked.',
   SETTINGS_VERSION_CONFLICT: 'The settings changed while you were editing. Refresh and try again.',
+  CATALOG_SKU_DUPLICATE: 'A variant of this organization already uses this SKU.',
   CLIENT_TOO_OLD: 'This app version is too old. Update to continue.',
   UNSUPPORTED_MUTATION: 'This operation is not supported by the server.',
 
@@ -140,6 +150,10 @@ const STATUS_BY_CODE: Readonly<Record<ErrorCode, number>> = {
   NOT_FOUND: 404,
 
   INSUFFICIENT_STOCK: 409,
+  // section 15.3A / M4-S1: a per-organization duplicate SKU is a business
+  // conflict (409), exactly like the other invariants whose refusal a caller
+  // resolves by choosing a different value.
+  CATALOG_SKU_DUPLICATE: 409,
   PRICE_OVERRIDE_FORBIDDEN: 403,
   DISCOUNT_FORBIDDEN: 403,
   DISCOUNT_LIMIT_EXCEEDED: 403,
@@ -315,6 +329,7 @@ const TITLE_BY_CODE: Readonly<Record<ErrorCode, string>> = {
   OFFLINE_GRACE_EXPIRED: 'Offline window expired',
   DEVICE_REVOKED: 'Device revoked',
   SETTINGS_VERSION_CONFLICT: 'Settings version conflict',
+  CATALOG_SKU_DUPLICATE: 'Duplicate SKU',
   CLIENT_TOO_OLD: 'App update required',
   UNSUPPORTED_MUTATION: 'Unsupported operation',
 

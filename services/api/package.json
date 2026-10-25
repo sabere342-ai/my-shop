@@ -28,6 +28,7 @@
     "prebootstrap:org": "npm run build",
     "provision:credential": "node scripts/provision-credential.mjs",
     "preprovision:credential": "npm run build",
+    "catalog:walkthrough": "node scripts/catalog-walkthrough.mjs",
     "postinstall": "prisma generate"
   },
   "dependencies": {

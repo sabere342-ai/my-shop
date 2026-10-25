@@ -72,6 +72,31 @@
 // security with the one `tenant_isolation` policy (migration `0012`'s posture,
 // extending `0008`); the bounds and vocabularies the service enforces are
 // restated by CHECKs so the database is the last line of defence.
+//
+// M4-S1 adds the catalog surface (section 40.8 row M4-S1; section 15.1, §15.2,
+// §15.3A.1–2, §17, §30.1): the tenant-owned `products`, `product_variants`, and
+// `product_units` tables. Product and variant each carry an internal UUID that is
+// their durable identity (§15.3A.1: barcode is never the primary key, and SKU is a
+// business identifier, not a primary key); the variant is the future
+// inventory-tracking key, so its identity is final. Money is exact `bigint` minor
+// units (§30.1) bounded non-negative; the product-level list price and the variant
+// override are independent nullable columns and the effective price resolves
+// override → default → unset (§15.3A.2 price inheritance). SKU uniqueness is
+// scoped per organization by a real unique index (§15.3A SKU rule, §9.2 T-7) —
+// never global, so one shop cannot deny another its SKU. Attributes are one
+// validated `jsonb` object per variant, restated by CHECKs so a writer that
+// bypasses the service cannot store a foreign shape. Barcodes and costing columns
+// are deliberately absent: `product_barcodes` is M4b, and a cost column would
+// misstate the M4-S3 engine's authority (§30 — the moving average is computed
+// from movements, never from a catalog write).
+//
+// Like every tenant-owned table, all three carry ENABLE + FORCE row-level
+// security with the one `tenant_isolation` policy (migration `0013` extending
+// `0008`'s posture); the composite foreign keys pin each child's `organization_id`
+// to its parent's in the same row, so a variant cannot reference another
+// tenant's product even at the referential layer.
+//
+// This file is the single source of truth the migration workflow diffs against.
 
 generator client {
   provider = "prisma-client-js"
@@ -206,6 +231,7 @@ model Organization {
   roles       Role[]
   devices     Device[]
   settings    OrganizationSettings?
+  products    Product[]
 
   @@map("organizations")
 }
@@ -645,4 +671,104 @@ model Device {
   @@unique([organizationId, installationId])
   @@index([organizationId, status])
   @@map("devices")
+}
+
+/// section 15.1 / §40.8 M4-S1: the conceptual item — "T-Shirt" — a grouping and
+/// naming entity with exactly one sales meaning per organization (T-7). The
+/// `id` UUID is the product's durable identity; SKU and barcode are attaché
+/// identification at the variant (§15.3A.1), never this row's key.
+///
+/// `name_ar`/`name_en`: the Arabic-first naming (§6.1), `name_en` optional.
+/// `unit_price_minor` is the product-level default list price in exact `bigint`
+/// minor units (§30.1): `NULL` is "unset, to be resolved by the variant"
+/// (§15.3A.2 inheritance), never zero — a catalog editor can store a real zero.
+/// `deleted_at` + `delete_reason` is the §15.1 soft delete with a recorded
+/// reason; a deleted row is invisible to the catalog but never physically
+/// removed (§16.7 discipline: no destructive catalog path).
+///
+/// The `(id, organization_id)` unique pair is the composite foreign-key target
+/// that keeps `product_variants` and `product_units` structurally
+/// non-referenceable across tenants (§9.2/the roles precedent), and forced RLS
+/// (migration `0013`) scopes every read and write to the trusted context.
+model Product {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId  String    @map("organization_id") @db.Uuid
+  nameAr          String    @map("name_ar") @db.VarChar(200)
+  nameEn          String?   @map("name_en") @db.VarChar(200)
+  category        String?   @db.VarChar(100)
+  brand           String?   @db.VarChar(100)
+  unitPriceMinor  BigInt?   @map("unit_price_minor")
+  isActive        Boolean   @default(true) @map("is_active")
+  deleteReason    String?   @map("delete_reason") @db.VarChar(300)
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamp(3)
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  variants     ProductVariant[]
+  units        ProductUnit[]
+
+  @@unique([id, organizationId])
+  @@index([organizationId, deletedAt])
+  @@map("products")
+}
+
+/// §15.3A.2 / §40.8 M4-S1: the sellable and future stock-tracked unit —
+/// "T-Shirt / Black / M". One row is one independently identified variant: its
+/// own UUID, its parent product's organization (the composite foreign key makes
+/// a cross-tenant parent structurally impossible), a SKU unique **per
+/// organization** by a real unique index (§15.3A SKU rule — the database
+/// refuses the duplicate, not a preflight check), typed attributes as one
+/// validated `jsonb` object, and the nullable price override (§15.3A.2:
+/// inherits the product price unless it overrides — `NULL` inheritance is not
+/// a zero). This row's id is the future inventory-tracking key (§15.3A.2: stock
+/// is tracked per variant, never per product), so its identity is final and
+/// M4-S2 references it exactly as created here.
+///
+/// The known-attribute-keys CHECK uses the `jsonb` `-` (remove-keys) operator
+/// rather than a subquery, so the vocabulary is a database fact without leaving
+/// the CHECK constraint's expression space; per-key shape CHECKs restate the
+/// service catalog's types and bounds.
+model ProductVariant {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  productId      String   @map("product_id") @db.Uuid
+  sku            String   @db.VarChar(64)
+  attributes     Json     @default("{}") @db.JsonB
+  priceMinor     BigInt?  @map("price_minor")
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  product Product @relation(fields: [productId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([organizationId, sku])
+  @@index([organizationId, productId])
+  @@map("product_variants")
+}
+
+/// §15.2 / §40.8 M4-S1: the plan's `ProductUnit` as typed rows — the §22.1
+/// "typed columns, never a key-value table" posture. One `BASE` row is the
+/// product's selling unit; at most one `PURCHASING` row per product in V1, and
+/// `base_quantity_factor` is an exact `bigint` (a carton of 12 stores 12, and
+/// stays 12 — purchases convert on receipt, M6; nothing divides in V1). The
+/// `(product_id, kind)` unique pair is what makes "at most one of each" a
+/// database guarantee, and the factor CHECK restates the §15.2 semantics
+/// (`BASE` is exactly 1; a purchasing unit below 2 is not a carton).
+model ProductUnit {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId    String   @map("organization_id") @db.Uuid
+  productId         String   @map("product_id") @db.Uuid
+  kind              String   @db.VarChar(16)
+  code              String   @db.VarChar(24)
+  name              String   @db.VarChar(100)
+  baseQuantityFactor BigInt  @map("base_quantity_factor")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  product Product @relation(fields: [productId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([productId, kind])
+  @@index([organizationId, productId])
+  @@map("product_units")
 }

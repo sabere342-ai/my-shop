@@ -34,6 +34,7 @@ import { DeviceModule } from './common/devices/device.module';
 import { AuditModule } from './common/audit/audit.module';
 import { SettingsModule } from './common/settings/settings.module';
 import { PricingModule } from './common/pricing/pricing.module';
+import { CatalogModule } from './common/catalog/catalog.module';
 import { ProblemDetailsFilter } from './common/errors/problem.filter';
 import { createValidationPipe } from './common/pipes/validation.pipe';
 import { APP_LOGGER, createAppLogger } from './app.providers';
@@ -95,6 +96,7 @@ export class AppModule {
         AuditModule.forRoot(config),
         SettingsModule.forRoot(config),
         PricingModule.forRoot(config),
+        CatalogModule.forRoot(config),
       ],
       providers: coreProviders(config),
       exports: [APP_CONFIG, APP_LOGGER],
