@@ -97,6 +97,22 @@
 // tenant's product even at the referential layer.
 //
 // This file is the single source of truth the migration workflow diffs against.
+//
+// M4-S2 adds the inventory surface (section 40.8 row M4-S2; section 15.4,
+// §15.5, §15.6, §15.6A, §38.14.1): the tenant-owned `inventory_locations`,
+// `stock_movements`, and `stock_levels` tables. `stock_movements` is the
+// authoritative append-only quantity history (append-only by privilege: the
+// application role holds INSERT + SELECT, migration 0014 revokes UPDATE and
+// DELETE), carrying the full movement identity (movement id, optional outbox
+// origin, per-device ordering, per-organization `server_sequence` from the
+// shared `sync_sequences` counter, closed cause, signed exact base-unit
+// delta, and a NULL-until-M4-S3 cost snapshot). `stock_levels` is the derived,
+// cacheable quantity the service maintains inside the movement transaction
+// behind the §15.6 conditional guard — a level may never go negative, and the
+// CHECK restates that so a bypassing writer is refused by the database too.
+// V1 seeds exactly one default location per organization (§ line 203); the
+// partial unique index makes a second default impossible. Every change is
+// audited transactionally (§32.5 class A) with new `INVENTORY_*` event types.
 
 generator client {
   provider = "prisma-client-js"
@@ -227,11 +243,14 @@ model Organization {
   bootstrapKey String             @unique @map("bootstrap_key") @db.VarChar(64)
   createdAt    DateTime           @default(now()) @map("created_at") @db.Timestamp(3)
 
-  memberships OrganizationMembership[]
-  roles       Role[]
-  devices     Device[]
-  settings    OrganizationSettings?
-  products    Product[]
+  memberships    OrganizationMembership[]
+  roles          Role[]
+  devices        Device[]
+  settings       OrganizationSettings?
+  products       Product[]
+  locations      InventoryLocation[]
+  stockMovements StockMovement[]
+  stockLevels    StockLevel[]
 
   @@map("organizations")
 }
@@ -742,6 +761,12 @@ model ProductVariant {
 
   product Product @relation(fields: [productId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
 
+  movements   StockMovement[]
+  stockLevels StockLevel[]
+
+  // The composite target stock_movements / stock_levels (M4-S2) pin to; the
+  // database index that makes it real arrives with migration 0014.
+  @@unique([id, organizationId])
   @@unique([organizationId, sku])
   @@index([organizationId, productId])
   @@map("product_variants")
@@ -771,4 +796,124 @@ model ProductUnit {
   @@unique([productId, kind])
   @@index([organizationId, productId])
   @@map("product_units")
+}
+
+/// Section 15.4 / section 40.8 M4-S2: the plan's `locations` table as
+/// `inventory_locations` — the tenant-owned place stock physically sits. V1
+/// carries exactly one row per organization: the default location the service
+/// seeds deterministically (Arabic-first name, the plan line 203 "V1 seeds one
+/// default location") before its first inventory read or write. The partial
+/// unique index on `is_default` makes "one default" a database guarantee, so a
+/// second location (a later growth decision) can exist but never a second
+/// default. Like every tenant-owned table: ENABLE + FORCE row-level security
+/// with the one `tenant_isolation` policy (migration 0014 extending 0008).
+model InventoryLocation {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  name           String   @db.VarChar(100)
+  isDefault      Boolean  @default(false) @map("is_default")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  movements    StockMovement[]
+  stockLevels  StockLevel[]
+
+  // The composite target stock_movements / stock_levels (M4-S2) pin to.
+  @@unique([id, organizationId])
+  @@index([organizationId, isDefault])
+  @@map("inventory_locations")
+}
+
+/// Section 15.4 + section 38.14.1 (M4-S2): the authoritative append-only stock
+/// ledger. `stock_levels` is the derived, cacheable quantity (its pure function
+/// is the fold over these rows); no path writes a stock total directly (section
+/// 38.14.2). Every row carries the full movement identity: the movement id, the
+/// optional outbox mutation origin, the per-device ordering facts, the
+/// per-organization `server_sequence` the server assigned on acceptance (the
+/// same `sync_sequences` counter the mutation ledger allocates from — one
+/// per-organization acceptance order), the cause from the closed vocabulary of
+/// section 15.5, the signed exact-integer base-unit delta, the cost snapshot
+/// column (NULL until M4-S3 gives it a producer), and the correction reference.
+/// The app role holds INSERT + SELECT and no UPDATE and no DELETE (migration
+/// 0014: append-only by privilege, the A32.5 class), and table is forced-RLS
+/// tenant-owned.
+model StockMovement {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId      String    @map("organization_id") @db.Uuid
+  variantId           String    @map("variant_id") @db.Uuid
+  locationId          String    @map("location_id") @db.Uuid
+  cause               String    @db.VarChar(24)
+  /// The signed, exact base-unit quantity change. Never a float; the wire
+  /// carries a decimal string the domain canonicalizes.
+  quantityDelta       BigInt    @map("quantity_delta")
+  /// A30.2: the cost used, snapshotted. NULL through M4-S2 — the costing
+  /// engine arrives with M4-S3 and no producer may exist before it.
+  unitCostMinor       BigInt?   @map("unit_cost_minor")
+  reversesMovementId  String?   @map("reverses_movement_id") @db.Uuid
+  /// The correction partner (§38.14.2): a resolution is a new movement
+  /// referencing the one it corrects, in the same organization — the composite
+  /// foreign key pins it to the target's `(id, organization_id)` pair.
+  reverses            StockMovement?   @relation("StockCorrection", fields: [reversesMovementId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
+  correctedBy         StockMovement[]  @relation("StockCorrection")
+  /// Section 38.14.1: the outbox mutation that produced a device-originated
+  /// movement. NULL for a server-originated one; unique per organization.
+  originMutationId    String?   @map("origin_mutation_id") @db.Uuid
+  deviceId            String?   @map("device_id") @db.Uuid
+  deviceLocalSequence BigInt?   @map("device_local_sequence")
+  serverSequence      BigInt    @map("server_sequence")
+  reasonCode          String?   @map("reason_code") @db.VarChar(24)
+  reasonNote          String?   @map("reason_note") @db.VarChar(300)
+  documentRef         String?   @map("document_ref") @db.VarChar(300)
+  occurredAt          DateTime  @map("occurred_at") @db.Timestamptz(6)
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamp(3)
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  variant      ProductVariant     @relation(fields: [variantId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
+  location     InventoryLocation  @relation(fields: [locationId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
+
+  // The composite target the correction FK (reverses_movement_id) pins to.
+  @@unique([id, organizationId])
+  // NOTE (M4-S2): the §38.14.1 one-per-mutation outbox origin — the
+  // `_organization_origin_mutation_key` partial unique index — and the
+  // `inventory_locations_single_default` partial unique are declared **only**
+  // by migration `0014`: Prisma cannot model a `WHERE` predicate, and
+  // `migrate diff` compares the un-predicated halves, so a schema-side
+  // declaration that matches the index name would still read as drift. The
+  // per-organization acceptance order is a modelable full unique and is
+  // declared below.
+  @@unique([organizationId, serverSequence], map: "stock_movements_organization_server_sequence_key")
+  @@index([organizationId, variantId, createdAt], map: "stock_movements_organization_id_variant_created_idx")
+  @@index([organizationId, locationId, createdAt], map: "stock_movements_organization_id_location_created_idx")
+  @@map("stock_movements")
+}
+
+/// Section 15.4 (M4-S2): the derived, cacheable quantity per (variant,
+/// location) — never an authority. The service maintains it inside the
+/// movement transaction behind the A15.6 conditional guard (the row is locked
+/// read-modify-write, a result below zero refuses `409 INSUFFICIENT_STOCK`),
+/// and the quantity CHECK restates the non-negative invariant so a writer that
+/// bypasses the service cannot store negative stock. `version` is the row's
+/// optimistic-lock counter (A15.6). Forced-RLS tenant-owned.
+model StockLevel {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  variantId      String   @map("variant_id") @db.Uuid
+  locationId     String   @map("location_id") @db.Uuid
+  quantity       BigInt
+  version        Int      @default(1)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization          @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  variant      ProductVariant        @relation(fields: [variantId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
+  location     InventoryLocation     @relation(fields: [locationId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
+
+  // The 0014 identity: exactly one row per (variant, location) per
+  // organization (`product_stock_levels_identity_key`), one level row per
+  // (id, organization) pair like every tenant child.
+  @@unique([organizationId, variantId, locationId], map: "product_stock_levels_identity_key")
+  @@unique([id, organizationId], map: "stock_levels_id_organization_id_key")
+  @@index([organizationId, locationId], map: "stock_levels_organization_id_location_idx")
+  @@map("stock_levels")
 }
