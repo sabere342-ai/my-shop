@@ -834,7 +834,9 @@ model InventoryLocation {
 /// same `sync_sequences` counter the mutation ledger allocates from — one
 /// per-organization acceptance order), the cause from the closed vocabulary of
 /// section 15.5, the signed exact-integer base-unit delta, the cost snapshot
-/// column (NULL until M4-S3 gives it a producer), and the correction reference.
+/// column (A30.2: the unit cost the M4-S3 engine used, snapshotted on costed
+/// movements; NULL for a movement the costing rules leave uncosted), and the
+/// correction reference.
 /// The app role holds INSERT + SELECT and no UPDATE and no DELETE (migration
 /// 0014: append-only by privilege, the A32.5 class), and table is forced-RLS
 /// tenant-owned.
@@ -888,12 +890,16 @@ model StockMovement {
   @@map("stock_movements")
 }
 
-/// Section 15.4 (M4-S2): the derived, cacheable quantity per (variant,
-/// location) — never an authority. The service maintains it inside the
+/// Section 15.4 (M4-S2; the costing member M4-S3): the derived, cacheable
+/// quantity *and* moving-average cost per (variant, location) — never an
+/// authority. The service maintains it inside the
 /// movement transaction behind the A15.6 conditional guard (the row is locked
 /// read-modify-write, a result below zero refuses `409 INSUFFICIENT_STOCK`),
 /// and the quantity CHECK restates the non-negative invariant so a writer that
-/// bypasses the service cannot store negative stock. `version` is the row's
+/// bypasses the service cannot store negative stock. `average_cost_minor` is
+/// §30.2's perpetual moving weighted average in minor units, folded by the
+/// §30.3 engine inside the same transaction and behind the same row lock;
+/// NULL is the honest absence of a cost basis. `version` is the row's
 /// optimistic-lock counter (A15.6). Forced-RLS tenant-owned.
 model StockLevel {
   id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -901,6 +907,12 @@ model StockLevel {
   variantId      String   @map("variant_id") @db.Uuid
   locationId     String   @map("location_id") @db.Uuid
   quantity       BigInt
+  /// A30.2/A30.3 (M4-S3): the perpetual moving weighted average cost per base
+  /// unit, in minor units — the costing engine's §30.3 division result. NULL
+  /// honestly absent until a costing movement records a basis. The bounds and
+  /// the quantity-above-zero-implies-a-basis invariant are migration 0015's
+  /// CHECKs (Prisma shapes no CHECK, exactly like the M4-S2 partial indexes).
+  averageCostMinor BigInt? @map("average_cost_minor")
   version        Int      @default(1)
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamp(3)
   updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -915,5 +927,6 @@ model StockLevel {
   @@unique([organizationId, variantId, locationId], map: "product_stock_levels_identity_key")
   @@unique([id, organizationId], map: "stock_levels_id_organization_id_key")
   @@index([organizationId, locationId], map: "stock_levels_organization_id_location_idx")
+  @@index([organizationId, variantId], map: "stock_levels_organization_id_variant_idx")
   @@map("stock_levels")
 }
