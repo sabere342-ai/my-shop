@@ -336,7 +336,9 @@ describe('database acceptance (real PostgreSQL)', () => {
       // M2-S6 adds `0010_audit_streams` (§32 both audit streams + the heads)
       // and `0011_audit_stream_head_grant` (the anchor keeps its bounded
       // UPDATE); M3-S1 adds `0012_organization_settings` (§22.2/§22.4 typed
-      // columns + the typed flag rows, forced RLS).
+      // columns + the typed flag rows, forced RLS). M4-S1 adds
+      // `0013_product_catalog` (§15.1 products, §15.3A variants with typed
+      // attributes, §15.2 typed units — all forced-RLS tenant tables).
       // Every applied migration must be finished and never rolled back
       // (migration history is append-only, Master Plan §44.1).
       expect(rows.map((row) => row.migration_name)).toEqual([
@@ -352,6 +354,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         '0010_audit_streams',
         '0011_audit_stream_head_grant',
         '0012_organization_settings',
+        '0013_product_catalog',
       ]);
       for (const row of rows) {
         expect(row.finished_at).not.toBeNull();
@@ -376,7 +379,9 @@ describe('database acceptance (real PostgreSQL)', () => {
       // authorizes the two §32.1 audit-stream tables (`audit_events`,
       // `security_events`) and the §32.5 allocation anchor `audit_stream_heads`.
       // M3-S1 authorizes the §22.2/§22.4 typed settings singleton and the
-      // typed feature-flag rows beside it.
+      // typed feature-flag rows beside it. M4-S1 authorizes the §15.1
+      // conceptual products, the §15.3A sellable variants with their typed
+      // attributes, and the §15.2 typed product-unit rows.
       const rows = await migrator.$queryRaw<NameRow[]>`
         SELECT tablename FROM pg_tables
         WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'
@@ -396,6 +401,9 @@ describe('database acceptance (real PostgreSQL)', () => {
         'organization_settings',
         'organizations',
         'permission_overrides',
+        'product_units',
+        'product_variants',
+        'products',
         'refresh_tokens',
         'role_permissions',
         'roles',
@@ -411,7 +419,7 @@ describe('database acceptance (real PostgreSQL)', () => {
       dbScript('deploy');
 
       const rows = await migrator.$queryRaw<MigrationRow[]>`SELECT migration_name FROM _prisma_migrations`;
-      expect(rows).toHaveLength(12);
+      expect(rows).toHaveLength(13);
     });
   });
 

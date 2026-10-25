@@ -137,7 +137,7 @@ interface MigrationRow {
 /** The §4 classification, pinned as data so a change must be an explicit edit here. */
 const TENANT_ROOT_TABLE = 'organizations';
 
-/** The twelve tenant tables whose isolation column is their `organization_id`. */
+/** The fifteen tenant tables whose isolation column is their `organization_id`. */
 const TENANT_ORG_TABLES: readonly string[] = [
   'audit_events',
   'change_log',
@@ -148,6 +148,9 @@ const TENANT_ORG_TABLES: readonly string[] = [
   'organization_memberships',
   'organization_settings',
   'permission_overrides',
+  'product_units',
+  'product_variants',
+  'products',
   'role_permissions',
   'roles',
   'sync_sequences',
@@ -195,6 +198,13 @@ const DEVICE_INSTALLATION_ID = 'dddddddd-dddd-4ddd-9ddd-dddddddddddd';
 const DEVICE_ROGUE_ID = 'dddddddd-dddd-4ddd-8ddd-eddddddddddd';
 const ROLE_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 const MUTATION_ID = 'ffff0000-0000-4000-8000-000000000001';
+
+/**
+ * The catalog fixture id (M4-S1): a probe parent the catalog probes reference.
+ * No products row is ever seeded under it — the RLS policy must refuse the
+ * probes before a foreign-key trigger could ever be consulted.
+ */
+const CATALOG_PRODUCT_ID = 'd0d0d0d0-d0d0-4d0d-8d0d-d0d0d0d0d0d0';
 
 const BOOTSTRAP_KEY_A = 'rls-tenant-a';
 const BOOTSTRAP_KEY_B = 'rls-tenant-b';
@@ -283,6 +293,36 @@ const CROSS_TENANT_INSERT: ReadonlyMap<string, { sql: string; params: readonly u
       sql: `INSERT INTO permission_overrides (organization_id, user_id, permission_id, effect)
               VALUES ($1::uuid, $2::uuid, $3, 'ALLOW'::permission_effect)`,
       params: [ORG_B, USER_ID, 'catalog.view'],
+    },
+  ],
+  [
+    'product_units',
+    {
+      // The row satisfies every 0013 CHECK (a BASE unit at factor exactly 1),
+      // so the RLS WITH CHECK is the only thing that can refuse it.
+      sql: `INSERT INTO product_units (organization_id, product_id, kind, code, name, base_quantity_factor)
+              VALUES ($1::uuid, $2::uuid, 'BASE', 'LB', 'Liter', 1)`,
+      params: [ORG_B, CATALOG_PRODUCT_ID],
+    },
+  ],
+  [
+    'product_variants',
+    {
+      // The row satisfies every 0013 CHECK (bounded sku, empty attributes
+      // default), so the RLS WITH CHECK is the only thing that can refuse it.
+      sql: `INSERT INTO product_variants (organization_id, product_id, sku)
+              VALUES ($1::uuid, $2::uuid, 'RLS-PROBE-1')`,
+      params: [ORG_B, CATALOG_PRODUCT_ID],
+    },
+  ],
+  [
+    'products',
+    {
+      // The row satisfies every 0013 CHECK, so the RLS WITH CHECK is the only
+      // thing that can refuse it.
+      sql: `INSERT INTO products (organization_id, name_ar)
+              VALUES ($1::uuid, 'RLS Probe B')`,
+      params: [ORG_B],
     },
   ],
   [
@@ -381,6 +421,27 @@ const CROSS_TENANT_MOVE: ReadonlyMap<string, { sql: string; params: readonly unk
     },
   ],
   [
+    'product_units',
+    {
+      sql: `UPDATE product_units SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
+      params: [ORG_B, ORG_A],
+    },
+  ],
+  [
+    'product_variants',
+    {
+      sql: `UPDATE product_variants SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
+      params: [ORG_B, ORG_A],
+    },
+  ],
+  [
+    'products',
+    {
+      sql: `UPDATE products SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
+      params: [ORG_B, ORG_A],
+    },
+  ],
+  [
     'role_permissions',
     {
       sql: `UPDATE role_permissions SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
@@ -411,7 +472,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
     urls = requireTestUrls();
 
     // Drop + create from empty, provision roles, and deploy the full
-    // `0001`–`0012` history: the fresh-install precondition (AC-07).
+    // `0001`–`0013` history: the fresh-install precondition (AC-07).
     dbScript('test-setup');
     setupRan = true;
 
@@ -614,6 +675,28 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
       await tx.$executeRawUnsafe(
         `INSERT INTO organization_feature_flags (organization_id, flag_key, enabled) VALUES ($1::uuid, 'RLS_FIXTURE', true)`,
         ORG_A,
+      );
+      // M4-S1 (§15.1–§15.3A): the tenant-A catalog rows — one product, its
+      // BASE unit row, and one variant — so the ownership-move probes against
+      // the three new tables match rows the policies must refuse to move. The
+      // same zero-row-UPDATE argument the `devices`, `audit_events`, and
+      // settings seeds make: a probe that matches nothing proves nothing.
+      await tx.$executeRawUnsafe(
+        `INSERT INTO products (id, organization_id, name_ar, is_active)
+           VALUES ($1::uuid, $2::uuid, 'RLS Fixture Product', true)`,
+        CATALOG_PRODUCT_ID,
+        ORG_A,
+      );
+      await tx.$executeRawUnsafe(
+        `INSERT INTO product_units (organization_id, product_id, kind, code, name, base_quantity_factor)
+           VALUES ($1::uuid, $2::uuid, 'BASE', 'PCS', 'Piece', 1)`,
+        ORG_A,
+        CATALOG_PRODUCT_ID,
+      );
+      await tx.$executeRawUnsafe(
+        `INSERT INTO product_variants (organization_id, product_id, sku) VALUES ($1::uuid, $2::uuid, 'RLS-FIXTURE-1')`,
+        ORG_A,
+        CATALOG_PRODUCT_ID,
       );
     });
 
@@ -1139,8 +1222,8 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
     });
   });
 
-  describe('AC-07: the fresh install applied exactly the twelve-path history', () => {
-    it('records exactly 0001 through 0012, every one finished and never rolled back', async () => {
+  describe('AC-07: the fresh install applied exactly the thirteen-path history', () => {
+    it('records exactly 0001 through 0013, every one finished and never rolled back', async () => {
       const rows = await migrator.$queryRawUnsafe<MigrationRow[]>(
         `SELECT migration_name FROM _prisma_migrations ORDER BY migration_name`,
       );
@@ -1158,6 +1241,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
         '0010_audit_streams',
         '0011_audit_stream_head_grant',
         '0012_organization_settings',
+        '0013_product_catalog',
       ]);
     });
   });

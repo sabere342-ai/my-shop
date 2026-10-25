@@ -20,6 +20,9 @@
  * - Input is validated **before** configuration is loaded and before any
  *   connection, so a malformed key, name, or email can never be mistaken for a
  *   database problem (AC-07).
+ * - The graph itself carries decorator metadata consumers (class-transformer in
+ *   the configuration module), so the Reflect test-polyfill is loaded here
+ *   first — the same first line `main.ts` runs for the server process.
  *
  * Output contract (§10.4): exactly one structured JSON line on stdout for a
  * successful (including idempotent) run, exactly one JSON object on stderr for
@@ -39,6 +42,7 @@
  *   same `--bootstrap-key`, which is idempotent.
  */
 
+import 'reflect-metadata';
 import { PrismaClient } from '@prisma/client';
 import { ConfigurationError, loadConfig } from '../config/app.config';
 import {

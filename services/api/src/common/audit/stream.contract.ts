@@ -97,11 +97,12 @@ export type SecurityEventType = (typeof SECURITY_EVENT_TYPES)[number];
 /**
  * The closed `audit_events` vocabulary **this code implements end to end**:
  * the §32.2A server-side sync classes, the §32.2 row for device revocation
- * whose producing paths exist, and the §32.2/§22.2 row for the M3-S1 typed
- * settings whose producing path exists. Business actions that other slices
- * own, and locally generated offline events, are reserved contracts — the
- * transactional writer below accepts exactly these, and new types arrive with
- * the slices that own their producing paths.
+ * whose producing paths exist, the §32.2/§22.2 row for the M3-S1 typed
+ * settings whose producing path exists, and the §32.2/§15.3A rows for the
+ * M4-S1 catalog whose producing paths exist. Business actions that other
+ * slices own, and locally generated offline events, are reserved contracts —
+ * the transactional writer below accepts exactly these, and new types arrive
+ * with the slices that own their producing paths.
  */
 export const AUDIT_EVENT_TYPES = [
   'SYNC_MUTATION_ACCEPTED',
@@ -110,6 +111,12 @@ export const AUDIT_EVENT_TYPES = [
   'SYNC_MUTATION_CONTRADICTION',
   'DEVICE_REVOKED',
   'SETTINGS_UPDATED',
+  'CATALOG_PRODUCT_CREATED',
+  'CATALOG_PRODUCT_UPDATED',
+  'CATALOG_PRODUCT_DELETED',
+  'CATALOG_VARIANT_CREATED',
+  'CATALOG_VARIANT_UPDATED',
+  'CATALOG_UNITS_UPDATED',
 ] as const;
 
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
