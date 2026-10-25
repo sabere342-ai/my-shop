@@ -338,7 +338,10 @@ describe('database acceptance (real PostgreSQL)', () => {
       // UPDATE); M3-S1 adds `0012_organization_settings` (§22.2/§22.4 typed
       // columns + the typed flag rows, forced RLS). M4-S1 adds
       // `0013_product_catalog` (§15.1 products, §15.3A variants with typed
-      // attributes, §15.2 typed units — all forced-RLS tenant tables).
+      // attributes, §15.2 typed units — all forced-RLS tenant tables). M4-S2
+      // adds `0014_inventory_core` (§15.4 the three inventory tables — the
+      // locations, the authoritative movement ledger, the derived levels —
+      // plus the additive composite target on `product_variants`).
       // Every applied migration must be finished and never rolled back
       // (migration history is append-only, Master Plan §44.1).
       expect(rows.map((row) => row.migration_name)).toEqual([
@@ -355,6 +358,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         '0011_audit_stream_head_grant',
         '0012_organization_settings',
         '0013_product_catalog',
+        '0014_inventory_core',
       ]);
       for (const row of rows) {
         expect(row.finished_at).not.toBeNull();
@@ -395,6 +399,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         'change_log',
         'device_sync_cursors',
         'devices',
+        'inventory_locations',
         'mutation_ledger',
         'organization_feature_flags',
         'organization_memberships',
@@ -409,6 +414,8 @@ describe('database acceptance (real PostgreSQL)', () => {
         'roles',
         'security_events',
         'sessions',
+        'stock_levels',
+        'stock_movements',
         'sync_sequences',
         'user_credentials',
         'users',
@@ -419,7 +426,7 @@ describe('database acceptance (real PostgreSQL)', () => {
       dbScript('deploy');
 
       const rows = await migrator.$queryRaw<MigrationRow[]>`SELECT migration_name FROM _prisma_migrations`;
-      expect(rows).toHaveLength(13);
+      expect(rows).toHaveLength(14);
     });
   });
 

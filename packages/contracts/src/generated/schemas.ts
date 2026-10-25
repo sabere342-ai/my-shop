@@ -108,9 +108,38 @@ export interface FeatureFlagUpdate {
   readonly enabled?: boolean;
 }
 
+/** OpenAPI schema `LevelListResponse` (Master Plan §7.1, ADR-001). */
+export interface LevelListResponse {
+  readonly levels: readonly LevelResponse[];
+}
+
+/** OpenAPI schema `LevelResponse` (Master Plan §7.1, ADR-001). */
+export interface LevelResponse {
+  readonly variantId: string;
+  readonly sku: string;
+  readonly productNameAr: string;
+  readonly locationId: string;
+  readonly locationName: string;
+  readonly quantity: string;
+  readonly updatedAt: string;
+}
+
 /** OpenAPI schema `LivenessReport` (Master Plan §7.1, ADR-001). */
 export interface LivenessReport {
   readonly status: 'ok';
+}
+
+/** OpenAPI schema `LocationListResponse` (Master Plan §7.1, ADR-001). */
+export interface LocationListResponse {
+  readonly locations: readonly LocationResponse[];
+}
+
+/** OpenAPI schema `LocationResponse` (Master Plan §7.1, ADR-001). */
+export interface LocationResponse {
+  readonly id: string;
+  readonly name: string;
+  readonly isDefault: boolean;
+  readonly createdAt: string;
 }
 
 /** OpenAPI schema `LoginRequest` (Master Plan §7.1, ADR-001). */
@@ -133,6 +162,45 @@ export interface MeResponse {
   readonly permissionsVersion: number;
   readonly deviceId?: string;
   readonly expiresAt: string;
+}
+
+/** OpenAPI schema `MovementListResponse` (Master Plan §7.1, ADR-001). */
+export interface MovementListResponse {
+  readonly movements: readonly MovementResponse[];
+}
+
+/** OpenAPI schema `MovementResponse` (Master Plan §7.1, ADR-001). */
+export interface MovementResponse {
+  readonly movementId: string;
+  readonly cause:
+    | 'SALE'
+    | 'SALE_RETURN'
+    | 'PURCHASE_RECEIPT'
+    | 'PURCHASE_RETURN'
+    | 'STOCK_COUNT_ADJUSTMENT'
+    | 'MANUAL_ADJUSTMENT'
+    | 'OPENING_BALANCE'
+    | 'SHRINKAGE'
+    | 'TRANSFER_IN'
+    | 'TRANSFER_OUT'
+    | 'REVALUATION';
+  readonly variantId: string;
+  readonly sku: string;
+  readonly locationId: string;
+  readonly quantityDelta: string;
+  readonly reasonCode?: 'DAMAGED' | 'EXPIRED' | 'LOST' | 'MISCOUNT' | 'RESTOCK' | 'OTHER';
+  readonly reasonNote?: string;
+  readonly serverSequence: string;
+  readonly occurredAt: string;
+  readonly createdAt: string;
+}
+
+/** OpenAPI schema `MovementSubmissionResponse` (Master Plan §7.1, ADR-001). */
+export interface MovementSubmissionResponse {
+  readonly status: 'APPLIED' | 'REPLAY';
+  readonly movement: MovementResponse;
+  readonly resultingQuantity: string;
+  readonly level: unknown;
 }
 
 /** OpenAPI schema `MutationId` (Master Plan §7.1, ADR-001). */
@@ -211,6 +279,7 @@ export interface ProblemDocument {
     | 'DISCOUNT_APPROVAL_REQUIRED'
     | 'SETTINGS_VERSION_CONFLICT'
     | 'CATALOG_SKU_DUPLICATE'
+    | 'INVENTORY_OPENING_BALANCE_DUPLICATE'
     | 'REPLAY'
     | 'MUTATION_CONTRADICTION'
     | 'INVENTORY_CONFLICT'
@@ -390,6 +459,18 @@ export interface RolesListResponse {
 export interface SnapshotResponse {
   readonly snapshot: string;
   readonly expiresAt: string;
+}
+
+/** OpenAPI schema `SubmitMovementRequest` (Master Plan §7.1, ADR-001). */
+export interface SubmitMovementRequest {
+  readonly movementId: string;
+  readonly cause: 'OPENING_BALANCE' | 'MANUAL_ADJUSTMENT';
+  readonly variantId: string;
+  readonly locationId?: object;
+  readonly quantityDelta: string;
+  readonly reasonCode?: string;
+  readonly reasonNote?: string;
+  readonly documentRef?: string;
 }
 
 /** OpenAPI schema `SyncState` (Master Plan §7.1, ADR-001). */

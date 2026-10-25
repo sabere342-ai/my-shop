@@ -137,12 +137,13 @@ interface MigrationRow {
 /** The §4 classification, pinned as data so a change must be an explicit edit here. */
 const TENANT_ROOT_TABLE = 'organizations';
 
-/** The fifteen tenant tables whose isolation column is their `organization_id`. */
+/** The eighteen tenant tables whose isolation column is their `organization_id`. */
 const TENANT_ORG_TABLES: readonly string[] = [
   'audit_events',
   'change_log',
   'device_sync_cursors',
   'devices',
+  'inventory_locations',
   'mutation_ledger',
   'organization_feature_flags',
   'organization_memberships',
@@ -153,6 +154,8 @@ const TENANT_ORG_TABLES: readonly string[] = [
   'products',
   'role_permissions',
   'roles',
+  'stock_levels',
+  'stock_movements',
   'sync_sequences',
 ];
 
@@ -161,9 +164,10 @@ const TENANT_ORG_TABLES: readonly string[] = [
  * INSERT+SELECT only — the application role holds no UPDATE and no DELETE at
  * all, so tampering is refused by privilege before RLS is ever consulted. The
  * negative probes for UPDATE/DELETE therefore authorize a 42501 from either
- * mechanism.
+ * mechanism. `stock_movements` (M4-S2, migration `0014`) joins the class: the
+ * quantity ledger is corrected by reversal, never rewritten (§38.14.2).
  */
-const APPEND_ONLY_TABLES: readonly string[] = ['audit_events'];
+const APPEND_ONLY_TABLES: readonly string[] = ['audit_events', 'stock_movements'];
 
 /**
  * The 0010 scoped-RLS class (§32 tables): `security_events`' two verified
@@ -205,6 +209,15 @@ const MUTATION_ID = 'ffff0000-0000-4000-8000-000000000001';
  * probes before a foreign-key trigger could ever be consulted.
  */
 const CATALOG_PRODUCT_ID = 'd0d0d0d0-d0d0-4d0d-8d0d-d0d0d0d0d0d0';
+
+/**
+ * The inventory fixture ids (M4-S2): the tenant-A location/variant the stock
+ * seeds and the cross-tenant stock probes reference (also the correction
+ * targets the stock INSERT probe would name — the RLS WITH CHECK must refuse
+ * the probe before a foreign-key trigger could ever be consulted).
+ */
+const INVENTORY_PROBE_VARIANT_ID = 'e1e1e1e1-e1e1-4e1e-8e1e-e1e1e1e1e1e1';
+const INVENTORY_PROBE_LOCATION_ID = 'e2e2e2e2-e2e2-4e2e-8e2e-e2e2e2e2e2e2';
 
 const BOOTSTRAP_KEY_A = 'rls-tenant-a';
 const BOOTSTRAP_KEY_B = 'rls-tenant-b';
@@ -341,6 +354,37 @@ const CROSS_TENANT_INSERT: ReadonlyMap<string, { sql: string; params: readonly u
     },
   ],
   [
+    'inventory_locations',
+    {
+      // The row satisfies the 0014 name CHECK, so the RLS WITH CHECK is the
+      // only thing that can refuse it.
+      sql: `INSERT INTO inventory_locations (organization_id, name)
+              VALUES ($1::uuid, 'RLS Probe Stockroom B')`,
+      params: [ORG_B],
+    },
+  ],
+  [
+    'stock_movements',
+    {
+      // The row satisfies every 0014 CHECK (an OPENING_BALANCE carries a
+      // positive delta and no outbox origin), so the RLS WITH CHECK and the
+      // missing privilege-before-RLS refusals all end at SQLSTATE 42501.
+      sql: `INSERT INTO stock_movements (organization_id, variant_id, location_id, cause, quantity_delta, server_sequence, occurred_at)
+              VALUES ($1::uuid, $2::uuid, $3::uuid, 'OPENING_BALANCE', 999999999999, 99, now())`,
+      params: [ORG_B, INVENTORY_PROBE_VARIANT_ID, INVENTORY_PROBE_LOCATION_ID],
+    },
+  ],
+  [
+    'stock_levels',
+    {
+      // The row satisfies the 0014 non-negative CHECK, so the RLS WITH CHECK
+      // is the only thing that can refuse it.
+      sql: `INSERT INTO stock_levels (organization_id, variant_id, location_id, quantity)
+              VALUES ($1::uuid, $2::uuid, $3::uuid, 7)`,
+      params: [ORG_B, INVENTORY_PROBE_VARIANT_ID, INVENTORY_PROBE_LOCATION_ID],
+    },
+  ],
+  [
     'sync_sequences',
     {
       sql: `INSERT INTO sync_sequences (organization_id, last_sequence) VALUES ($1::uuid, 1)`,
@@ -453,6 +497,30 @@ const CROSS_TENANT_MOVE: ReadonlyMap<string, { sql: string; params: readonly unk
     { sql: `UPDATE roles SET organization_id = $1::uuid WHERE organization_id = $2::uuid`, params: [ORG_B, ORG_A] },
   ],
   [
+    'inventory_locations',
+    {
+      sql: `UPDATE inventory_locations SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
+      params: [ORG_B, ORG_A],
+    },
+  ],
+  [
+    'stock_movements',
+    {
+      // The §38.14.2 append-only state means this refusal may come from the
+      // missing UPDATE privilege before the WITH CHECK is ever consulted;
+      // both intersect at SQLSTATE 42501 like every other denial.
+      sql: `UPDATE stock_movements SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
+      params: [ORG_B, ORG_A],
+    },
+  ],
+  [
+    'stock_levels',
+    {
+      sql: `UPDATE stock_levels SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
+      params: [ORG_B, ORG_A],
+    },
+  ],
+  [
     'sync_sequences',
     {
       sql: `UPDATE sync_sequences SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
@@ -472,7 +540,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
     urls = requireTestUrls();
 
     // Drop + create from empty, provision roles, and deploy the full
-    // `0001`–`0013` history: the fresh-install precondition (AC-07).
+    // `0001`–`0014` history: the fresh-install precondition (AC-07).
     dbScript('test-setup');
     setupRan = true;
 
@@ -697,6 +765,42 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
         `INSERT INTO product_variants (organization_id, product_id, sku) VALUES ($1::uuid, $2::uuid, 'RLS-FIXTURE-1')`,
         ORG_A,
         CATALOG_PRODUCT_ID,
+      );
+      // M4-S2 (§15.4): the tenant-A inventory rows — one location, its
+      // non-opening stock level, and one OPENING_BALANCE movement — so the
+      // ownership-move probes against the three new tables match rows the
+      // policies must refuse to move. The same zero-row-UPDATE argument the
+      // catalog seeds directly above make: a probe that matches nothing
+      // proves nothing. (A movement row does not violate the append-only
+      // posture here: the *fixture* inserts under tenant A's own trusted
+      // context, exactly like the audit seed above; the append-only class is
+      // about the *application role's* UPDATE/DELETE privilege, probed
+      // separately.)
+      await tx.$executeRawUnsafe(
+        `INSERT INTO inventory_locations (id, organization_id, name)
+           VALUES ($1::uuid, $2::uuid, 'RLS Fixture Stockroom')`,
+        INVENTORY_PROBE_LOCATION_ID,
+        ORG_A,
+      );
+      await tx.$executeRawUnsafe(
+        `INSERT INTO product_variants (id, organization_id, product_id, sku) VALUES ($1::uuid, $2::uuid, $3::uuid, 'RLS-FIXTURE-2')`,
+        INVENTORY_PROBE_VARIANT_ID,
+        ORG_A,
+        CATALOG_PRODUCT_ID,
+      );
+      await tx.$executeRawUnsafe(
+        `INSERT INTO stock_levels (organization_id, variant_id, location_id, quantity)
+           VALUES ($1::uuid, $2::uuid, $3::uuid, 5)`,
+        ORG_A,
+        INVENTORY_PROBE_VARIANT_ID,
+        INVENTORY_PROBE_LOCATION_ID,
+      );
+      await tx.$executeRawUnsafe(
+        `INSERT INTO stock_movements (organization_id, variant_id, location_id, cause, quantity_delta, server_sequence, occurred_at)
+           VALUES ($1::uuid, $2::uuid, $3::uuid, 'OPENING_BALANCE', 5, 99, now())`,
+        ORG_A,
+        INVENTORY_PROBE_VARIANT_ID,
+        INVENTORY_PROBE_LOCATION_ID,
       );
     });
 
@@ -1222,8 +1326,8 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
     });
   });
 
-  describe('AC-07: the fresh install applied exactly the thirteen-path history', () => {
-    it('records exactly 0001 through 0013, every one finished and never rolled back', async () => {
+  describe('AC-07: the fresh install applied exactly the fourteen-path history', () => {
+    it('records exactly 0001 through 0014, every one finished and never rolled back', async () => {
       const rows = await migrator.$queryRawUnsafe<MigrationRow[]>(
         `SELECT migration_name FROM _prisma_migrations ORDER BY migration_name`,
       );
@@ -1242,6 +1346,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
         '0011_audit_stream_head_grant',
         '0012_organization_settings',
         '0013_product_catalog',
+        '0014_inventory_core',
       ]);
     });
   });

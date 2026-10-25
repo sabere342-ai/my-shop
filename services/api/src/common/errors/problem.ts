@@ -57,6 +57,15 @@ export const ERROR_CODES = {
    */
   CATALOG_SKU_DUPLICATE: 'CATALOG_SKU_DUPLICATE',
 
+  /**
+   * Master Plan section 15.4 / section 40.8 (M4-S2): the variant already
+   * carries an `OPENING_BALANCE` movement for this location. The database's
+   * partial unique index refuses the second one — an initial quantity is a
+   * fact of the ledger, stated once — and this code names the refusal a
+   * caller resolves by using `MANUAL_ADJUSTMENT` (§38.5) instead.
+   */
+  INVENTORY_OPENING_BALANCE_DUPLICATE: 'INVENTORY_OPENING_BALANCE_DUPLICATE',
+
   // --- Offline mutation ingress (Master Plan section 38) ---
   /** Master Plan section 38.9: an identical mutation_id was already accepted. */
   REPLAY: 'REPLAY',
@@ -126,6 +135,7 @@ const MESSAGE_BY_CODE: Readonly<Record<ErrorCode, string>> = {
   DEVICE_REVOKED: 'This device has been revoked.',
   SETTINGS_VERSION_CONFLICT: 'The settings changed while you were editing. Refresh and try again.',
   CATALOG_SKU_DUPLICATE: 'A variant of this organization already uses this SKU.',
+  INVENTORY_OPENING_BALANCE_DUPLICATE: 'The opening balance for this stock is already recorded.',
   CLIENT_TOO_OLD: 'This app version is too old. Update to continue.',
   UNSUPPORTED_MUTATION: 'This operation is not supported by the server.',
 
@@ -154,6 +164,7 @@ const STATUS_BY_CODE: Readonly<Record<ErrorCode, number>> = {
   // conflict (409), exactly like the other invariants whose refusal a caller
   // resolves by choosing a different value.
   CATALOG_SKU_DUPLICATE: 409,
+  INVENTORY_OPENING_BALANCE_DUPLICATE: 409,
   PRICE_OVERRIDE_FORBIDDEN: 403,
   DISCOUNT_FORBIDDEN: 403,
   DISCOUNT_LIMIT_EXCEEDED: 403,
@@ -330,6 +341,7 @@ const TITLE_BY_CODE: Readonly<Record<ErrorCode, string>> = {
   DEVICE_REVOKED: 'Device revoked',
   SETTINGS_VERSION_CONFLICT: 'Settings version conflict',
   CATALOG_SKU_DUPLICATE: 'Duplicate SKU',
+  INVENTORY_OPENING_BALANCE_DUPLICATE: 'Opening balance already recorded',
   CLIENT_TOO_OLD: 'App update required',
   UNSUPPORTED_MUTATION: 'Unsupported operation',
 
