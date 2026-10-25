@@ -16,8 +16,10 @@
 
 import {
   ADJUSTMENT_REASON_CODES,
+  COST_WIRE_PATTERN,
   DOCUMENT_REF_MAX_LENGTH,
   INVENTORY_TEXT_WIRE_PATTERN,
+  MAX_COST_MAGNITUDE,
   MAX_QUANTITY_MAGNITUDE,
   MOVEMENT_CAUSE_VOCABULARY,
   REASON_CODE_MAX_LENGTH,
@@ -48,8 +50,16 @@ export interface MovementOffer {
   readonly variantId: string;
   /** Absent → the organization's default location (the V1 seed). */
   readonly locationId: string | null;
-  /** Signed exact base units. Never zero. */
+  /** Signed exact base units. Never zero for a quantity movement; `0` only for a REVALUATION. */
   readonly quantityDelta: bigint;
+  /**
+   * The §30.2 acquisition cost the caller offers, exact integer minor units:
+   * required for the cost-imposing causes (`OPENING_BALANCE`, `PURCHASE_RECEIPT`,
+   * `REVALUATION`), refused on a consumption, and otherwise the caller's choice
+   * (present: a cost-bearing inclusion; absent: the engine costs it at the
+   * current average — never a fabricated zero).
+   */
+  readonly unitCostMinor: bigint | null;
   /** Required for `MANUAL_ADJUSTMENT` (§38.5), refused for `OPENING_BALANCE`. */
   readonly reasonCode: AdjustmentReasonCode | null;
   readonly reasonNote: string | null;
@@ -63,6 +73,7 @@ export interface MovementOfferWire {
   readonly variantId: string;
   readonly locationId?: string | null;
   readonly quantityDelta: string;
+  readonly unitCostMinor?: string | null;
   readonly reasonCode?: string | null;
   readonly reasonNote?: string | null;
   readonly documentRef?: string | null;
@@ -109,9 +120,11 @@ function canonicalizeOptionalUuid(field: string, value: unknown): string | null 
  * Parses a signed decimal-string quantity into an exact `bigint` (§15.6:
  * quantities are integers in base units; the legacy REAL-quantity defect never
  * returns). The magnitude re-proves the money-wire width; zero deltas are a
- * caller's bug, not a silence.
+ * caller's bug, not a silence — except for a `REVALUATION`, whose delta is
+ * exactly zero by definition (a valuation restatement moves no stock; §30.5),
+ * which is why the zero rule is caller-selected rather than universal.
  */
-export function parseQuantity(field: string, wire: string): bigint {
+export function parseQuantity(field: string, wire: string, options: { readonly allowZero?: boolean } = {}): bigint {
   if (typeof wire !== 'string' || !/^[+-]?[0-9]{1,12}$/.test(wire)) {
     throw new CanonicalizationError(`${field} must be a decimal string of at most 12 digits`, field);
   }
@@ -131,8 +144,30 @@ export function parseQuantity(field: string, wire: string): bigint {
     throw new CanonicalizationError(`${field} exceeds the permitted magnitude`, field);
   }
   const value = sign * magnitude;
-  if (value === 0n) {
+  if (value === 0n && options.allowZero !== true) {
     throw new CanonicalizationError(`${field} must not be zero`, field);
+  }
+  return value;
+}
+
+/**
+ * Parses the §30.1 acquisition cost: a **non-negative** exact integer count of
+ * minor units, bounded at the 12-digit money-wire width. The decimal-string
+ * grammar is the money wire's own (`unit_cost_minor` is a `bigint` column;
+ * floats and fractional strings are the legacy defect never returned). `0` is
+ * a real economic fact — a genuinely zero-cost receipt — offered explicitly,
+ * never implied.
+ */
+export function parseUnitCostMinor(field: string, wire: unknown): bigint {
+  if (typeof wire !== 'string' || !COST_WIRE_PATTERN.test(wire)) {
+    throw new CanonicalizationError(
+      `${field} must be a non-negative integer decimal string of at most 12 digits`,
+      field,
+    );
+  }
+  const value = BigInt(wire);
+  if (value > MAX_COST_MAGNITUDE) {
+    throw new CanonicalizationError(`${field} exceeds the permitted magnitude`, field);
   }
   return value;
 }
@@ -154,7 +189,59 @@ export function canonicalizeMovementOffer(wire: MovementOfferWire): MovementOffe
   }
   const cause = wire.cause as SubmittableMovementCause;
 
-  const quantityDelta = parseQuantity('quantityDelta', wire.quantityDelta);
+  const quantityDelta = parseQuantity(
+    'quantityDelta',
+    wire.quantityDelta,
+    // A REVALUATION moves no stock: its delta is exactly zero by definition
+    // (§30.5 — the value moves, the quantity never does).
+    cause === 'REVALUATION' ? { allowZero: true } : {},
+  );
+  if (cause === 'PURCHASE_RECEIPT' && quantityDelta <= 0n) {
+    // A receipt is incoming: the §15.5 cause with a negative delta is an
+    // out-of-vocabulary direction for its owning shape (a purchase return is
+    // `PURCHASE_RETURN`, a quantity correction is an adjust, never this).
+    throw new CanonicalizationError('a PURCHASE_RECEIPT carries an incoming (positive) delta', 'quantityDelta');
+  }
+  if (cause === 'REVALUATION' && quantityDelta !== 0n) {
+    // A REVALUATION moves no stock: a non-zero delta names no execution path
+    // the costing act has — §30.5's restatement changes the value, the
+    // quantity never does.
+    throw new CanonicalizationError('a REVALUATION moves no stock: its delta must be exactly zero', 'quantityDelta');
+  }
+  if (cause === 'OPENING_BALANCE' && quantityDelta <= 0n) {
+    // Stock cannot open negative (migration 0014's
+    // `chk_inventory_movement_opening_direction` restates it; the wire refusal
+    // saves the connection).
+    throw new CanonicalizationError('an OPENING_BALANCE carries a positive delta', 'quantityDelta');
+  }
+
+  // --- the §30.2 cost offer, per the costing rule each cause carries ---
+  let unitCostMinor: bigint | null = null;
+  if (cause === 'OPENING_BALANCE' || cause === 'PURCHASE_RECEIPT' || cause === 'REVALUATION') {
+    // A cost-imposing movement is never admitted without the acquisition cost:
+    // the engine never invents one, and interpreting an absent cost as zero
+    // would fabricate the valuation (the no-silent-zero rule of §30.2).
+    if (wire.unitCostMinor === undefined || wire.unitCostMinor === null) {
+      throw new CanonicalizationError(
+        `a ${cause} must carry unitCostMinor — the engine never fabricates an acquisition cost`,
+        'unitCostMinor',
+      );
+    }
+    unitCostMinor = parseUnitCostMinor('unitCostMinor', wire.unitCostMinor);
+  } else if (wire.unitCostMinor !== undefined && wire.unitCostMinor !== null) {
+    // A MANUAL_ADJUSTMENT may offer a cost only when it *adds* stock: a cost-bearing
+    // inclusion folds the offered cost into the §30.3 average like any receipt.
+    unitCostMinor = parseUnitCostMinor('unitCostMinor', wire.unitCostMinor);
+    if (quantityDelta < 0n) {
+      // §30.5: a quantity correction consumes at the *current* average — the
+      // wire cannot re-cost a consumption, because the engine never lets
+      // a caller restate the historical cost a deduction snapshots.
+      throw new CanonicalizationError(
+        'a negative MANUAL_ADJUSTMENT carries no cost: it consumes inventory at the engine’s current average',
+        'unitCostMinor',
+      );
+    }
+  }
 
   let reasonCode: AdjustmentReasonCode | null = null;
   const rawReasonCode =
@@ -171,8 +258,10 @@ export function canonicalizeMovementOffer(wire: MovementOfferWire): MovementOffe
     // §38.5: an adjustment is reason-coded, or it does not exist.
     throw new CanonicalizationError('a MANUAL_ADJUSTMENT requires a reasonCode', 'reasonCode');
   }
-  if (cause === 'OPENING_BALANCE' && rawReasonCode !== null) {
-    throw new CanonicalizationError('an OPENING_BALANCE carries no reason code', 'reasonCode');
+  if (cause !== 'MANUAL_ADJUSTMENT' && rawReasonCode !== null) {
+    // The §38.5 reason vocabulary belongs to the adjustment cause alone; an
+    // opening balance, a receipt, and a revaluation carry their own facts.
+    throw new CanonicalizationError('only a MANUAL_ADJUSTMENT carries a reason code', 'reasonCode');
   }
 
   const reasonNote =
@@ -190,6 +279,7 @@ export function canonicalizeMovementOffer(wire: MovementOfferWire): MovementOffe
     variantId,
     locationId,
     quantityDelta,
+    unitCostMinor,
     reasonCode,
     reasonNote,
     documentRef,
@@ -219,6 +309,8 @@ export interface MovementFact {
   readonly variantId: string;
   readonly locationId: string | null;
   readonly quantityDelta: string;
+  /** The §30.2 cost snapshot the stored movement carries, as wire text (`null` uncosted). */
+  readonly unitCostMinor: string | null;
   readonly reasonCode: string | null;
   readonly reasonNote: string | null;
   readonly documentRef: string | null;

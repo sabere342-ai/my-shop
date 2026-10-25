@@ -47,19 +47,48 @@ export type MovementCause = (typeof MOVEMENT_CAUSE_VOCABULARY)[number];
  * is the server-only initial quantity of a variant at a location; `MANUAL_ADJUSTMENT`
  * is the reason-coded correction (§38.5: goods present that the system does not know
  * about are corrected here, never through a sale — a rule M5 will inherit verbatim).
+ *
+ * M4-S3 widens the admissible subset to the movements the §30 engine costs
+ * (§40.8 row M4-S3): `PURCHASE_RECEIPT` — the §15.5 acquisition cause, admitted at
+ * the *movement* level here; M6-S2's purchase documents (suppliers, cash/credit,
+ * payables) remain the owning slice above this exact path (§38.22 Tier 3: an
+ * online-only post, the one capability the plan refuses offline, O-17). And
+ * `REVALUATION` — §30.5's explicit costing act, server-only (§30.8 "a revaluation is a
+ * costing act, not a till act"): the only allowed shape of a retroactive cost change.
+ * `SALE`, `SALE_RETURN`, `PURCHASE_RETURN`, `SHRINKAGE` (as a standalone cause — its
+ * meaning is a reason-coded negative `MANUAL_ADJUSTMENT` when M4-S3 costs it),
+ * `TRANSFER_*`, and count adjustments still arrive with their owning slices.
  */
-export const SUBMITTABLE_MOVEMENT_CAUSES = ['OPENING_BALANCE', 'MANUAL_ADJUSTMENT'] as const;
+export const SUBMITTABLE_MOVEMENT_CAUSES = [
+  'OPENING_BALANCE',
+  'MANUAL_ADJUSTMENT',
+  'PURCHASE_RECEIPT',
+  'REVALUATION',
+] as const;
 
 export type SubmittableMovementCause = (typeof SUBMITTABLE_MOVEMENT_CAUSES)[number];
 
 /**
- * The closed adjustment reason codes. §38.5: every adjustment is
+ * The adjustment reason codes. §38.5: every adjustment is
  * **reason-coded**, so an unexplained quantity change cannot exist. The codes
  * are short machine values; the free note carries the operator's own words.
  */
 export const ADJUSTMENT_REASON_CODES = ['DAMAGED', 'EXPIRED', 'LOST', 'MISCOUNT', 'RESTOCK', 'OTHER'] as const;
 
 export type AdjustmentReasonCode = (typeof ADJUSTMENT_REASON_CODES)[number];
+
+// --- costs (§30.1/A30.8: exact integer minor units, never a float) ---
+
+/**
+ * The largest cost magnitude the V1 wire accepts: 12 decimal digits in minor
+ * units — exactly the money wire's width, restated by migration 0014's
+ * `chk_inventory_movement_cost_bounds` and migration 0015's
+ * `chk_inventory_level_cost_bounds`.
+ */
+export const MAX_COST_MAGNITUDE = 999_999_999_999n;
+
+/** Costs ride a non-negative integer decimal string (§30.1; the wire's money grammar). */
+export const COST_WIRE_PATTERN = /^[0-9]{1,12}$/;
 
 // --- text bounds (wire and service share them; migration 0014 restates them) ---
 

@@ -47,6 +47,7 @@ import { Prisma } from '@prisma/client';
 import type { Logger as PinoLogger } from 'pino';
 
 import type { AuditStreamWriter } from '../audit/audit-stream-writer';
+import { ROUNDING_MODE_VALUES } from '../settings/settings.contract';
 import { withTenantTransaction } from '../database/tenant-context';
 import { DomainError } from '../errors/domain.error';
 import { ERROR_CODES } from '../errors/problem';
@@ -60,11 +61,14 @@ import {
 } from './inventory.contract';
 import type { MovementFact, MovementOffer } from './inventory.domain';
 import { CanonicalizationError, canonicalizeMovementOffer } from './inventory.domain';
+import { computeMovingAverage, type RoundingMode } from './costing.domain';
 import type {
+  CostSnapshotResponse,
   LevelResponse,
   LocationResponse,
   MovementResponse,
   MovementSubmissionResponse,
+  ValuationResponse,
 } from './inventory-view.contract';
 
 export interface ListLevelsQuery {
@@ -85,6 +89,8 @@ export interface SubmitMovementInput {
     readonly variantId: string;
     readonly locationId?: string | null;
     readonly quantityDelta: string;
+    /** The §30.2 acquisition cost offer — required for the cost-imposing causes. */
+    readonly unitCostMinor?: string | null;
     readonly reasonCode?: string | null;
     readonly reasonNote?: string | null;
     readonly documentRef?: string | null;
@@ -95,7 +101,7 @@ type Tx = Prisma.TransactionClient;
 
 /** The Prisma include shape the movement reads answer through. */
 const movementInclude = {
-  variant: { select: { id: true, sku: true } },
+  variant: { select: { id: true, sku: true, product: { select: { nameAr: true } } } },
   location: { select: { id: true, name: true } },
 } as const;
 
@@ -180,6 +186,104 @@ export class InventoryService {
     });
   }
 
+  /**
+   * Lists the organization's movements that carry a §30.2 cost snapshot — the
+   * valuation-relevant slice of the ledger the §30 costing engine produced.
+   * Newest acceptance first, the same deterministic order the quantity history
+   * answers. A movement whose costing rules left it uncosted (`unit_cost_minor`
+   * IS NULL) appears here exactly never; the cost of acquiring the stock the
+   * valuation restates is therefore reconstructible from this list alone
+   * (§30.2's rationale for snapshotting every movement's unit cost).
+   */
+  async listCostSnapshots(
+    organizationId: string,
+    query: ListLevelsQuery = {},
+  ): Promise<readonly CostSnapshotResponse[]> {
+    return withTenantTransaction(this.host, organizationId, async (tx) => {
+      const rows = await tx.stockMovement.findMany({
+        where: {
+          unitCostMinor: { not: null },
+          ...(query.variantId === undefined ? {} : { variantId: query.variantId }),
+          ...(query.locationId === undefined ? {} : { locationId: query.locationId }),
+        },
+        orderBy: [{ serverSequence: 'desc' as const }, { id: 'asc' as const }],
+        ...(query.limit === undefined ? {} : { take: Math.min(query.limit, INVENTORY_LIST_MAX_LIMIT) }),
+        include: movementInclude,
+      });
+      return rows.map((row) => ({
+        movementId: row.id,
+        cause: row.cause as MovementCause,
+        variantId: row.variant.id,
+        sku: row.variant.sku,
+        productNameAr: row.variant.product.nameAr,
+        locationId: row.location.id,
+        locationName: row.location.name,
+        quantityDelta: row.quantityDelta.toString(),
+        unitCostMinor: (row.unitCostMinor as bigint).toString(),
+        serverSequence: row.serverSequence.toString(),
+        occurredAt: row.occurredAt.toISOString(),
+      }));
+    });
+  }
+
+  /**
+   * The §30.2 inventory valuation: every level's remaining quantity, its
+   * authoritatively maintained moving average, and the exact value beneath
+   * them — `quantity × average`, an integer product of minor units, never a
+   * rounded ratio and never a fabricated zero for an absent basis. The totals
+   * sum the valued rows exactly; an uncosted line is *counted*, not folded in
+   * at an invented cost.
+   */
+  async listValuation(organizationId: string, query: ListLevelsQuery = {}): Promise<ValuationResponse> {
+    return withTenantTransaction(this.host, organizationId, async (tx) => {
+      const where = {
+        ...(query.variantId === undefined ? {} : { variantId: query.variantId }),
+        ...(query.locationId === undefined ? {} : { locationId: query.locationId }),
+      };
+      const rows = await tx.stockLevel.findMany({
+        where,
+        orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }],
+        ...(query.limit === undefined ? {} : { take: Math.min(query.limit, INVENTORY_LIST_MAX_LIMIT) }),
+        include: {
+          variant: { select: { id: true, sku: true, product: { select: { nameAr: true } } } },
+          location: { select: { id: true, name: true } },
+        },
+      });
+
+      let totalValue = 0n;
+      let uncostedLines = 0;
+      const levels = rows.map((row) => {
+        const average = row.averageCostMinor === null ? null : row.averageCostMinor;
+        const value = average === null ? null : row.quantity * average;
+        if (value === null) {
+          uncostedLines += 1;
+        } else {
+          totalValue += value;
+        }
+        return {
+          variantId: row.variant.id,
+          sku: row.variant.sku,
+          productNameAr: row.variant.product.nameAr,
+          locationId: row.location.id,
+          locationName: row.location.name,
+          quantity: row.quantity.toString(),
+          averageCostMinor: average === null ? null : average.toString(),
+          inventoryValueMinor: value === null ? null : value.toString(),
+          updatedAt: row.updatedAt.toISOString(),
+        };
+      });
+
+      return {
+        levels,
+        totals: {
+          inventoryValueMinor: totalValue.toString(),
+          uncostedLines,
+          valuedLevels: levels.length - uncostedLines,
+        },
+      };
+    });
+  }
+
   // --- writes ---
 
   /**
@@ -223,10 +327,12 @@ export class InventoryService {
 
       // The §15.6 conditional fold, behind the row lock the variant row took
       // above (re-read at the movement level as well, so a level created by an
-      // older, uncommitted transaction cannot hide).
+      // older, uncommitted transaction cannot hide). The read carries the level's
+      // costing facts: the §30.2 moving average is folded inside the *same* lock
+      // span, so quantity and cost can never disagree with the ledger.
       const level = await tx.stockLevel.findFirst({
         where: { variantId: variant.id, locationId: location.id },
-        select: { id: true, quantity: true },
+        select: { id: true, quantity: true, averageCostMinor: true },
       });
       const current = level === null ? 0n : level.quantity;
       const resulting = current + offer.quantityDelta;
@@ -235,6 +341,72 @@ export class InventoryService {
           ERROR_CODES.INSUFFICIENT_STOCK,
           `variant ${variant.id} at location ${location.id}: the fold ${resulting.toString()} would cross zero from a current quantity of ${current.toString()}`,
         );
+      }
+
+      // --- the §30 costing engine (M4-S3) ---
+      //
+      // The organization's §30.6 rounding mode is read from the typed settings
+      // row *inside this transaction* (§22.3): the rounding the fold uses is the
+      // rounding its own transaction will commit, never a cache's. An
+      // organization that has never had a settings row answers the §30.6
+      // default, `HALF_UP`.
+      const roundingMode = await readRoundingMode(tx, input.organizationId);
+      const basisAverage: bigint | null =
+        level === null || level.averageCostMinor === null ? null : level.averageCostMinor;
+
+      /**
+       * The §30.2 snapshot the movement records — its permanent `unit_cost_minor`:
+       * the offered acquisition cost for a §30.3 receipt, the engine's current
+       * average for a §30.5 correction, the revalued average for the §30.5/§30.8
+       * costing act. `null` stays an honest absence, never a fabricated zero.
+       */
+      let unitCostApplied: bigint | null = null;
+      /** The level's average after the fold. */
+      let resultingAverage: bigint | null = basisAverage;
+
+      if (offer.cause === 'REVALUATION') {
+        // §30.5's explicit costing act, server-only (§30.8): the *only* shape a
+        // retroactive cost change takes. It restates the level's average —
+        // moving no stock, rewriting no historical movement snapshot — and the
+        // audit event carries the before/after pair. Stock with no basis has
+        // nothing to restate: refused, never silently invented.
+        if (basisAverage === null) {
+          throw new DomainError(
+            ERROR_CODES.INVENTORY_COST_BASIS_REQUIRED,
+            'the §30.5 revaluation names stock with no recorded cost basis',
+          );
+        }
+        unitCostApplied = offer.unitCostMinor;
+        resultingAverage = offer.unitCostMinor;
+      } else if (
+        offer.cause === 'OPENING_BALANCE' ||
+        offer.cause === 'PURCHASE_RECEIPT' ||
+        offer.unitCostMinor !== null
+      ) {
+        // §30.3's receipt: the offered acquisition cost folds into the moving
+        // average exactly once. The zero-quantity arm handles the freshly
+        // opened level; the division arm handles every accumulation.
+        resultingAverage = computeMovingAverage({
+          basis: { quantity: current, averageCostMinor: basisAverage },
+          receivedQuantity: offer.quantityDelta,
+          receivedUnitCostMinor: offer.unitCostMinor,
+          roundingMode,
+        });
+        unitCostApplied = offer.unitCostMinor;
+      } else {
+        // A plain MANUAL_ADJUSTMENT folds value at the engine's current average
+        // (§30.5 "quantity correction"): a consumption snapshots the average
+        // and leaves it unchanged — historical COGS is never restated — and so
+        // does a plain incoming correction. Stock with no basis cannot carry
+        // the correction: refused, never costed at an invented zero.
+        if (basisAverage === null) {
+          throw new DomainError(
+            ERROR_CODES.INVENTORY_COST_BASIS_REQUIRED,
+            'the stock carries no cost basis; a MANUAL_ADJUSTMENT like this requires one',
+          );
+        }
+        unitCostApplied = basisAverage;
+        resultingAverage = basisAverage;
       }
 
       const serverSequence = await allocateServerSequence(tx, input.organizationId);
@@ -249,7 +421,7 @@ export class InventoryService {
             locationId: location.id,
             cause: offer.cause,
             quantityDelta: offer.quantityDelta,
-            unitCostMinor: null,
+            unitCostMinor: unitCostApplied,
             reversesMovementId: null,
             originMutationId: null,
             deviceId: null,
@@ -267,7 +439,8 @@ export class InventoryService {
       }
 
       // The derived cache: create the row this movement's fold implies, or move
-      // the existing one. The non-negative CHECK (migration 0014) is the
+      // the existing one — quantity *and* the §30.2 moving average together.
+      // The non-negative and bounds CHECKs (migrations 0014/0015) are the
       // database's own last line of defence.
       if (level === null) {
         await tx.stockLevel.create({
@@ -276,18 +449,23 @@ export class InventoryService {
             variantId: variant.id,
             locationId: location.id,
             quantity: resulting,
+            averageCostMinor: resultingAverage,
           },
         });
       } else {
         await tx.stockLevel.update({
           where: { id: level.id },
-          data: { quantity: resulting, version: { increment: 1 }, updatedAt: now },
+          data: {
+            quantity: resulting,
+            averageCostMinor: resultingAverage,
+            version: { increment: 1 },
+            updatedAt: now,
+          },
         });
       }
 
       await this.appendAudit(tx, input.organizationId, input.actorUserId, {
-        eventType:
-          offer.cause === 'OPENING_BALANCE' ? 'INVENTORY_OPENING_BALANCE_RECORDED' : 'INVENTORY_ADJUSTMENT_RECORDED',
+        eventType: auditEventTypeFor(offer),
         targetId: movement.id,
         documentRef: `variant:${variant.id}:location:${location.id}`,
         occurredAt: now,
@@ -301,6 +479,13 @@ export class InventoryService {
           ...(offer.reasonCode === null ? {} : { reasonCode: offer.reasonCode }),
           ...(offer.reasonNote === null ? {} : { reasonNote: offer.reasonNote }),
           ...(offer.documentRef === null ? {} : { documentRef: offer.documentRef }),
+          // The costing facts (§30.2): the snapshot the movement recorded, the
+          // average before and after the fold, and the exact resulting value —
+          // every one a decimal string, none a float.
+          ...(unitCostApplied === null ? {} : { unitCostMinor: unitCostApplied.toString() }),
+          averageCostMinorBefore: basisAverage === null ? null : basisAverage.toString(),
+          averageCostMinorAfter: resultingAverage === null ? null : resultingAverage.toString(),
+          resultingInventoryValueMinor: resultingAverage === null ? null : (resulting * resultingAverage).toString(),
           serverSequence: serverSequence.toString(),
         },
       });
@@ -440,6 +625,7 @@ export class InventoryService {
       variantId: stored.variantId,
       locationId: stored.locationId,
       quantityDelta: stored.quantityDelta.toString(),
+      unitCostMinor: stored.unitCostMinor === null ? null : stored.unitCostMinor.toString(),
       reasonCode: stored.reasonCode,
       reasonNote: stored.reasonNote,
       documentRef: stored.documentRef,
@@ -453,6 +639,7 @@ export class InventoryService {
       // normalizes the offered location against the stored one first.
       locationId: offer.locationId ?? storedFact.locationId,
       quantityDelta: offer.quantityDelta.toString(),
+      unitCostMinor: offer.unitCostMinor === null ? null : offer.unitCostMinor.toString(),
       reasonCode: offer.reasonCode,
       reasonNote: offer.reasonNote,
       documentRef: offer.documentRef,
@@ -507,7 +694,11 @@ export class InventoryService {
     organizationId: string,
     actorUserId: string,
     input: {
-      readonly eventType: 'INVENTORY_OPENING_BALANCE_RECORDED' | 'INVENTORY_ADJUSTMENT_RECORDED';
+      readonly eventType:
+        | 'INVENTORY_OPENING_BALANCE_RECORDED'
+        | 'INVENTORY_ADJUSTMENT_RECORDED'
+        | 'INVENTORY_PURCHASE_RECEIPT_RECORDED'
+        | 'INVENTORY_REVALUATION_APPLIED';
       readonly targetId: string;
       readonly documentRef: string;
       readonly occurredAt: Date;
@@ -525,6 +716,51 @@ export class InventoryService {
       payload: { contractVersion: INVENTORY_CONTRACT_VERSION, ...input.payload },
     });
   }
+}
+
+/**
+ * The audit event type a submitted cause produces (§32.2's discipline: one
+ * producing path per event type). The receipt and the revaluation carry their
+ * own types since M4-S3; the adjustment keeps §38.5's; the opening balance
+ * keeps M4-S2's.
+ */
+function auditEventTypeFor(
+  offer: MovementOffer,
+):
+  | 'INVENTORY_OPENING_BALANCE_RECORDED'
+  | 'INVENTORY_ADJUSTMENT_RECORDED'
+  | 'INVENTORY_PURCHASE_RECEIPT_RECORDED'
+  | 'INVENTORY_REVALUATION_APPLIED' {
+  switch (offer.cause) {
+    case 'OPENING_BALANCE':
+      return 'INVENTORY_OPENING_BALANCE_RECORDED';
+    case 'PURCHASE_RECEIPT':
+      return 'INVENTORY_PURCHASE_RECEIPT_RECORDED';
+    case 'REVALUATION':
+      return 'INVENTORY_REVALUATION_APPLIED';
+    case 'MANUAL_ADJUSTMENT':
+      return 'INVENTORY_ADJUSTMENT_RECORDED';
+  }
+}
+
+/**
+ * The organization's §30.6 rounding mode, read from the typed settings row
+ * inside the caller's own transaction (§22.3: a decision that depends on the
+ * settings reads them from the database on every transaction that depends on
+ * them). An organization that has never had a settings row answers the plan's
+ * default, `HALF_UP`. Any stored value outside the closed §30.6 vocabulary is
+ * stored-policy corruption: refused closed, like the pricing domain refuses.
+ */
+async function readRoundingMode(tx: Tx, organizationId: string): Promise<RoundingMode> {
+  const row = await tx.organizationSettings.findUnique({
+    where: { organizationId },
+    select: { roundingMode: true },
+  });
+  const stored = row === null ? 'HALF_UP' : row.roundingMode;
+  if (!ROUNDING_MODE_VALUES.includes(stored as (typeof ROUNDING_MODE_VALUES)[number])) {
+    throw new DomainError(ERROR_CODES.INTERNAL_ERROR, 'the stored rounding mode is not a mode this server knows');
+  }
+  return stored as RoundingMode;
 }
 
 /**
@@ -609,14 +845,28 @@ function mapUniqueRefusal(error: unknown, cause: string): unknown {
 /**
  * The §38.9.1 replay/contradiction decision, over the fields that define what
  * the movement *did* (§38.14.1, minus the time fields): cause, variant,
- * location, signed delta, and the adjustment's reason pair.
+ * location, signed delta, the §30.2 cost snapshot, and the adjustment's reason
+ * pair. The cost is a fact **when the offer names one**: a cost-imposing cause
+ * always does, and a MANUAL_ADJUSTMENT that offers an acquisition cost does.
+ * A bare adjustment's snapshot cost, however, is the engine's own derivation —
+ * the caller-owned fact is the bare delta — so a bare retry replays the stored
+ * movement regardless of what the engine derived then, while any offer that
+ * carries a cost must equal the stored snapshot exactly: a retry offering a
+ * different acquisition cost is not the same movement.
  */
 function isSameFact(stored: MovementFact, offered: MovementFact): boolean {
+  const costOffered =
+    offered.cause === 'OPENING_BALANCE' ||
+    offered.cause === 'PURCHASE_RECEIPT' ||
+    offered.cause === 'REVALUATION' ||
+    offered.unitCostMinor !== null;
+  const costIsTheSameFact = costOffered ? stored.unitCostMinor === offered.unitCostMinor : true;
   return (
     stored.cause === offered.cause &&
     stored.variantId === offered.variantId &&
     stored.locationId === offered.locationId &&
     stored.quantityDelta === offered.quantityDelta &&
+    costIsTheSameFact &&
     stored.reasonCode === offered.reasonCode &&
     stored.reasonNote === offered.reasonNote &&
     stored.documentRef === offered.documentRef
