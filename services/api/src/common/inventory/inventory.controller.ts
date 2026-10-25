@@ -11,15 +11,17 @@
  * (§7.1, ADR-001).
  *
  * Guard order matters (§9.3): `@Authorize` first runs the bearer guard, then
- * the organization check against the membership claim. Reads declare
+ * the organization check against the token's membership claim. Reads declare
  * `inventory.view`; the movement write declares `inventory.adjust` — the §17
- * server-side enforcement, resolved by the same effective-permission rule
- * every read path uses. A caller with `catalog.view` alone, or an
- * authenticated caller with no inventory permission at all, reaches nothing
- * here. `inventory.receive` is deliberately absent from this slice's routes
- * (§38.22 Tier 3: purchase receipts arrive with M6's documents) and so is
- * `inventory.count` (M4-S4); both permissions already exist in the M2-S3
- * catalog and are wired by their owning slices.
+ * *server-side enforcement, resolved by the same effective-permission rule
+ * every read path uses. Costing authority (`catalog.cost.edit`, §38.5's "when a
+ * cost is involved") is the write's escalation: a cost-imposing cause resolves
+ * it from the caller's effective set before the ledger is touched, and the
+ * `PURCHASE_RECEIPT` cause also demands `inventory.receive` (§11.2's
+ * stock-receiving authority; M6-S2's purchase documents remain the owning slice
+ * above this movement path). `inventory.count` stays M4-S4's; neither
+ * permission is invented here — both exist in the M2-S3 catalog and are wired
+ * by their owning slices.
  *
  * No handler reads an organization id or a caller identity from a request
  * body: the tenant comes from the matched route parameter, the actor from the
@@ -30,11 +32,16 @@ import { Body, Controller, Get, HttpCode, HttpStatus, Post, Query } from '@nestj
 import { ApiOperation, ApiResponse } from '@nestjs/swagger';
 
 import { Authorize, OrganizationId } from '../authorization/authorization.guard';
+import { AuthorizationService } from '../tenancy/authorization/authorization.service';
+import { toPermissionSet } from '../tenancy/authorization/effective-permissions';
 import { VerifiedPrincipal } from '../identity/jwt-auth.guard';
 import type { AuthenticatedPrincipal } from '../identity/auth.service';
+import { DomainError } from '../errors/domain.error';
+import { ERROR_CODES } from '../errors/problem';
 import { InventoryService } from './inventory.service';
 import {
   INVENTORY_PATH,
+  CostSnapshotListResponse,
   LevelListResponse,
   LevelResponse,
   ListLevelsQuery,
@@ -44,15 +51,49 @@ import {
   MovementResponse,
   MovementSubmissionResponse,
   SubmitMovementRequest,
+  ValuationResponse,
 } from './inventory-view.contract';
 
 /**
  * The inventory surface. Every route is organization-scoped; the reads answer
- * the derived truth, the single write rides the authoritative ledger.
+ * the derived truth, the writes ride the authoritative ledger and the §30
+ * costing engine. Cost-bearing authority (`catalog.cost.edit`, §38.5's "when a
+ * cost is involved") gates the valuation reads and the cost-imposing causes;
+ * the same effective-permission resolver the `@Authorize` guard uses makes the
+ * escalation, so route and escalation can never disagree.
  */
 @Controller(INVENTORY_PATH)
 export class InventoryController {
-  constructor(private readonly inventory: InventoryService) {}
+  constructor(
+    private readonly inventory: InventoryService,
+    /** The §11.4 resolver the escalation reuses — never a second permission rule. */
+    private readonly authorization: AuthorizationService,
+  ) {}
+
+  /**
+   * The cost-cause escalation of §38.5: a caller whose grants admit the plain
+   * stockkeeping route (`inventory.adjust`) still needs the cost authority for
+   * every movement that *sets* a cost — an opening balance, a purchase receipt
+   * (which additionally demands the §11.2 stock-receiving authority), a
+   * revaluation, or an adjustment the wire itself costs. Fails closed
+   * `403 PERMISSION_DENIED` on the same effective set the guard resolved.
+   */
+  private async assertCostingPermissions(
+    organizationId: string,
+    userId: string,
+    required: readonly string[],
+  ): Promise<void> {
+    if (required.length === 0) {
+      return;
+    }
+    const effective = await this.authorization.resolveForMembership(organizationId, userId);
+    const held = toPermissionSet(effective.permissions);
+    for (const permission of required) {
+      if (!held.has(permission)) {
+        throw new DomainError(ERROR_CODES.PERMISSION_DENIED, 'the caller does not hold the required permission');
+      }
+    }
+  }
 
   @Get('locations')
   @Authorize('inventory.view')
@@ -128,7 +169,9 @@ export class InventoryController {
   @ApiResponse({ status: HttpStatus.OK, type: MovementSubmissionResponse })
   @ApiResponse({
     status: HttpStatus.CONFLICT,
-    description: 'MUTATION_CONTRADICTION, INSUFFICIENT_STOCK, or INVENTORY_OPENING_BALANCE_DUPLICATE.',
+    description:
+      'MUTATION_CONTRADICTION, INSUFFICIENT_STOCK, INVENTORY_OPENING_BALANCE_DUPLICATE, or ' +
+      'INVENTORY_COST_BASIS_REQUIRED (the stock has no cost basis; M4-S3).',
   })
   @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'NOT_FOUND — no such variant or location here.' })
   @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'VALIDATION_FAILED — an invalid value.' })
@@ -142,6 +185,10 @@ export class InventoryController {
     @OrganizationId() organizationId: string,
     @VerifiedPrincipal() principal: AuthenticatedPrincipal,
   ): Promise<MovementSubmissionResponse> {
+    // §38.5's escalation, before any database work: the cost authority is a
+    // route-and-cause decision resolved from the caller's effective set.
+    const costingPermissions = requiredCostingPermissions(body.cause, body.unitCostMinor);
+    await this.assertCostingPermissions(organizationId, principal.userId, costingPermissions);
     return this.inventory.submitMovement(
       {
         organizationId,
@@ -152,6 +199,9 @@ export class InventoryController {
           variantId: body.variantId,
           ...(body.locationId === undefined ? {} : { locationId: body.locationId }),
           quantityDelta: body.quantityDelta,
+          ...(body.unitCostMinor === undefined || body.unitCostMinor === null
+            ? {}
+            : { unitCostMinor: body.unitCostMinor }),
           ...(body.reasonCode === undefined ? {} : { reasonCode: body.reasonCode }),
           ...(body.reasonNote === undefined ? {} : { reasonNote: body.reasonNote }),
           ...(body.documentRef === undefined ? {} : { documentRef: body.documentRef }),
@@ -160,6 +210,71 @@ export class InventoryController {
       new Date(),
     );
   }
+
+  @Get('valuation')
+  @Authorize('catalog.cost.edit')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'The §30.2 inventory valuation.',
+    description:
+      'Requires `catalog.cost.edit` (§11.2: the cost-price authority; §38.5: "when a cost is involved"). ' +
+      'Answers every level’s remaining quantity, the §30.2 moving average the engine maintains, and the ' +
+      'exact value beneath them — quantity × average, an integer product of minor units. A level with no ' +
+      'cost basis is answered null and counted in totals, never folded in at an invented cost. No-op read.',
+  })
+  @ApiResponse({ status: HttpStatus.OK, type: ValuationResponse })
+  @ApiResponse({ status: HttpStatus.FORBIDDEN, description: 'PERMISSION_DENIED or ORGANIZATION_FORBIDDEN.' })
+  @ApiResponse({ status: HttpStatus.UNAUTHORIZED, description: 'UNAUTHENTICATED.' })
+  async listValuation(
+    @OrganizationId() organizationId: string,
+    @Query() query: ListLevelsQuery,
+  ): Promise<ValuationResponse> {
+    return this.inventory.listValuation(organizationId, query);
+  }
+
+  @Get('cost-snapshots')
+  @Authorize('catalog.cost.edit')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'The movements that carry a recorded unit cost.',
+    description:
+      'Requires `catalog.cost.edit`. Answers the §30.2 snapshot ledger — every accepted movement that ' +
+      'records the unit cost the engine applied, newest acceptance first, so any valuation point is ' +
+      'reconstructible from the movements themselves. Cost is not a member of the `inventory.view` faces; ' +
+      'this is the cost-authorized face of the same append-only rows. No-op read.',
+  })
+  @ApiResponse({ status: HttpStatus.OK, type: CostSnapshotListResponse })
+  @ApiResponse({ status: HttpStatus.FORBIDDEN, description: 'PERMISSION_DENIED or ORGANIZATION_FORBIDDEN.' })
+  @ApiResponse({ status: HttpStatus.UNAUTHORIZED, description: 'UNAUTHENTICATED.' })
+  async listCostSnapshots(
+    @OrganizationId() organizationId: string,
+    @Query() query: ListLevelsQuery,
+  ): Promise<CostSnapshotListResponse> {
+    const costSnapshots = await this.inventory.listCostSnapshots(organizationId, query);
+    return { costSnapshots: [...costSnapshots] };
+  }
+}
+
+/**
+ * The cause's costing escalation (§38.5 "plus `catalog.cost.edit` when a cost
+ * is involved"): the cost-imposing causes decide the cost; a movement costing
+ * is a cost decision; a plain quantity correction at the engine's own average
+ * is not. `PURCHASE_RECEIPT` additionally demands `inventory.receive` — the §11.2
+ * stock-receiving authority its cause names. Exported so the guard-acceptance
+ * spec can pin the escalation matrix against the production decision the
+ * controller makes.
+ */
+export function requiredCostingPermissions(
+  cause: string,
+  offeredUnitCostMinor: string | null | undefined,
+): readonly string[] {
+  if (cause === 'PURCHASE_RECEIPT') {
+    return ['inventory.receive', 'catalog.cost.edit'];
+  }
+  if (cause === 'OPENING_BALANCE' || cause === 'REVALUATION' || offeredUnitCostMinor != null) {
+    return ['catalog.cost.edit'];
+  }
+  return [];
 }
 
 /** The level projection exported for the type check the controller's own read uses. */

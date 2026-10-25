@@ -8,7 +8,10 @@
  * - `GET  …/inventory/locations` — the organization's locations, the V1 default seeded (§15.4).
  * - `GET  …/inventory/levels`    — the derived, cacheable quantities (`inventory.view`).
  * - `GET  …/inventory/movements` — the authoritative movement history (`inventory.view`).
- * - `POST …/inventory/movements` — submit one movement behind the §15.6 guard (`inventory.adjust`).
+ * - `POST …/inventory/movements` — submit one movement behind the §15.6 guard (`inventory.adjust`,
+ *        escalating to the cost authority for the cost-imposing causes, §38.5).
+ * - `GET  …/inventory/valuation` — the §30.2 valuation: quantity × moving average, exact (`catalog.cost.edit`).
+ * - `GET  …/inventory/cost-snapshots` — the movements that carry a recorded unit cost (`catalog.cost.edit`).
  *
  * The POST answers the ledger's idempotency semantics (§38.9, §38.10): an
  * identical retry of the same `movementId` is a `REPLAY` answered with the
@@ -187,6 +190,21 @@ export class SubmitMovementRequest {
   readonly quantityDelta!: string;
 
   @ApiPropertyOptional({
+    description:
+      'The §30.2 acquisition cost in exact minor units as a decimal string. Required for OPENING_BALANCE, ' +
+      'PURCHASE_RECEIPT, and REVALUATION (the engine never fabricates a cost); optional for a positive ' +
+      'MANUAL_ADJUSTMENT (with it the engine folds the offered cost into the §30.3 moving average); ' +
+      'refused for a negative one (a consumption snapshots the engine’s current average).',
+    example: '18500',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{1,12}$/, {
+    message: 'unitCostMinor must be a non-negative integer decimal string of at most 12 digits',
+  })
+  readonly unitCostMinor?: string | null;
+
+  @ApiPropertyOptional({
     description: 'The §38.5 closed reason code — required for MANUAL_ADJUSTMENT, refused for OPENING_BALANCE.',
     type: 'string',
     nullable: true,
@@ -268,6 +286,130 @@ export class LocationResponse {
 
   @ApiProperty({ format: 'date-time' })
   readonly createdAt!: string;
+}
+
+/**
+ * `GET …/inventory/valuation` — one valued level. Every money member is a
+ * decimal string of exact integer minor units (§30.1); an absent basis is
+ * `null`, never a fabricated zero (A30.2: the engine's honesty marker).
+ */
+export class ValuationLevelResponse {
+  @ApiProperty({ description: 'The variant the valued stock belongs to.', format: 'uuid' })
+  readonly variantId!: string;
+
+  @ApiProperty({ description: 'The variant SKU (M4-S1).' })
+  readonly sku!: string;
+
+  @ApiProperty({ description: 'The parent product’s Arabic name (M4-S1).' })
+  readonly productNameAr!: string;
+
+  @ApiProperty({ description: 'The location the valued stock sits in.', format: 'uuid' })
+  readonly locationId!: string;
+
+  @ApiProperty({ description: 'The location name.' })
+  readonly locationName!: string;
+
+  @ApiProperty({ description: 'The remaining quantity, exact base units, a decimal string.', example: '24' })
+  readonly quantity!: string;
+
+  @ApiProperty({
+    description: 'The §30.2 moving average cost per base unit, minor units — null until a basis exists.',
+    type: 'string',
+    nullable: true,
+    example: '18500',
+  })
+  readonly averageCostMinor!: string | null;
+
+  @ApiProperty({
+    description: 'The §30.2 inventory value: quantity × average, exact minor units — null with the basis.',
+    type: 'string',
+    nullable: true,
+    example: '444000',
+  })
+  readonly inventoryValueMinor!: string | null;
+
+  @ApiProperty({ description: 'When the level last folded.', format: 'date-time' })
+  readonly updatedAt!: string;
+}
+
+/** The exact totals of one valuation answer. */
+export class ValuationTotalsResponse {
+  @ApiProperty({
+    description: 'The sum of the valued rows’ inventory value, exact minor units (§30.2’s identity).',
+    example: '444000',
+  })
+  readonly inventoryValueMinor!: string;
+
+  @ApiProperty({
+    description: 'How many answered levels carry a basis and are folded into the total.',
+    type: 'integer',
+  })
+  readonly valuedLevels!: number;
+
+  @ApiProperty({
+    description: 'How many answered levels have no cost basis yet — counted, never folded in at an invented cost.',
+    type: 'integer',
+  })
+  readonly uncostedLines!: number;
+}
+
+/** `GET …/inventory/valuation` answer (`catalog.cost.edit`). */
+export class ValuationResponse {
+  @ApiProperty({ type: () => [ValuationLevelResponse] })
+  readonly levels!: ValuationLevelResponse[];
+
+  @ApiProperty({ type: () => ValuationTotalsResponse })
+  readonly totals!: ValuationTotalsResponse;
+}
+
+/**
+ * `GET …/inventory/cost-snapshots` — one costed movement: the §30.2 snapshot
+ * row that records exactly what unit cost the engine used, newest acceptance
+ * first. The cost the valuation restated is reconstructible from this ledger
+ * alone (§30.2’s rationale).
+ */
+export class CostSnapshotResponse {
+  @ApiProperty({ description: 'The §38.14.1 movement id.', format: 'uuid' })
+  readonly movementId!: string;
+
+  @ApiProperty({ description: 'The §15.5 closed cause.', enum: [...MOVEMENT_CAUSE_VOCABULARY] })
+  readonly cause!: MovementCause;
+
+  @ApiProperty({ description: 'The variant that moved.', format: 'uuid' })
+  readonly variantId!: string;
+
+  @ApiProperty({ description: 'The variant SKU (M4-S1).' })
+  readonly sku!: string;
+
+  @ApiProperty({ description: 'The parent product’s Arabic name (M4-S1).' })
+  readonly productNameAr!: string;
+
+  @ApiProperty({ description: 'The location the movement landed at.', format: 'uuid' })
+  readonly locationId!: string;
+
+  @ApiProperty({ description: 'The location name.' })
+  readonly locationName!: string;
+
+  @ApiProperty({ description: 'The signed, exact base-unit delta as a decimal string.' })
+  readonly quantityDelta!: string;
+
+  @ApiProperty({
+    description: 'The §30.2 unit cost the engine applied, exact minor units.',
+    example: '18500',
+  })
+  readonly unitCostMinor!: string;
+
+  @ApiProperty({ description: 'The per-organization acceptance order (§38.14.1).', type: 'string' })
+  readonly serverSequence!: string;
+
+  @ApiProperty({ description: 'The movement’s business time.', format: 'date-time' })
+  readonly occurredAt!: string;
+}
+
+/** `GET …/inventory/cost-snapshots` answer (`catalog.cost.edit`). */
+export class CostSnapshotListResponse {
+  @ApiProperty({ type: () => [CostSnapshotResponse] })
+  readonly costSnapshots!: CostSnapshotResponse[];
 }
 
 /** The one admissible cause type the request names (the canonicalizer re-proves membership). */
