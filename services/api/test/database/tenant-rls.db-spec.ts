@@ -377,10 +377,11 @@ const CROSS_TENANT_INSERT: ReadonlyMap<string, { sql: string; params: readonly u
   [
     'stock_levels',
     {
-      // The row satisfies the 0014 non-negative CHECK, so the RLS WITH CHECK
-      // is the only thing that can refuse it.
-      sql: `INSERT INTO stock_levels (organization_id, variant_id, location_id, quantity)
-              VALUES ($1::uuid, $2::uuid, $3::uuid, 7)`,
+      // The row satisfies the 0014 non-negative CHECK and M4-S3's
+      // `chk_inventory_level_cost_with_stock` (stock carries its basis), so
+      // the RLS WITH CHECK is the only thing that can refuse it.
+      sql: `INSERT INTO stock_levels (organization_id, variant_id, location_id, quantity, average_cost_minor)
+              VALUES ($1::uuid, $2::uuid, $3::uuid, 7, 2500)`,
       params: [ORG_B, INVENTORY_PROBE_VARIANT_ID, INVENTORY_PROBE_LOCATION_ID],
     },
   ],
@@ -789,8 +790,8 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
         CATALOG_PRODUCT_ID,
       );
       await tx.$executeRawUnsafe(
-        `INSERT INTO stock_levels (organization_id, variant_id, location_id, quantity)
-           VALUES ($1::uuid, $2::uuid, $3::uuid, 5)`,
+        `INSERT INTO stock_levels (organization_id, variant_id, location_id, quantity, average_cost_minor)
+           VALUES ($1::uuid, $2::uuid, $3::uuid, 5, 2500)`,
         ORG_A,
         INVENTORY_PROBE_VARIANT_ID,
         INVENTORY_PROBE_LOCATION_ID,
@@ -1326,8 +1327,8 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
     });
   });
 
-  describe('AC-07: the fresh install applied exactly the fourteen-path history', () => {
-    it('records exactly 0001 through 0014, every one finished and never rolled back', async () => {
+  describe('AC-07: the fresh install applied exactly the fifteen-path history', () => {
+    it('records exactly 0001 through 0015, every one finished and never rolled back', async () => {
       const rows = await migrator.$queryRawUnsafe<MigrationRow[]>(
         `SELECT migration_name FROM _prisma_migrations ORDER BY migration_name`,
       );
@@ -1347,6 +1348,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
         '0012_organization_settings',
         '0013_product_catalog',
         '0014_inventory_core',
+        '0015_inventory_costing',
       ]);
     });
   });

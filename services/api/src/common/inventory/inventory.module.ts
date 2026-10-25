@@ -2,23 +2,24 @@
  * The inventory module (Master Plan §15.4, §15.5, §15.6, §15.6A, §38.14.1;
  * §40.8 row M4-S2).
  *
- * Owns the four inventory routes and the `InventoryService` behind them. It
+ * Owns the six inventory routes and the `InventoryService` behind them. It
  * imports `AuthorizationModule.forRoot(config)` — which dedupes the shared
  * `IdentityModule.forRoot(config)` graph — because the controller is decorated
- * with `@Authorize` (its composite guard must be the exported authorization
- * instance the routes assert against, §39.3): `inventory.view` on the reads,
- * `inventory.adjust` on the movement write, resolved by the same
- * effective-permission rule every other module uses (§11.4). `PrismaService`
- * arrives from the global database module, and the service's tenant
- * transactions carry the §8.2 trusted context the inventory tables'
- * forced-RLS policies demand (migration 0014).
+ * with `@Authorize` and reuses the exported `AuthorizationService` for the §38.5
+ * cost escalation (`inventory.view` on the quantity reads, `inventory.adjust` on
+ * the movement write, `catalog.cost.edit` on the valuation face and the
+ * cost-imposing causes, resolved by the same effective-permission rule every
+ * other module uses, §11.4). `PrismaService` arrives from the global database
+ * module, and the service's tenant transactions carry the §8.2 trusted context
+ * the inventory tables' forced-RLS policies demand (migrations 0014/0015).
  *
  * The module communicates with the M2-S6 audit streams only through the
  * `AuditStreamWriter` the service composes for its class-A appends, and with
  * the M1b-S4 convergence machinery only through the shared `sync_sequences`
- * counter — the movement's `server_sequence` allocation. There is no costing
- * surface here (§30: M4-S3), no count surface (§15.8: M4-S4), and no
- * purchase-receipt surface (§38.22 Tier 3: M6 owns the documents).
+ * counter — the movement's `server_sequence` allocation. The §30 moving-average
+ * engine lives behind the movement write and the two cost reads; the count
+ * surface is M4-S4's (§15.8), and M6-S2's purchase documents will ride this
+ * exact receipt path as their producer (§38.22 Tier 3, online only).
  */
 
 import { Module, type DynamicModule } from '@nestjs/common';

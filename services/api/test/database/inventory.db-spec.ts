@@ -234,6 +234,7 @@ describe('inventory acceptance (real PostgreSQL, §15.4–§15.6A / §38.14.1)',
       cause: string;
       variantId: string;
       quantityDelta: string;
+      unitCostMinor?: string;
       locationId?: string | null;
       reasonCode?: string | null;
       reasonNote?: string | null;
@@ -247,6 +248,7 @@ describe('inventory acceptance (real PostgreSQL, §15.4–§15.6A / §38.14.1)',
         cause: offer.cause,
         variantId: offer.variantId,
         quantityDelta: offer.quantityDelta,
+        ...(offer.unitCostMinor === undefined ? {} : { unitCostMinor: offer.unitCostMinor }),
         ...(offer.locationId === undefined ? {} : { locationId: offer.locationId }),
         ...(offer.reasonCode === undefined ? {} : { reasonCode: offer.reasonCode }),
         ...(offer.reasonNote === undefined ? {} : { reasonNote: offer.reasonNote }),
@@ -339,6 +341,9 @@ describe('inventory acceptance (real PostgreSQL, §15.4–§15.6A / §38.14.1)',
         cause: 'OPENING_BALANCE',
         variantId: tshirtVariantId,
         quantityDelta: '12',
+        // M4-S3: the opening acquisition cost is part of the fact now — the
+        // §30.2 average erects from it exactly (12 pieces @ 150.00 EGP).
+        unitCostMinor: '15000',
       });
       expect(applied.status).toBe('APPLIED');
       expect(applied.movement.cause).toBe('OPENING_BALANCE');
@@ -346,8 +351,11 @@ describe('inventory acceptance (real PostgreSQL, §15.4–§15.6A / §38.14.1)',
       expect(applied.movement.serverSequence).toBe('1');
       expect(applied.resultingQuantity).toBe('12');
 
-      // The derived cache carries the fold.
+      // The derived cache carries the fold — quantity and the §30.2 average.
       await expect(quantityOf(tshirtVariantId)).resolves.toBe('12');
+      const valued = await inventory.listValuation(mainOrgId, { variantId: tshirtVariantId });
+      expect(valued.levels[0]?.averageCostMinor).toBe('15000');
+      expect(valued.levels[0]?.inventoryValueMinor).toBe('180000');
     });
 
     it('receives two cartons of 12 exactly — 24 base units, no rounding anywhere', async () => {
@@ -372,6 +380,7 @@ describe('inventory acceptance (real PostgreSQL, §15.4–§15.6A / §38.14.1)',
         cause: 'OPENING_BALANCE',
         variantId: isolatedVariantId,
         quantityDelta: '24',
+        unitCostMinor: '12000',
       });
       const issue = await submit(mainOrgId, mainOwnerId, {
         cause: 'MANUAL_ADJUSTMENT',
@@ -467,6 +476,7 @@ describe('inventory acceptance (real PostgreSQL, §15.4–§15.6A / §38.14.1)',
           cause: 'OPENING_BALANCE',
           variantId: isolatedVariantId,
           quantityDelta: '5',
+          unitCostMinor: '2500',
         }),
       ).rejects.toMatchObject({ code: 'INVENTORY_OPENING_BALANCE_DUPLICATE' });
 
@@ -593,11 +603,13 @@ describe('inventory acceptance (real PostgreSQL, §15.4–§15.6A / §38.14.1)',
           cause: 'OPENING_BALANCE',
           variantId: raceVariantId,
           quantityDelta: '9',
+          unitCostMinor: '8888',
         }),
         submit(mainOrgId, mainOwnerId, {
           cause: 'OPENING_BALANCE',
           variantId: raceVariantId,
           quantityDelta: '7',
+          unitCostMinor: '7777',
         }),
       ]);
 
@@ -636,6 +648,7 @@ describe('inventory acceptance (real PostgreSQL, §15.4–§15.6A / §38.14.1)',
           cause: 'OPENING_BALANCE',
           variantId: isolatedVariantId,
           quantityDelta: '100',
+          unitCostMinor: '500',
         }),
       ).rejects.toMatchObject({ code: 'NOT_FOUND' });
 
@@ -743,7 +756,12 @@ describe('inventory acceptance (real PostgreSQL, §15.4–§15.6A / §38.14.1)',
       expect(events.length).toBe(movements.length);
       const qualified = new Set(events.map((row) => row.event_type));
       for (const type of qualified) {
-        expect(['INVENTORY_OPENING_BALANCE_RECORDED', 'INVENTORY_ADJUSTMENT_RECORDED']).toContain(type);
+        expect([
+          'INVENTORY_OPENING_BALANCE_RECORDED',
+          'INVENTORY_ADJUSTMENT_RECORDED',
+          'INVENTORY_PURCHASE_RECEIPT_RECORDED',
+          'INVENTORY_REVALUATION_APPLIED',
+        ]).toContain(type);
       }
 
       const report = await inTenant(mainOrgId, (tx) =>
@@ -776,6 +794,501 @@ describe('inventory acceptance (real PostgreSQL, §15.4–§15.6A / §38.14.1)',
           >`SELECT count(*)::bigint AS n FROM audit_events WHERE event_type LIKE 'INVENTORY_%' AND organization_id = ${mainOrgId}::uuid`,
       );
       expect(after[0]?.n).toBe(before[0]?.n ?? undefined);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // M4-S3 — the §30 moving-average costing engine, on the real tables the
+  // process uses. Every expected number below is computed by hand from §30.3
+  // and §30.4 *before* the assertion; the suite never reads back what it
+  // writes to compare it with itself.
+  // ---------------------------------------------------------------------------
+  describe('the §30 moving-average costing engine (M4-S3)', () => {
+    let costedVariantId = '';
+
+    beforeAll(async () => {
+      // One fresh variant owned by the costing narrative.
+      const fresh = await catalog.createVariant({
+        organizationId: mainOrgId,
+        actorUserId: mainOwnerId,
+        productId,
+        offered: { sku: `INV-COST-${randomUUID().slice(0, 8).toUpperCase()}`, attributes: { size: 'XL' } },
+      });
+      costedVariantId = fresh.id;
+    });
+
+    it('scenario C — a second acquisition at a different cost folds the §30.3 weighted average, not a last-cost shortcut', async () => {
+      // First acquisition: 24 pieces @ 185.00 EGP through the opening balance.
+      const opening = await submit(mainOrgId, mainOwnerId, {
+        cause: 'OPENING_BALANCE',
+        variantId: costedVariantId,
+        quantityDelta: '24',
+        unitCostMinor: '18500',
+      });
+      expect(opening.status).toBe('APPLIED');
+
+      // Second acquisition at a different cost: 12 pieces @ 240.00 EGP.
+      //   new_value = 24·18500 + 12·24000 = 732 000
+      //   new_qty   = 36 → new_avg = 732000/36 = 20333.33… → HALF_UP 20333
+      // A naive last-cost engine would answer 24000; §30.3 answers 20333.
+      const receipt = await submit(mainOrgId, mainOwnerId, {
+        cause: 'PURCHASE_RECEIPT',
+        variantId: costedVariantId,
+        quantityDelta: '12',
+        unitCostMinor: '24000',
+      });
+      expect(receipt.status).toBe('APPLIED');
+      expect(receipt.movement.cause).toBe('PURCHASE_RECEIPT');
+
+      const valued = await inventory.listValuation(mainOrgId, { variantId: costedVariantId });
+      expect(valued.levels).toHaveLength(1);
+      expect(valued.levels[0]?.quantity).toBe('36');
+      expect(valued.levels[0]?.averageCostMinor).toBe('20333');
+      expect(valued.levels[0]?.inventoryValueMinor).toBe('731988'); // 36 × 20333, digit-exact
+      expect(valued.totals.uncostedLines).toBe(0);
+      expect(valued.totals.valuedLevels).toBe(1);
+    });
+
+    it('scenario D — the deduction snapshots the current average, consumes its exact cost, moves no average', async () => {
+      // An issue of 3 pieces from 36 @ 20333:
+      //   §30.4/§30.5: the movement snapshots 20333, the average is *unchanged*,
+      //   the remaining value is (36 − 3) × 20333 = 33 × 20333 = 670 989 —
+      //   and the consumed cost is 3 × 20333 = 60 999, reconstructible from the
+      //   snapshot ledger.
+      const issue = await submit(mainOrgId, mainOwnerId, {
+        cause: 'MANUAL_ADJUSTMENT',
+        variantId: costedVariantId,
+        quantityDelta: '-3',
+        reasonCode: 'LOST',
+      });
+      expect(issue.status).toBe('APPLIED');
+
+      const valued = await inventory.listValuation(mainOrgId, { variantId: costedVariantId });
+      expect(valued.levels[0]?.quantity).toBe('33');
+      expect(valued.levels[0]?.averageCostMinor).toBe('20333');
+      expect(valued.levels[0]?.inventoryValueMinor).toBe('670989');
+
+      const costs = await inventory.listCostSnapshots(mainOrgId, { variantId: costedVariantId });
+      // Newest acceptance first: the issue's snapshot (20333) above the two
+      // acquisition costs.
+      expect(costs[0]?.cause).toBe('MANUAL_ADJUSTMENT');
+      expect(costs[0]?.unitCostMinor).toBe('20333');
+      expect(costs[costs.length - 1]?.cause).toBe('OPENING_BALANCE');
+      expect(costs[costs.length - 1]?.unitCostMinor).toBe('18500');
+      // The consumed acquisition cost: Σ snapshot costs over the ledger
+      // (24 @ 18500 + 12 @ 24000 received; 3 @ 20333 consumed).
+      expect(costs).toHaveLength(3);
+    });
+
+    it('scenario F — an identical cost-bearing retry replays with exactly one financial effect; a different cost is a contradiction', async () => {
+      const movementId = randomUUID();
+      const first = await submit(mainOrgId, mainOwnerId, {
+        movementId,
+        cause: 'PURCHASE_RECEIPT',
+        variantId: costedVariantId,
+        quantityDelta: '2',
+        unitCostMinor: '10000',
+      });
+      expect(first.status).toBe('APPLIED');
+      // Current fold: 33 + 2 = 35 @ 20333, plus 2 @ 10000 =
+      //   (33·20333 + 2·10000)/35 = (670989 + 20000)/35 = 690989/35 = 19742.54…
+      //   → HALF_UP 19743, value 35 × 19743 = 691005.
+
+      const replay = await submit(mainOrgId, mainOwnerId, {
+        movementId,
+        cause: 'PURCHASE_RECEIPT',
+        variantId: costedVariantId,
+        quantityDelta: '2',
+        unitCostMinor: '10000',
+      });
+      expect(replay.status).toBe('REPLAY');
+
+      const costs = await inventory.listCostSnapshots(mainOrgId, { variantId: costedVariantId });
+      expect(costs.filter((row) => row.movementId === movementId)).toHaveLength(1);
+      const valued = await inventory.listValuation(mainOrgId, { variantId: costedVariantId });
+      expect(valued.levels[0]?.quantity).toBe('35');
+      expect(valued.levels[0]?.averageCostMinor).toBe('19743');
+      expect(valued.levels[0]?.inventoryValueMinor).toBe('691005');
+
+      // The same identity naming a different fact — even in cost alone — is
+      // the ledger's own contradiction, effect-free.
+      await expect(
+        submit(mainOrgId, mainOwnerId, {
+          movementId,
+          cause: 'PURCHASE_RECEIPT',
+          variantId: costedVariantId,
+          quantityDelta: '2',
+          unitCostMinor: '12000',
+        }),
+      ).rejects.toMatchObject({ code: 'MUTATION_CONTRADICTION' });
+      const valuedAfter = await inventory.listValuation(mainOrgId, { variantId: costedVariantId });
+      expect(valuedAfter.levels[0]?.averageCostMinor).toBe('19743');
+    });
+
+    it('scenario G — two racing cost-bearing receipts serialize on the fold; quantity and average agree at the end', async () => {
+      // +10 @ 15 and +10 @ 6 from 35 @ 19743: lock-serialized in either order,
+      // the *final* average is identical, because the §30.3 fold is a
+      // serializable cumulative calculation AND the race is chosen so each
+      // intermediate fold lands on an exact division — the serializations can
+      // never disagree:
+      //   (35·19743 + 10·15)/45 = (691005 + 150)/45 = 691155/45 = 15359 exact
+      //   (35·19743 + 10·6)/45  = (691005 + 60)/45  = 691065/45 = 15357 exact
+      // then either serialization: (691155|691065 + the other lot)/55
+      //   = 691215/55 = 12567.54… → HALF_UP 12568, value 55 × 12568 = 691240.
+      const [a, b] = await Promise.allSettled([
+        submit(mainOrgId, mainOwnerId, {
+          cause: 'PURCHASE_RECEIPT',
+          variantId: costedVariantId,
+          quantityDelta: '10',
+          unitCostMinor: '15',
+        }),
+        submit(mainOrgId, mainOwnerId, {
+          cause: 'PURCHASE_RECEIPT',
+          variantId: costedVariantId,
+          quantityDelta: '10',
+          unitCostMinor: '6',
+        }),
+      ]);
+      const settled = [a, b].filter(
+        (outcome): outcome is PromiseFulfilledResult<Awaited<ReturnType<InventoryService['submitMovement']>>> =>
+          outcome.status === 'fulfilled',
+      );
+      expect(settled).toHaveLength(2);
+
+      const valued = await inventory.listValuation(mainOrgId, { variantId: costedVariantId });
+      expect(valued.levels[0]?.quantity).toBe('55');
+      expect(valued.levels[0]?.averageCostMinor).toBe('12568');
+      expect(valued.levels[0]?.inventoryValueMinor).toBe('691240'); // 55 × 12568
+    });
+
+    it('scenario H — the §30.5 revaluation restates only the current average; history is never rewritten', async () => {
+      // An explicit server-only costing act: the owner restates the average
+      // from 12568 to 12000 across the 55 on-hand pieces.
+      const revaluation = await submit(mainOrgId, mainOwnerId, {
+        cause: 'REVALUATION',
+        variantId: costedVariantId,
+        quantityDelta: '0',
+        unitCostMinor: '12000',
+      });
+      expect(revaluation.status).toBe('APPLIED');
+      expect(revaluation.movement.quantityDelta).toBe('0');
+      expect(revaluation.movement.cause).toBe('REVALUATION');
+
+      const valued = await inventory.listValuation(mainOrgId, { variantId: costedVariantId });
+      expect(valued.levels[0]?.quantity).toBe('55');
+      expect(valued.levels[0]?.averageCostMinor).toBe('12000');
+      expect(valued.levels[0]?.inventoryValueMinor).toBe('660000');
+
+      // The historical acquisition snapshots are untouched — the §30.5 law:
+      // the movement ledger still answers 18500/24000/20333/10000/15/6, and
+      // the revaluation itself carries only its own new average.
+      const costs = await inventory.listCostSnapshots(mainOrgId, { variantId: costedVariantId });
+      const observed = costs.map((row) => `${row.cause}:${row.unitCostMinor}`);
+      expect(observed[0]).toBe('REVALUATION:12000');
+      expect(observed).toContain('OPENING_BALANCE:18500');
+      expect(observed).toContain('PURCHASE_RECEIPT:24000');
+      expect(observed).toContain('MANUAL_ADJUSTMENT:20333');
+    });
+
+    it('the audit stream carries the costing facts — before, after, and the exact value', async () => {
+      const events = await inTenant(
+        mainOrgId,
+        (tx) =>
+          tx.$queryRaw<{ event_type: string; payload: unknown }[]>`
+          SELECT event_type, payload FROM audit_events
+           WHERE event_type = 'INVENTORY_REVALUATION_APPLIED'
+             AND organization_id = ${mainOrgId}::uuid`,
+      );
+      expect(events).toHaveLength(1);
+      const payload = events[0]?.payload as {
+        averageCostMinorBefore?: string;
+        averageCostMinorAfter?: string;
+        resultingInventoryValueMinor?: string;
+        unitCostMinor?: string;
+      };
+      expect(payload.averageCostMinorBefore).toBe('12568');
+      expect(payload.averageCostMinorAfter).toBe('12000');
+      expect(payload.resultingInventoryValueMinor).toBe('660000');
+      expect(payload.unitCostMinor).toBe('12000');
+    });
+
+    describe('the costing refusals (the engine never fabricates a cost)', () => {
+      let bareVariantId = '';
+
+      beforeAll(async () => {
+        const fresh = await catalog.createVariant({
+          organizationId: mainOrgId,
+          actorUserId: mainOwnerId,
+          productId,
+          offered: { sku: `INV-BARE-${randomUUID().slice(0, 8).toUpperCase()}` },
+        });
+        bareVariantId = fresh.id;
+      });
+
+      it('a cost-imposing cause without a cost is refused before any connection', async () => {
+        await expect(
+          submit(mainOrgId, mainOwnerId, {
+            cause: 'OPENING_BALANCE',
+            variantId: bareVariantId,
+            quantityDelta: '10',
+          }),
+        ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+        await expect(
+          submit(mainOrgId, mainOwnerId, {
+            cause: 'PURCHASE_RECEIPT',
+            variantId: bareVariantId,
+            quantityDelta: '10',
+          }),
+        ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+        // Nothing was written, and no valuation member was invented.
+        const valued = await inventory.listValuation(mainOrgId, { variantId: bareVariantId });
+        expect(valued.levels).toHaveLength(0);
+      });
+
+      it('a negative receipt direction is refused at the wire', async () => {
+        await expect(
+          submit(mainOrgId, mainOwnerId, {
+            cause: 'PURCHASE_RECEIPT',
+            variantId: bareVariantId,
+            quantityDelta: '-10',
+            unitCostMinor: '1000',
+          }),
+        ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+      });
+
+      it('a revaluation moves no stock: a non-zero delta is refused, and a zero-delta one needs a basis', async () => {
+        await expect(
+          submit(mainOrgId, mainOwnerId, {
+            cause: 'REVALUATION',
+            variantId: bareVariantId,
+            quantityDelta: '5',
+            unitCostMinor: '1000',
+          }),
+        ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+        // Uncosted stock has no basis to restate — refused, never invented.
+        await expect(
+          submit(mainOrgId, mainOwnerId, {
+            cause: 'REVALUATION',
+            variantId: bareVariantId,
+            quantityDelta: '0',
+            unitCostMinor: '1000',
+          }),
+        ).rejects.toMatchObject({ code: 'INVENTORY_COST_BASIS_REQUIRED' });
+      });
+
+      it('an uncosted adjustment is refused: a missing basis is never read as zero', async () => {
+        // NOTE: a *consumption* of uncosted stock can never reach a costing
+        // refusal — the §15.6 INSUFFICIENT_STOCK guard always fires first for
+        // a negative delta on a level that does not exist yet. The reachable
+        // missing-basis refusal is therefore exercised through a positive
+        // (receipt-shaped) adjustment below.
+        await expect(
+          submit(mainOrgId, mainOwnerId, {
+            cause: 'MANUAL_ADJUSTMENT',
+            variantId: bareVariantId,
+            quantityDelta: '4',
+            reasonCode: 'RESTOCK',
+          }),
+        ).rejects.toMatchObject({ code: 'INVENTORY_COST_BASIS_REQUIRED' });
+
+        // With an explicit cost the adjustment becomes a cost-bearing inclusion
+        // and folds exactly like a receipt.
+        const inclusion = await submit(mainOrgId, mainOwnerId, {
+          cause: 'MANUAL_ADJUSTMENT',
+          variantId: bareVariantId,
+          quantityDelta: '4',
+          reasonCode: 'RESTOCK',
+          unitCostMinor: '5000',
+        });
+        expect(inclusion.status).toBe('APPLIED');
+        const valued = await inventory.listValuation(mainOrgId, { variantId: bareVariantId });
+        expect(valued.levels[0]?.quantity).toBe('4');
+        expect(valued.levels[0]?.averageCostMinor).toBe('5000');
+      });
+
+      it('the wire cannot re-cost a consumption — the average is the ledger’s, not the caller’s', async () => {
+        await expect(
+          submit(mainOrgId, mainOwnerId, {
+            cause: 'MANUAL_ADJUSTMENT',
+            variantId: bareVariantId,
+            quantityDelta: '-2',
+            reasonCode: 'LOST',
+            unitCostMinor: '1',
+          }),
+        ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+        // The consumption itself succeeds at the engine's own average.
+        const issue = await submit(mainOrgId, mainOwnerId, {
+          cause: 'MANUAL_ADJUSTMENT',
+          variantId: bareVariantId,
+          quantityDelta: '-2',
+          reasonCode: 'LOST',
+        });
+        expect(issue.status).toBe('APPLIED');
+        const valued = await inventory.listValuation(mainOrgId, { variantId: bareVariantId });
+        expect(valued.levels[0]?.quantity).toBe('2');
+        expect(valued.levels[0]?.averageCostMinor).toBe('5000');
+        expect(valued.levels[0]?.inventoryValueMinor).toBe('10000');
+      });
+
+      it('an explicitly zero-cost acquisition is a real offered fact — never an implied zero', async () => {
+        const zero = await submit(mainOrgId, mainOwnerId, {
+          cause: 'PURCHASE_RECEIPT',
+          variantId: bareVariantId,
+          quantityDelta: '1',
+          unitCostMinor: '0',
+        });
+        // 2 on hand @ 5000 + 1 @ 0 = 10000/3 = 3333.33… → 3333
+        expect(zero.status).toBe('APPLIED');
+        const valued = await inventory.listValuation(mainOrgId, { variantId: bareVariantId });
+        expect(valued.levels[0]?.quantity).toBe('3');
+        expect(valued.levels[0]?.averageCostMinor).toBe('3333');
+        expect(valued.levels[0]?.inventoryValueMinor).toBe('9999');
+      });
+    });
+
+    it('a genuinely zero-cost opening is a real fact and the valuation stays exact', async () => {
+      const fresh = await catalog.createVariant({
+        organizationId: mainOrgId,
+        actorUserId: mainOwnerId,
+        productId,
+        offered: { sku: `INV-ZERO-${randomUUID().slice(0, 8).toUpperCase()}` },
+      });
+      const applied = await submit(mainOrgId, mainOwnerId, {
+        cause: 'OPENING_BALANCE',
+        variantId: fresh.id,
+        quantityDelta: '5',
+        unitCostMinor: '0',
+      });
+      expect(applied.status).toBe('APPLIED');
+      const valued = await inventory.listValuation(mainOrgId, { variantId: fresh.id });
+      expect(valued.levels[0]?.averageCostMinor).toBe('0');
+      expect(valued.levels[0]?.inventoryValueMinor).toBe('0');
+    });
+
+    it('scenario I — tenant isolation on the costing face: org B reads none of it and cannot restate org A’s average', async () => {
+      // The cost-authorized reads answer org B none of org A's facts.
+      const valuation = await inventory.listValuation(otherOrgId, {});
+      expect(valuation.levels).toEqual([]);
+      const costs = await inventory.listCostSnapshots(otherOrgId, {});
+      expect(costs).toEqual([]);
+
+      // A revaluation naming org A's variant is the same honest 404 — and the
+      // org A average it names is untouched afterwards.
+      await expect(
+        submit(otherOrgId, otherOwnerId, {
+          cause: 'REVALUATION',
+          variantId: costedVariantId,
+          quantityDelta: '0',
+          unitCostMinor: '1',
+        }),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+      const valued = await inventory.listValuation(mainOrgId, { variantId: costedVariantId });
+      expect(valued.levels[0]?.averageCostMinor).toBe('12000');
+    });
+
+    it('migration 0015’s CHECKs are the last line of defence for the costing invariants', async () => {
+      // A writer bypassing the service cannot store uncosted stock: quantity
+      // above zero with a NULL average is `chk_inventory_level_cost_with_stock`.
+      const unclosed = await catalog.createVariant({
+        organizationId: mainOrgId,
+        actorUserId: mainOwnerId,
+        productId,
+        offered: { sku: `INV-CHECK-${randomUUID().slice(0, 8).toUpperCase()}` },
+      });
+      await expect(
+        inTenant(mainOrgId, async (tx) => {
+          const location = await tx.inventoryLocation.findFirstOrThrow({ where: { organizationId: mainOrgId } });
+          return tx.$executeRaw`
+            INSERT INTO stock_levels (organization_id, variant_id, location_id, quantity)
+            VALUES (${mainOrgId}::uuid, ${unclosed.id}::uuid, ${location.id}::uuid, 5)`;
+        }),
+      ).rejects.toMatchObject({ message: expect.stringContaining('chk_inventory_level_cost_with_stock') });
+
+      // ... nor an average outside the bounded money width.
+      await expect(
+        inTenant(
+          mainOrgId,
+          async (tx) =>
+            tx.$executeRaw`
+            UPDATE stock_levels
+               SET average_cost_minor = -1
+             WHERE variant_id = ${costedVariantId}::uuid`,
+        ),
+      ).rejects.toMatchObject({ message: expect.stringContaining('chk_inventory_level_cost_bounds') });
+
+      // The real level is exactly where the engine left it.
+      const valued = await inventory.listValuation(mainOrgId, { variantId: costedVariantId });
+      expect(valued.levels[0]?.averageCostMinor).toBe('12000');
+      expect(valued.levels[0]?.quantity).toBe('55');
+    });
+
+    it('the §30.6 rounding edge is the organization’s typed setting, read inside the movement transaction (HALF_EVEN)', async () => {
+      // The tie case where the two §30.6 modes *disagree*: 3 @ 3 + 1 @ 1 = 10/4
+      // = 2.5 — HALF_UP rounds to 3, HALF_EVEN ties to the even 2.
+      const upVariant = await catalog.createVariant({
+        organizationId: mainOrgId,
+        actorUserId: mainOwnerId,
+        productId,
+        offered: { sku: `INV-TIE-UP-${randomUUID().slice(0, 8).toUpperCase()}` },
+      });
+      await submit(mainOrgId, mainOwnerId, {
+        cause: 'OPENING_BALANCE',
+        variantId: upVariant.id,
+        quantityDelta: '3',
+        unitCostMinor: '3',
+      });
+      await submit(mainOrgId, mainOwnerId, {
+        cause: 'PURCHASE_RECEIPT',
+        variantId: upVariant.id,
+        quantityDelta: '1',
+        unitCostMinor: '1',
+      });
+      const underHalfUp = await inventory.listValuation(mainOrgId, { variantId: upVariant.id });
+      expect(underHalfUp.levels[0]?.averageCostMinor).toBe('3');
+
+      // Flip the typed §30.6 setting and re-run the same arithmetic on a twin.
+      await inTenant(
+        mainOrgId,
+        (tx) =>
+          tx.$executeRaw`
+          INSERT INTO organization_settings (organization_id)
+          VALUES (${mainOrgId}::uuid)
+          ON CONFLICT (organization_id) DO UPDATE SET rounding_mode = 'HALF_EVEN'`,
+      );
+
+      const evenVariant = await catalog.createVariant({
+        organizationId: mainOrgId,
+        actorUserId: mainOwnerId,
+        productId,
+        offered: { sku: `INV-TIE-EVEN-${randomUUID().slice(0, 8).toUpperCase()}` },
+      });
+      await submit(mainOrgId, mainOwnerId, {
+        cause: 'OPENING_BALANCE',
+        variantId: evenVariant.id,
+        quantityDelta: '3',
+        unitCostMinor: '3',
+      });
+      await submit(mainOrgId, mainOwnerId, {
+        cause: 'PURCHASE_RECEIPT',
+        variantId: evenVariant.id,
+        quantityDelta: '1',
+        unitCostMinor: '1',
+      });
+      const underHalfEven = await inventory.listValuation(mainOrgId, { variantId: evenVariant.id });
+      expect(underHalfEven.levels[0]?.averageCostMinor).toBe('2');
+
+      // Restore the plan default for the rest of the suite.
+      await inTenant(
+        mainOrgId,
+        (tx) =>
+          tx.$executeRaw`
+          UPDATE organization_settings SET rounding_mode = 'HALF_UP' WHERE organization_id = ${mainOrgId}::uuid`,
+      );
     });
   });
 });

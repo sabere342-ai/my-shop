@@ -58,6 +58,37 @@ export interface BindSessionResponse {
   readonly expiresIn: number;
 }
 
+/** OpenAPI schema `CostSnapshotListResponse` (Master Plan §7.1, ADR-001). */
+export interface CostSnapshotListResponse {
+  readonly costSnapshots: readonly CostSnapshotResponse[];
+}
+
+/** OpenAPI schema `CostSnapshotResponse` (Master Plan §7.1, ADR-001). */
+export interface CostSnapshotResponse {
+  readonly movementId: string;
+  readonly cause:
+    | 'SALE'
+    | 'SALE_RETURN'
+    | 'PURCHASE_RECEIPT'
+    | 'PURCHASE_RETURN'
+    | 'STOCK_COUNT_ADJUSTMENT'
+    | 'MANUAL_ADJUSTMENT'
+    | 'OPENING_BALANCE'
+    | 'SHRINKAGE'
+    | 'TRANSFER_IN'
+    | 'TRANSFER_OUT'
+    | 'REVALUATION';
+  readonly variantId: string;
+  readonly sku: string;
+  readonly productNameAr: string;
+  readonly locationId: string;
+  readonly locationName: string;
+  readonly quantityDelta: string;
+  readonly unitCostMinor: string;
+  readonly serverSequence: string;
+  readonly occurredAt: string;
+}
+
 /** OpenAPI schema `CreateProductRequest` (Master Plan §7.1, ADR-001). */
 export interface CreateProductRequest {
   readonly nameAr: string;
@@ -280,6 +311,7 @@ export interface ProblemDocument {
     | 'SETTINGS_VERSION_CONFLICT'
     | 'CATALOG_SKU_DUPLICATE'
     | 'INVENTORY_OPENING_BALANCE_DUPLICATE'
+    | 'INVENTORY_COST_BASIS_REQUIRED'
     | 'REPLAY'
     | 'MUTATION_CONTRADICTION'
     | 'INVENTORY_CONFLICT'
@@ -464,10 +496,11 @@ export interface SnapshotResponse {
 /** OpenAPI schema `SubmitMovementRequest` (Master Plan §7.1, ADR-001). */
 export interface SubmitMovementRequest {
   readonly movementId: string;
-  readonly cause: 'OPENING_BALANCE' | 'MANUAL_ADJUSTMENT';
+  readonly cause: 'OPENING_BALANCE' | 'MANUAL_ADJUSTMENT' | 'PURCHASE_RECEIPT' | 'REVALUATION';
   readonly variantId: string;
   readonly locationId?: object;
   readonly quantityDelta: string;
+  readonly unitCostMinor?: object;
   readonly reasonCode?: string;
   readonly reasonNote?: string;
   readonly documentRef?: string;
@@ -534,4 +567,30 @@ export interface UpdateVariantRequest {
   readonly attributes?: object;
   readonly priceMinor?: string;
   readonly isActive?: boolean;
+}
+
+/** OpenAPI schema `ValuationLevelResponse` (Master Plan §7.1, ADR-001). */
+export interface ValuationLevelResponse {
+  readonly variantId: string;
+  readonly sku: string;
+  readonly productNameAr: string;
+  readonly locationId: string;
+  readonly locationName: string;
+  readonly quantity: string;
+  readonly averageCostMinor: string;
+  readonly inventoryValueMinor: string;
+  readonly updatedAt: string;
+}
+
+/** OpenAPI schema `ValuationResponse` (Master Plan §7.1, ADR-001). */
+export interface ValuationResponse {
+  readonly levels: readonly ValuationLevelResponse[];
+  readonly totals: ValuationTotalsResponse;
+}
+
+/** OpenAPI schema `ValuationTotalsResponse` (Master Plan §7.1, ADR-001). */
+export interface ValuationTotalsResponse {
+  readonly inventoryValueMinor: string;
+  readonly valuedLevels: number;
+  readonly uncostedLines: number;
 }
