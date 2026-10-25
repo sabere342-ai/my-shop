@@ -76,13 +76,12 @@ export const VARIANT_ATTRIBUTE_TEXT_MAX_LENGTH = 50;
 export const VARIANT_ATTRIBUTE_INTEGER_MAX = 1_000_000;
 
 /** The typed catalog: which attribute key carries which shape. */
-export const VARIANT_ATTRIBUTE_CATALOG: Readonly<
-  Record<VariantAttributeKey, { readonly type: VariantAttributeType }>
-> = Object.freeze({
-  color: { type: 'TEXT' },
-  size: { type: 'TEXT' },
-  capacity: { type: 'INTEGER' },
-});
+export const VARIANT_ATTRIBUTE_CATALOG: Readonly<Record<VariantAttributeKey, { readonly type: VariantAttributeType }>> =
+  Object.freeze({
+    color: { type: 'TEXT' },
+    size: { type: 'TEXT' },
+    capacity: { type: 'INTEGER' },
+  });
 
 // --- effective price resolution (§15.3A.2) ---
 

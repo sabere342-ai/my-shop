@@ -39,12 +39,7 @@ import { DomainError } from '../errors/domain.error';
 import { ERROR_CODES } from '../errors/problem';
 import { withTenantTransaction } from '../database/tenant-context';
 import type { PrismaHost } from '../identity/prisma-host';
-import {
-  CATALOG_CONTRACT_VERSION,
-  COSTING_UNAVAILABLE,
-  type PriceSource,
-  type UnitKind,
-} from './catalog.contract';
+import { CATALOG_CONTRACT_VERSION, COSTING_UNAVAILABLE, type PriceSource, type UnitKind } from './catalog.contract';
 import { resolveEffectivePrice } from './catalog.domain';
 import type {
   CreateProductOfferWire,
@@ -572,7 +567,9 @@ export class CatalogService {
    * reconfigurations serialized before either upsert runs.
    */
   private async lockLiveProduct(tx: Tx, productId: string): Promise<Product> {
-    const locked = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM products WHERE id = ${productId}::uuid AND deleted_at IS NULL FOR UPDATE`;
+    const locked = await tx.$queryRaw<
+      { id: string }[]
+    >`SELECT id FROM products WHERE id = ${productId}::uuid AND deleted_at IS NULL FOR UPDATE`;
     if (locked.length === 0) {
       throw new DomainError(ERROR_CODES.NOT_FOUND, 'no such live product in this organization');
     }
@@ -594,7 +591,13 @@ export class CatalogService {
     organizationId: string,
     actorUserId: string,
     input: {
-      readonly eventType: 'CATALOG_PRODUCT_CREATED' | 'CATALOG_PRODUCT_UPDATED' | 'CATALOG_PRODUCT_DELETED' | 'CATALOG_VARIANT_CREATED' | 'CATALOG_VARIANT_UPDATED' | 'CATALOG_UNITS_UPDATED';
+      readonly eventType:
+        | 'CATALOG_PRODUCT_CREATED'
+        | 'CATALOG_PRODUCT_UPDATED'
+        | 'CATALOG_PRODUCT_DELETED'
+        | 'CATALOG_VARIANT_CREATED'
+        | 'CATALOG_VARIANT_UPDATED'
+        | 'CATALOG_UNITS_UPDATED';
       readonly targetType: string;
       readonly targetId: string;
       readonly documentRef: string;
@@ -724,10 +727,7 @@ function groupedUnits(rows: readonly ProductUnit[]): StoredUnits {
   const base = rows.find((row) => row.kind === 'BASE');
   const purchasing = rows.find((row) => row.kind === 'PURCHASING') ?? null;
   if (base === undefined) {
-    throw new DomainError(
-      ERROR_CODES.INTERNAL_ERROR,
-      'a stored product must always carry its BASE unit row',
-    );
+    throw new DomainError(ERROR_CODES.INTERNAL_ERROR, 'a stored product must always carry its BASE unit row');
   }
   return { base, purchasing };
 }

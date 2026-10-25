@@ -30,12 +30,7 @@ import { VerifiedPrincipal } from '../identity/jwt-auth.guard';
 import type { AuthenticatedPrincipal } from '../identity/auth.service';
 import { canonicalizeUnitOffer, normalizeRequiredText } from './catalog.domain';
 import { DELETE_REASON_MAX_LENGTH } from './catalog.contract';
-import {
-  CatalogService,
-  type ProductSummaryView,
-  type ProductView,
-  type ProductVariantView,
-} from './catalog.service';
+import { CatalogService, type ProductSummaryView, type ProductView, type ProductVariantView } from './catalog.service';
 import {
   CATALOG_PATH,
   CreateProductRequest,
@@ -120,7 +115,10 @@ export class CatalogController {
             baseUnit: { ...body.baseUnit, kind: 'BASE' as const },
             ...(body.purchasingUnit === undefined
               ? {}
-              : { purchasingUnit: body.purchasingUnit === null ? null : { ...body.purchasingUnit, kind: 'PURCHASING' as const } }),
+              : {
+                  purchasingUnit:
+                    body.purchasingUnit === null ? null : { ...body.purchasingUnit, kind: 'PURCHASING' as const },
+                }),
           },
         },
         new Date(),
@@ -141,10 +139,7 @@ export class CatalogController {
   @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'NOT_FOUND — no such live product here.' })
   @ApiResponse({ status: HttpStatus.FORBIDDEN, description: 'PERMISSION_DENIED or ORGANIZATION_FORBIDDEN.' })
   @ApiResponse({ status: HttpStatus.UNAUTHORIZED, description: 'UNAUTHENTICATED.' })
-  async get(
-    @OrganizationId() organizationId: string,
-    @Param('productId') productId: string,
-  ): Promise<ProductResponse> {
+  async get(@OrganizationId() organizationId: string, @Param('productId') productId: string): Promise<ProductResponse> {
     return toResponse(await this.catalog.getProduct(organizationId, productId));
   }
 
@@ -261,7 +256,10 @@ export class CatalogController {
   @ApiResponse({ status: HttpStatus.CREATED, type: ProductVariantResponse })
   @ApiResponse({ status: HttpStatus.CONFLICT, description: 'CATALOG_SKU_DUPLICATE — the SKU is taken.' })
   @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'NOT_FOUND — no such live product here.' })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'VALIDATION_FAILED — an invalid value or attribute shape.' })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'VALIDATION_FAILED — an invalid value or attribute shape.',
+  })
   @ApiResponse({ status: HttpStatus.FORBIDDEN, description: 'PERMISSION_DENIED or ORGANIZATION_FORBIDDEN.' })
   @ApiResponse({ status: HttpStatus.UNAUTHORIZED, description: 'UNAUTHENTICATED.' })
   async createVariant(
@@ -301,7 +299,10 @@ export class CatalogController {
   @ApiResponse({ status: HttpStatus.OK, type: ProductVariantResponse })
   @ApiResponse({ status: HttpStatus.CONFLICT, description: 'CATALOG_SKU_DUPLICATE — the SKU is taken.' })
   @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'NOT_FOUND — no such product or variant here.' })
-  @ApiResponse({ status: HttpStatus.BAD_REQUEST, description: 'VALIDATION_FAILED — an invalid value or attribute shape.' })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'VALIDATION_FAILED — an invalid value or attribute shape.',
+  })
   @ApiResponse({ status: HttpStatus.FORBIDDEN, description: 'PERMISSION_DENIED or ORGANIZATION_FORBIDDEN.' })
   @ApiResponse({ status: HttpStatus.UNAUTHORIZED, description: 'UNAUTHENTICATED.' })
   async updateVariant(

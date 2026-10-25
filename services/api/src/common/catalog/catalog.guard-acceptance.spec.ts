@@ -57,20 +57,18 @@ export type CatalogRoute = Exclude<keyof CatalogController, 'catalog'>;
 
 /** The declared permission of one real catalog handler, read from the real metadata. */
 function declaredPermission(route: CatalogRoute): string {
-  return new Reflector().getAllAndOverride<string>(
-    PERMISSION_METADATA_KEY,
-    [CatalogController.prototype[route], CatalogController],
-  );
+  return new Reflector().getAllAndOverride<string>(PERMISSION_METADATA_KEY, [
+    CatalogController.prototype[route],
+    CatalogController,
+  ]);
 }
 
 /** Build the real guard with only the collaborators substituted. */
 function guardFor(resolved: EffectiveAuthorization): AuthorizationGuard {
   const resolve = jest.fn((): Promise<EffectiveAuthorization> => Promise.resolve(resolved));
-  return new AuthorizationGuard(
-    new Reflector(),
-    { resolveForMembership: resolve } as unknown as AuthorizationService,
-    { record: jest.fn() },
-  );
+  return new AuthorizationGuard(new Reflector(), { resolveForMembership: resolve } as unknown as AuthorizationService, {
+    record: jest.fn(),
+  });
 }
 
 /** An execution context carrying the real handler metadata and a member principal. */

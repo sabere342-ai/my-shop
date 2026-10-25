@@ -146,7 +146,11 @@ export function canonicalizeAttributes(value: unknown): Record<string, string | 
         continue;
       }
       const trimmed = item.trim();
-      if (trimmed.length < 1 || trimmed.length > VARIANT_ATTRIBUTE_TEXT_MAX_LENGTH || !CATALOG_TEXT_WIRE_PATTERN.test(trimmed)) {
+      if (
+        trimmed.length < 1 ||
+        trimmed.length > VARIANT_ATTRIBUTE_TEXT_MAX_LENGTH ||
+        !CATALOG_TEXT_WIRE_PATTERN.test(trimmed)
+      ) {
         violations.push({
           field: `attributes.${key}`,
           messages: [`must be bounded text of 1..${VARIANT_ATTRIBUTE_TEXT_MAX_LENGTH} characters after trimming`],
@@ -233,7 +237,11 @@ function unitOf(
       });
     }
   }
-  if (code === undefined || name === undefined || (kind === 'PURCHASING' && typeof factor === 'number' && !Number.isInteger(factor))) {
+  if (
+    code === undefined ||
+    name === undefined ||
+    (kind === 'PURCHASING' && typeof factor === 'number' && !Number.isInteger(factor))
+  ) {
     return undefined;
   }
   return {
@@ -250,13 +258,16 @@ function unitOf(
  * exact integer factor. This is the whole configuration: a request that
  * omits the purchasing unit ends the day without one.
  */
-export function canonicalizeUnitOffer(value: {
-  readonly base?: unknown;
-  readonly purchasing?: unknown;
-}): { readonly base: UnitOffer; readonly purchasing: UnitOffer | null } {
+export function canonicalizeUnitOffer(value: { readonly base?: unknown; readonly purchasing?: unknown }): {
+  readonly base: UnitOffer;
+  readonly purchasing: UnitOffer | null;
+} {
   const violations: FieldViolation[] = [];
   const base = unitOf('BASE', value.base as never, violations);
-  const purchasing = value.purchasing === undefined || value.purchasing === null ? null : unitOf('PURCHASING', value.purchasing, violations);
+  const purchasing =
+    value.purchasing === undefined || value.purchasing === null
+      ? null
+      : unitOf('PURCHASING', value.purchasing, violations);
   if (base === undefined) {
     if (value.base === undefined || value.base === null) {
       violations.push({ field: 'baseUnit', messages: ['baseUnit is required'] });
@@ -295,9 +306,7 @@ export interface CreateProductOfferWire {
   readonly purchasingUnit?: unknown;
 }
 
-export function canonicalizeCreateProductOffer(
-  value: CreateProductOfferWire,
-): CreateProductOffer {
+export function canonicalizeCreateProductOffer(value: CreateProductOfferWire): CreateProductOffer {
   const violations: FieldViolation[] = [];
   const nameAr = textOrViolation('nameAr', value.nameAr, { maxLength: NAME_MAX_LENGTH }, violations, true);
   const nameEn = textOrViolation('nameEn', value.nameEn, { maxLength: NAME_MAX_LENGTH }, violations);
@@ -361,7 +370,12 @@ export function canonicalizeUpdateProductOffer(value: UpdateProductOfferWire): U
   const category = textOrViolation('category', value.category, { maxLength: CATEGORY_MAX_LENGTH }, violations);
   const brand = textOrViolation('brand', value.brand, { maxLength: BRAND_MAX_LENGTH }, violations);
   const unitPriceMinor = priceOrViolation(value.unitPriceMinor, violations);
-  const deactivatedReason = textOrViolation('deactivatedReason', value.deactivatedReason, { maxLength: DELETE_REASON_MAX_LENGTH }, violations);
+  const deactivatedReason = textOrViolation(
+    'deactivatedReason',
+    value.deactivatedReason,
+    { maxLength: DELETE_REASON_MAX_LENGTH },
+    violations,
+  );
   if (value.isActive !== undefined && typeof value.isActive !== 'boolean') {
     violations.push({ field: 'isActive', messages: ['isActive must be a boolean'] });
   }
@@ -399,7 +413,7 @@ export function canonicalizeCreateVariantOffer(value: CreateVariantOfferWire): C
   const violations: FieldViolation[] = [];
   let sku: string | undefined;
   try {
-    sku = normalizeSku((value.sku ?? ''));
+    sku = normalizeSku(value.sku ?? '');
   } catch {
     violations.push({
       field: 'sku',

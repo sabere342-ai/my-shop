@@ -58,10 +58,8 @@ export class CatalogModule {
         {
           provide: CatalogService,
           inject: [PrismaService, APP_LOGGER],
-          useFactory: (
-            host: PrismaService,
-            logger: ReturnType<typeof createAppLogger>,
-          ) => new CatalogService(host, new AuditStreamWriter(), logger),
+          useFactory: (host: PrismaService, logger: ReturnType<typeof createAppLogger>) =>
+            new CatalogService(host, new AuditStreamWriter(), logger),
         },
       ],
       exports: [CatalogService],

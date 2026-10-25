@@ -21,18 +21,7 @@
  */
 
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import {
-  IsBoolean,
-  IsInt,
-  IsObject,
-  IsOptional,
-  IsString,
-  Matches,
-  Max,
-  MaxLength,
-  Min,
-  Allow,
-} from 'class-validator';
+import { IsBoolean, IsInt, IsObject, IsOptional, IsString, Matches, Max, MaxLength, Min, Allow } from 'class-validator';
 
 import {
   BRAND_MAX_LENGTH,
@@ -80,7 +69,11 @@ export class ProductUnitWire {
 
 /** `POST …/catalog/products` request. */
 export class CreateProductRequest {
-  @ApiProperty({ description: 'The Arabic product name (§6.1 Arabic-first).', minLength: 1, maxLength: NAME_MAX_LENGTH })
+  @ApiProperty({
+    description: 'The Arabic product name (§6.1 Arabic-first).',
+    minLength: 1,
+    maxLength: NAME_MAX_LENGTH,
+  })
   @IsString()
   @Matches(new RegExp(BOUNDED_TEXT, 'u'), { message: 'nameAr must have non-whitespace ends after trimming' })
   @MaxLength(NAME_MAX_LENGTH)
@@ -214,7 +207,8 @@ export class UpdateProductRequest {
   readonly brand?: string | null;
 
   @ApiPropertyOptional({
-    description: 'The default selling price in minor units; explicit null clears it back to unset (never zero by drift).',
+    description:
+      'The default selling price in minor units; explicit null clears it back to unset (never zero by drift).',
     type: 'string',
     pattern: PRICE_MINOR_WIRE_PATTERN.source,
     nullable: true,
@@ -224,7 +218,9 @@ export class UpdateProductRequest {
   @Matches(PRICE_MINOR_WIRE_PATTERN)
   readonly unitPriceMinor?: string | null;
 
-  @ApiPropertyOptional({ description: 'The active flag. Deactivation is not the soft delete: it is a visibility of intent.' })
+  @ApiPropertyOptional({
+    description: 'The active flag. Deactivation is not the soft delete: it is a visibility of intent.',
+  })
   @IsOptional()
   @IsBoolean()
   readonly isActive?: boolean;
@@ -282,7 +278,11 @@ export class UpdateUnitsRequest {
 
 /** `POST …/catalog/products/:productId/variants` request. */
 export class CreateVariantRequest {
-  @ApiProperty({ description: 'The SKU — unique per organization by a real database index.', minLength: 1, maxLength: SKU_MAX_LENGTH })
+  @ApiProperty({
+    description: 'The SKU — unique per organization by a real database index.',
+    minLength: 1,
+    maxLength: SKU_MAX_LENGTH,
+  })
   @IsString()
   @Matches(new RegExp(BOUNDED_TEXT, 'u'), { message: 'sku must have non-whitespace ends after trimming' })
   @MaxLength(SKU_MAX_LENGTH)
@@ -316,7 +316,11 @@ export class CreateVariantRequest {
 
 /** `PATCH …/catalog/products/:productId/variants/:variantId` request: absent members stay untouched. */
 export class UpdateVariantRequest {
-  @ApiPropertyOptional({ description: 'The SKU (a duplicate answers 409 CATALOG_SKU_DUPLICATE).', minLength: 1, maxLength: SKU_MAX_LENGTH })
+  @ApiPropertyOptional({
+    description: 'The SKU (a duplicate answers 409 CATALOG_SKU_DUPLICATE).',
+    minLength: 1,
+    maxLength: SKU_MAX_LENGTH,
+  })
   @IsOptional()
   @IsString()
   @Matches(new RegExp(BOUNDED_TEXT, 'u'), { message: 'sku must have non-whitespace ends after trimming' })
@@ -363,7 +367,12 @@ export class ListProductsQuery {
   @IsBoolean()
   readonly includeDeleted?: boolean;
 
-  @ApiPropertyOptional({ description: 'The maximum number of products to answer (1..500).', type: 'integer', minimum: 1, maximum: 500 })
+  @ApiPropertyOptional({
+    description: 'The maximum number of products to answer (1..500).',
+    type: 'integer',
+    minimum: 1,
+    maximum: 500,
+  })
   @IsOptional()
   @IsInt()
   @Min(1)
@@ -373,7 +382,7 @@ export class ListProductsQuery {
 
 /** One variant as the response answers it. */
 export class ProductVariantResponse {
-  @ApiProperty({ format: 'uuid', description: 'The variant id — the identity M4-S2\'s inventory engine will track.' })
+  @ApiProperty({ format: 'uuid', description: "The variant id — the identity M4-S2's inventory engine will track." })
   readonly id!: string;
 
   @ApiProperty({ description: 'The SKU.' })
@@ -408,7 +417,8 @@ export class ProductVariantResponse {
   readonly priceSource!: (typeof PRICE_SOURCE_VALUES)[number];
 
   @ApiProperty({
-    description: 'Whether the variant carries a cost price. False in V1 — the costing engine arrives with M4-S3 (§30.2); never a real zero.',
+    description:
+      'Whether the variant carries a cost price. False in V1 — the costing engine arrives with M4-S3 (§30.2); never a real zero.',
   })
   readonly hasCost!: boolean;
 
@@ -449,7 +459,10 @@ export class ProductResponse {
   @ApiProperty({ description: 'The active flag.' })
   readonly isActive!: boolean;
 
-  @ApiProperty({ type: () => [ProductUnitWire], description: 'The §15.2 units: one BASE, plus at most one PURCHASING.' })
+  @ApiProperty({
+    type: () => [ProductUnitWire],
+    description: 'The §15.2 units: one BASE, plus at most one PURCHASING.',
+  })
   readonly units!: readonly ProductUnitWire[];
 
   @ApiProperty({ type: () => [ProductVariantResponse], description: 'The variants with their effective prices.' })
