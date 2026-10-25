@@ -1,4 +1,4 @@
-# Row-level security inventory — tenant-owned tables (M2-S4, extended by M2-S5/M2-S6; M3-S1)
+# Row-level security inventory — tenant-owned tables (M2-S4, extended by M2-S5/M2-S6; M3-S1; M4-S1; M4-S2)
 
 Master Plan §8.1–§8.3 requires tenant isolation at the **database layer**. This
 document is the human-readable inventory of that enforcement; the machine
@@ -37,7 +37,7 @@ is absent; NULL keeps the predicate NULL, which filters the row out exactly
 like `false`. "No context" is therefore "no rows" for every connection: the
 application role mid-flight, an operator `psql`, a stray pooled session.
 
-## Table inventory — migrations `0008_tenant_row_level_security`, `0009_device_binding`, `0010_audit_streams` + `0011_audit_stream_head_grant`, `0012_organization_settings`, `0013_product_catalog`
+## Table inventory — migrations `0008_tenant_row_level_security`, `0009_device_binding`, `0010_audit_streams` + `0011_audit_stream_head_grant`, `0012_organization_settings`, `0013_product_catalog`, `0014_inventory_core`
 
 ### Tenant-owned (forced RLS + `tenant_isolation` policy)
 
@@ -58,9 +58,12 @@ application role mid-flight, an operator `psql`, a stray pooled session.
 | `products` (M4-S1) | `organization_id` | Symmetric tenant clause — the §15.1/§15.3A product root, applied by `0013` |
 | `product_variants` (M4-S1) | `organization_id` | Symmetric tenant clause — the §15.3A typed-attribute variant rows, per-organization SKU unique index, applied by `0013` |
 | `product_units` (M4-S1) | `organization_id` | Symmetric tenant clause — the §15.2 unit rows (at most one `BASE` and one `PURCHASING` per product), applied by `0013` |
+| `inventory_locations` (M4-S2) | `organization_id` | Symmetric tenant clause — the §15.4 stock location rows (at most one default per organization, by partial unique index), applied by `0014` |
+| `stock_movements` (M4-S2) | `organization_id` | Symmetric tenant clause — the §15.4 authoritative append-only quantity ledger; composite tenant foreign keys pin every row to its own organization's variant and location, applied by `0014` |
+| `stock_levels` (M4-S2) | `organization_id` | Symmetric tenant clause — the §15.4 derived, cacheable quantity per (variant, location) with the non-negative CHECK as the §15.6 guard backstop, applied by `0014` |
 
 The tenant root needs no `organization_id` — its own `id` is the tenant
-column; the fourteen others key on `organization_id`.
+column; the seventeen others key on `organization_id`.
 
 ### Explicitly global (no RLS, classified on purpose)
 
@@ -103,6 +106,14 @@ collides with the unique indexes instead of double-allocating, and still
 carries no DELETE). This grant shape is a database fact asserted by the
 privilege-probe acceptance tests, not enforced by code convention.
 
+M4-S2 extends the same §32.5 append-only class to the quantity history:
+`my_shop_app` holds INSERT + SELECT and **no UPDATE and no DELETE** on
+`stock_movements` (migration `0014` revokes both) — the ledger is corrected by
+reversal (`reverses_movement_id`, §38.14.2), never rewritten. The derived
+`stock_levels` cache and `inventory_locations` keep the default-privilege
+grants: both are legitimately mutable rows the service maintains inside the
+movement transaction.
+
 ## Uniqueness and ownership are unchanged
 
 `uq_organizations_single_owner`, `uq_roles_single_owner`, the composite tenant
@@ -119,10 +130,10 @@ runs under table ownership before or without the policy.
 
 ## Operations
 
-- **Fresh install:** migrations `0001`–`0012` apply from empty (`node
+- **Fresh install:** migrations `0001`–`0014` apply from empty (`node
   scripts/db.mjs deploy`); the drift gate (`prisma migrate diff --exit-code`)
-  still exits 0 — PostgreSQL policies, CHECK constraints, and grants do not
-  appear in Prisma's diff.
+  still exits 0 — PostgreSQL policies, CHECK constraints, partial indexes, and
+  grant refits do not appear in Prisma's diff.
 - **Upgrade:** `0008`/`0009` change no role, no grant, no owner, and no
   pre-existing data; the upgrade acceptance case (AC-08) seeds full
   predecessor-shaped data on `0001`–`0007`, applies the later migrations, and
