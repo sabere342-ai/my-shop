@@ -344,6 +344,8 @@ describe('database acceptance (real PostgreSQL)', () => {
       // plus the additive composite target on `product_variants`). M4-S3 adds
       // `0015_inventory_costing` (§30.2 the derived level's moving-average
       // member, the bounds its fold restates — no new table, no policy edit).
+      // M4-S4 adds `0016_stock_counts` (§15.8 the stock-count documents and
+      // their lines — two new tenant tables, forced RLS, lifecycle triggers).
       // Every applied migration must be finished and never rolled back
       // (migration history is append-only, Master Plan §44.1).
       expect(rows.map((row) => row.migration_name)).toEqual([
@@ -362,6 +364,7 @@ describe('database acceptance (real PostgreSQL)', () => {
         '0013_product_catalog',
         '0014_inventory_core',
         '0015_inventory_costing',
+        '0016_stock_counts',
       ]);
       for (const row of rows) {
         expect(row.finished_at).not.toBeNull();
@@ -388,7 +391,9 @@ describe('database acceptance (real PostgreSQL)', () => {
       // M3-S1 authorizes the §22.2/§22.4 typed settings singleton and the
       // typed feature-flag rows beside it. M4-S1 authorizes the §15.1
       // conceptual products, the §15.3A sellable variants with their typed
-      // attributes, and the §15.2 typed product-unit rows.
+      // attributes, and the §15.2 typed product-unit rows. M4-S2 authorizes
+      // the §15.4 inventory tables (locations, movements, levels); M4-S4
+      // authorizes the §15.8 stock-count documents and their lines.
       const rows = await migrator.$queryRaw<NameRow[]>`
         SELECT tablename FROM pg_tables
         WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'
@@ -417,6 +422,8 @@ describe('database acceptance (real PostgreSQL)', () => {
         'roles',
         'security_events',
         'sessions',
+        'stock_count_lines',
+        'stock_counts',
         'stock_levels',
         'stock_movements',
         'sync_sequences',
@@ -429,7 +436,7 @@ describe('database acceptance (real PostgreSQL)', () => {
       dbScript('deploy');
 
       const rows = await migrator.$queryRaw<MigrationRow[]>`SELECT migration_name FROM _prisma_migrations`;
-      expect(rows).toHaveLength(15);
+      expect(rows).toHaveLength(16);
     });
   });
 

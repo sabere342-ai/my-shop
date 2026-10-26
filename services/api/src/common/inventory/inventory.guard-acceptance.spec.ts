@@ -30,6 +30,7 @@ import { ERROR_CODES } from '../errors/problem';
 import type { AuthenticatedPrincipal } from '../identity/auth.service';
 import type { AuthorizationService, EffectiveAuthorization } from '../tenancy/authorization/authorization.service';
 import { InventoryController, requiredCostingPermissions } from './inventory.controller';
+import { StockCountController } from './count/stock-count.controller';
 
 const USER_ID = '11111111-1111-4111-8111-111111111111';
 const ORG_ID = '22222222-2222-4222-8222-222222222222';
@@ -178,5 +179,96 @@ describe('the §38.5 cost escalation matrix (the controller’s cause decision)'
 
   it('names no escalation for an unknown cause — the canonicalizer owns that refusal', () => {
     expect(requiredCostingPermissions('SALE', undefined)).toEqual([]);
+  });
+});
+
+describe('the M4-S4 stock-count wall (§15.8 — the count document is its own authority)', () => {
+  /** The declared permission of one real stock-count handler, read from the real metadata. */
+  type CountRoute = Exclude<keyof StockCountController, 'counts'>;
+
+  function declaredCountPermission(route: CountRoute): string {
+    return new Reflector().getAllAndOverride<string>(PERMISSION_METADATA_KEY, [
+      StockCountController.prototype[route],
+      StockCountController,
+    ]);
+  }
+
+  function countContextFor(route: CountRoute): ReturnType<typeof contextFor> {
+    return {
+      switchToHttp: () => ({
+        getRequest: () => ({
+          authPrincipal: PRINCIPAL,
+          params: { organizationId: ORG_ID },
+          ip: '203.0.113.7',
+        }),
+      }),
+      getHandler: () => StockCountController.prototype[route],
+      getClass: () => StockCountController,
+    };
+  }
+
+  it('declares exactly inventory.count on every one of the six lifecycle routes — nothing rides along', () => {
+    for (const route of [
+      'createCount',
+      'listCounts',
+      'getCount',
+      'recordCountLine',
+      'postCount',
+      'cancelCount',
+    ] as const) {
+      expect(declaredCountPermission(route)).toBe('inventory.count');
+    }
+  });
+
+  it('refuses every count route to a member whose grants stop at inventory.adjust + inventory.view — the count authority is its own door', async () => {
+    const guard = guardFor(effective(['inventory.view', 'inventory.adjust', 'catalog.view']));
+
+    for (const route of [
+      'createCount',
+      'listCounts',
+      'getCount',
+      'recordCountLine',
+      'postCount',
+      'cancelCount',
+    ] as const) {
+      await expect(guard.canActivate(countContextFor(route) as never)).rejects.toMatchObject({
+        code: ERROR_CODES.PERMISSION_DENIED,
+      });
+    }
+  });
+
+  it('refuses every count route to a member with no grants at all — authenticated is not authorized here either', async () => {
+    const guard = guardFor(effective([]));
+
+    for (const route of [
+      'createCount',
+      'listCounts',
+      'getCount',
+      'recordCountLine',
+      'postCount',
+      'cancelCount',
+    ] as const) {
+      await expect(guard.canActivate(countContextFor(route) as never)).rejects.toMatchObject({
+        code: ERROR_CODES.PERMISSION_DENIED,
+      });
+    }
+  });
+
+  it('admits a count-authority member through every route — recording needs nothing more; the posting cost escalation is the service decision, made inside the posting transaction', async () => {
+    // §15.8: the route cannot know the variance before the ledger does, so the
+    // route demands only inventory.count; catalog.cost.edit rides the service
+    // resolver at post time (§11.4), never route metadata.
+    const guard = guardFor(effective(['inventory.count']));
+
+    for (const route of [
+      'createCount',
+      'listCounts',
+      'getCount',
+      'recordCountLine',
+      'postCount',
+      'cancelCount',
+    ] as const) {
+      await expect(guard.canActivate(countContextFor(route) as never)).resolves.toBe(true);
+    }
   });
 });

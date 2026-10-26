@@ -29,7 +29,7 @@ import { DomainError } from '../../errors/domain.error';
 import { ERROR_CODES } from '../../errors/problem';
 import {
   MembershipPermissionRevalidator,
-  requiredPermissionOf,
+  requiredPermissionsOf,
   type SyncIngressRevalidator,
 } from './ingress-revalidation';
 import type { EffectiveAuthorization } from '../../tenancy/authorization/authorization.service';
@@ -45,7 +45,7 @@ const DEVICE = '33333333-3333-4333-8333-333333333333';
 /** A fake transaction client: only ever handed to the reader double. */
 const TX = {} as Prisma.TransactionClient;
 
-/** One recorded admissible mutation (the map's only entry, §9.4). */
+/** One recorded admissible mutation (§9.4). */
 function saleCreate(overrides: Partial<Record<string, unknown>> = {}): MutationPayload {
   return {
     mutationId: '44444444-4444-4444-8444-444444444444',
@@ -169,15 +169,28 @@ describe('MembershipPermissionRevalidator', () => {
   });
 });
 
-describe('requiredPermissionOf', () => {
+describe('requiredPermissionsOf', () => {
   it('maps the one admitted composition of this slice: a SALE created', () => {
-    expect(requiredPermissionOf(saleCreate())).toBe('sales.create');
+    expect(requiredPermissionsOf(saleCreate())).toEqual(['sales.create']);
+  });
+
+  it('maps the M4-S4 Tier-2 inventory admissions (§38.22)', () => {
+    expect(requiredPermissionsOf(saleCreate({ aggregateType: 'INVENTORY_ADJUSTMENT', payload: {} }))).toEqual([
+      'inventory.adjust',
+    ]);
+    // A cost offer carries the dynamic half of the cost rule at admission too.
+    expect(
+      requiredPermissionsOf(saleCreate({ aggregateType: 'INVENTORY_ADJUSTMENT', payload: { unitCostMinor: '18500' } })),
+    ).toEqual(['inventory.adjust', 'catalog.cost.edit']);
+    expect(requiredPermissionsOf(saleCreate({ aggregateType: 'INVENTORY_COUNT', payload: {} }))).toEqual([
+      'inventory.count',
+    ]);
   });
 
   it('refuses to guess for an unknown aggregate or an unknown operation', () => {
-    expect(requiredPermissionOf(saleCreate({ aggregateType: 'DEVICE_ENROLMENT' }))).toBeNull();
+    expect(requiredPermissionsOf(saleCreate({ aggregateType: 'DEVICE_ENROLMENT' }))).toBeNull();
     expect(
-      requiredPermissionOf(
+      requiredPermissionsOf(
         saleCreate({ aggregateType: 'SALE', operationType: 'AMEND' as unknown as MutationPayload['operationType'] }),
       ),
     ).toBeNull();
