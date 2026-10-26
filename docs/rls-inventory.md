@@ -1,4 +1,4 @@
-# Row-level security inventory — tenant-owned tables (M2-S4, extended by M2-S5/M2-S6; M3-S1; M4-S1; M4-S2; M4-S3)
+# Row-level security inventory — tenant-owned tables (M2-S4, extended by M2-S5/M2-S6; M3-S1; M4-S1; M4-S2; M4-S3; M4-S4)
 
 Master Plan §8.1–§8.3 requires tenant isolation at the **database layer**. This
 document is the human-readable inventory of that enforcement; the machine
@@ -37,7 +37,7 @@ is absent; NULL keeps the predicate NULL, which filters the row out exactly
 like `false`. "No context" is therefore "no rows" for every connection: the
 application role mid-flight, an operator `psql`, a stray pooled session.
 
-## Table inventory — migrations `0008_tenant_row_level_security`, `0009_device_binding`, `0010_audit_streams` + `0011_audit_stream_head_grant`, `0012_organization_settings`, `0013_product_catalog`, `0014_inventory_core`, `0015_inventory_costing`
+## Table inventory — migrations `0008_tenant_row_level_security`, `0009_device_binding`, `0010_audit_streams` + `0011_audit_stream_head_grant`, `0012_organization_settings`, `0013_product_catalog`, `0014_inventory_core`, `0015_inventory_costing`, `0016_stock_counts`
 
 ### Tenant-owned (forced RLS + `tenant_isolation` policy)
 
@@ -61,9 +61,11 @@ application role mid-flight, an operator `psql`, a stray pooled session.
 | `inventory_locations` (M4-S2) | `organization_id` | Symmetric tenant clause — the §15.4 stock location rows (at most one default per organization, by partial unique index), applied by `0014` |
 | `stock_movements` (M4-S2) | `organization_id` | Symmetric tenant clause — the §15.4 authoritative append-only quantity ledger; composite tenant foreign keys pin every row to its own organization's variant and location, applied by `0014` |
 | `stock_levels` (M4-S2) | `organization_id` | Symmetric tenant clause — the §15.4 derived, cacheable quantity per (variant, location) with the non-negative CHECK as the §15.6 guard backstop, applied by `0014`. M4-S3 extends the row, not the posture: migration `0015` adds the §30.2 `average_cost_minor` cost cache (+ two CHECKs and one index, migration-only, none of them RLS) — the symmetric tenant clause is untouched. |
+| `stock_counts` (M4-S4) | `organization_id` | Symmetric tenant clause — the §15.8 count document (OPEN → POSTED / CANCELLED), its lifecycle bound by migration-only CHECKs and the `stock_counts_transition_guard` trigger, applied by `0016`. The composite tenant FK pins the count's location to the organization's own `inventory_locations` row. |
+| `stock_count_lines` (M4-S4) | `organization_id` | Symmetric tenant clause — one §15.8 observation per (count, variant), tenant-pinned through composite FKs to the organization's own count, variant, and (once posted) movement rows, applied by `0016`. Lines are writable only while their count is OPEN (`stock_count_lines_immutable_when_closed`): a cross-tenant write is refused by the trigger's parent lookup before the RLS predicate can answer (P0001 parent-invisible under RLS — the AC-07 probe law), while the count row itself answers the pure 42501. |
 
 The tenant root needs no `organization_id` — its own `id` is the tenant
-column; the seventeen others key on `organization_id`.
+column; the nineteen others key on `organization_id`.
 
 ### Explicitly global (no RLS, classified on purpose)
 
@@ -130,7 +132,7 @@ runs under table ownership before or without the policy.
 
 ## Operations
 
-- **Fresh install:** migrations `0001`–`0015` apply from empty (`node
+- **Fresh install:** migrations `0001`–`0016` apply from empty (`node
   scripts/db.mjs deploy`); the drift gate (`prisma migrate diff --exit-code`)
   still exits 0 — PostgreSQL policies, CHECK constraints, partial indexes, and
   grant refits do not appear in Prisma's diff (M4-S3's `0015` deliberately
