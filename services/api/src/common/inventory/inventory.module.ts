@@ -17,9 +17,11 @@
  * `AuditStreamWriter` the service composes for its class-A appends, and with
  * the M1b-S4 convergence machinery only through the shared `sync_sequences`
  * counter — the movement's `server_sequence` allocation. The §30 moving-average
- * engine lives behind the movement write and the two cost reads; the count
- * surface is M4-S4's (§15.8), and M6-S2's purchase documents will ride this
- * exact receipt path as their producer (§38.22 Tier 3, online only).
+ * engine lives behind the movement write and the two cost reads. The §15.8
+ * count surface rides the same module: its controller is mounted beside the
+ * movement routes, and its posting folds the same `InventoryService` engine
+ * behind the same audit writer — one effect family, one permission gate
+ * (`inventory.count`), with the cost authority escalating only at posting.
  */
 
 import { Module, type DynamicModule } from '@nestjs/common';
@@ -31,8 +33,11 @@ import { IdentityModule } from '../identity/identity.module';
 import { DatabaseModule } from '../database/database.module';
 import { PrismaService } from '../database/prisma.service';
 import { AuditStreamWriter } from '../audit/audit-stream-writer';
+import { AuthorizationService } from '../tenancy/authorization/authorization.service';
 import { InventoryController } from './inventory.controller';
 import { InventoryService } from './inventory.service';
+import { StockCountController } from './count/stock-count.controller';
+import { StockCountService } from './count/stock-count.service';
 
 @Module({})
 export class InventoryModule {
@@ -45,7 +50,7 @@ export class InventoryModule {
     return {
       module: InventoryModule,
       imports: [AuthorizationModule.forRoot(config), IdentityModule.forRoot(config), DatabaseModule.forRoot(config)],
-      controllers: [InventoryController],
+      controllers: [InventoryController, StockCountController],
       providers: [
         { provide: APP_CONFIG, useValue: config },
         {
@@ -65,8 +70,22 @@ export class InventoryModule {
           useFactory: (host: PrismaService, logger: ReturnType<typeof createAppLogger>) =>
             new InventoryService(host, new AuditStreamWriter(), logger),
         },
+        // The count surface composes the same graph — host, transactional audit
+        // writer, §11 resolver, and the one movement engine itself — so a count
+        // posting and a route movement share every rule they fold through
+        // (§15.4: no parallel engine; §15.8).
+        {
+          provide: StockCountService,
+          inject: [PrismaService, APP_LOGGER, AuthorizationService, InventoryService],
+          useFactory: (
+            host: PrismaService,
+            logger: ReturnType<typeof createAppLogger>,
+            authorization: AuthorizationService,
+            inventory: InventoryService,
+          ) => new StockCountService(host, new AuditStreamWriter(), authorization, inventory, logger),
+        },
       ],
-      exports: [InventoryService],
+      exports: [InventoryService, StockCountService],
     };
   }
 }

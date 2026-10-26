@@ -28,6 +28,7 @@ import {
   UUID_WIRE_PATTERN,
   type AdjustmentReasonCode,
   type MovementCause,
+  type ProducedMovementCause,
   type SubmittableMovementCause,
 } from './inventory.contract';
 
@@ -46,7 +47,11 @@ export class CanonicalizationError extends Error {
 export interface MovementOffer {
   /** The §38.14.1 movement identity — the client's idempotency key for the whole operation. */
   readonly movementId: string;
-  readonly cause: SubmittableMovementCause;
+  /**
+   * The cause the fold accepts (the wire subset, or the count poster's
+   * `STOCK_COUNT_ADJUSTMENT`, whose document is its only producer — §15.5, §15.8).
+   */
+  readonly cause: ProducedMovementCause;
   readonly variantId: string;
   /** Absent → the organization's default location (the V1 seed). */
   readonly locationId: string | null;

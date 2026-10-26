@@ -43,10 +43,11 @@ export const MOVEMENT_CAUSE_VOCABULARY = [
 export type MovementCause = (typeof MOVEMENT_CAUSE_VOCABULARY)[number];
 
 /**
- * The causes this slice produces — the means a caller may submit. `OPENING_BALANCE`
- * is the server-only initial quantity of a variant at a location; `MANUAL_ADJUSTMENT`
- * is the reason-coded correction (§38.5: goods present that the system does not know
- * about are corrected here, never through a sale — a rule M5 will inherit verbatim).
+ * The causes this slice produces — the means a caller may submit [through the
+ * plain movements route]. `OPENING_BALANCE` is the server-only initial quantity
+ * of a variant at a location; `MANUAL_ADJUSTMENT` is the reason-coded correction
+ * (§38.5: goods present that the system does not know about are corrected here,
+ * never through a sale — a rule M5 will inherit verbatim).
  *
  * M4-S3 widens the admissible subset to the movements the §30 engine costs
  * (§40.8 row M4-S3): `PURCHASE_RECEIPT` — the §15.5 acquisition cause, admitted at
@@ -67,6 +68,21 @@ export const SUBMITTABLE_MOVEMENT_CAUSES = [
 ] as const;
 
 export type SubmittableMovementCause = (typeof SUBMITTABLE_MOVEMENT_CAUSES)[number];
+
+/**
+ * The causes the §30 movement fold accepts — the wire subset plus M4-S4's
+ * `STOCK_COUNT_ADJUSTMENT` (§15.8). The distinction is deliberate: the fold
+ * accepts the cause, but the *plain movements route never takes it* — the count
+ * document is its only producing execution path, because a count movement
+ * carries facts no bare wire offer could honor (the count's variance is
+ * computed against the locked authoritative level at post time, the movement
+ * attaches to the count line, and the whole posting commits inside the count's
+ * own transaction). A caller who submits it over the movements route gets the
+ * honest refusal: it has no producing execution path *there*.
+ */
+export const PRODUCED_MOVEMENT_CAUSES = [...SUBMITTABLE_MOVEMENT_CAUSES, 'STOCK_COUNT_ADJUSTMENT'] as const;
+
+export type ProducedMovementCause = (typeof PRODUCED_MOVEMENT_CAUSES)[number];
 
 /**
  * The adjustment reason codes. §38.5: every adjustment is
@@ -129,4 +145,18 @@ export const INVENTORY_TARGET_TYPES = {
   movement: 'STOCK_MOVEMENT',
   level: 'STOCK_LEVEL',
   location: 'INVENTORY_LOCATION',
+  // M4-S4 (§15.8): the count document itself (an audit target of its own — the
+  // count events target the document, never one of its lines' movements).
+  stockCount: 'STOCK_COUNT',
+} as const;
+
+/**
+ * The §38.8.1 `aggregate_type` values the Tier-2 offline producer (M4-S4)
+ * admits — the vocabulary the push ingress map and the applier key on.
+ * `aggregate_type` stays an open string elsewhere: this constant only fixes
+ * the spelling the inventory tier owns (§38.8.1 ends with an ellipsis).
+ */
+export const INVENTORY_AGGREGATES = {
+  adjustment: 'INVENTORY_ADJUSTMENT',
+  count: 'INVENTORY_COUNT',
 } as const;

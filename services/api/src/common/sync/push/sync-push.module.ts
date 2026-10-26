@@ -18,11 +18,12 @@
  * `DeviceBoundSyncAuthenticator`: a push must present a bearer token minted from
  * a device-bound session, and the device must still be active — so an
  * unauthenticated or unbound caller is still refused `UNAUTHENTICATED`, and a
- * revoked device is refused `DEVICE_REVOKED`. The applier stays bound to its
- * fail-closed default until business modules own real aggregate apply paths, so
- * every accepted mutation is still recorded `REJECTED`/`UNSUPPORTED_MUTATION`
- * — never anonymous acceptance, never a silent drop. A test overrides the two
- * tokens with implementations that live under `test/`, so the trusting code is
+ * revoked device is refused `DEVICE_REVOKED`. The applier is the inventory
+ * applier since M4-S4 (Tier 2, §38.22): two aggregate families apply for real
+ * through the one movement engine and the count lifecycle; everything else is
+ * still recorded `REJECTED`/`UNSUPPORTED_MUTATION` — never anonymous
+ * acceptance, never a silent drop. A test overrides the two tokens with
+ * implementations that live under `test/`, so the trusting code is
  * structurally absent from a production build.
  */
 
@@ -38,13 +39,17 @@ import { IdentityModule, SECURITY_EVENT_SINK } from '../../identity/identity.mod
 import type { SecurityEventSink } from '../../identity/security-event.sink';
 import { LedgerModule } from '../ledger/mutation-ledger.module';
 import { MutationLedgerService } from '../ledger/mutation-ledger.service';
+import { InventoryModule } from '../../inventory/inventory.module';
+import { InventoryService } from '../../inventory/inventory.service';
+import { StockCountService } from '../../inventory/count/stock-count.service';
+import { InventoryMutationApplier } from '../../inventory/inventory-sync-applier';
 import { SYNC_AUTHENTICATOR } from './sync-auth';
 import {
   MembershipPermissionRevalidator,
   SYNC_INGRESS_REVALIDATOR,
   type SyncIngressRevalidator,
 } from './ingress-revalidation';
-import { FailClosedMutationApplier, SYNC_MUTATION_APPLIER, type SyncMutationApplier } from './sync-mutation-applier';
+import { SYNC_MUTATION_APPLIER, type SyncMutationApplier } from './sync-mutation-applier';
 import { SyncAuthGuard } from './sync-push.guard';
 import { SyncPushController } from './sync-push.controller';
 import { SyncPushService } from './sync-push.service';
@@ -77,6 +82,10 @@ export class PushModule {
         // composition the device routes use, deduplicated like every other
         // `forRoot` import.
         DeviceModule.forRoot(config),
+        // Tier 2 (§38.22, M4-S4): the inventory module exports the services the
+        // applier composes — the one movement engine and the count lifecycle —
+        // deduplicated with the graph above like every other `forRoot` import.
+        InventoryModule.forRoot(config),
       ],
       controllers: [SyncPushController],
       providers: [
@@ -91,9 +100,16 @@ export class PushModule {
         // session's registered, still-active device binding. An unbound or
         // revoked device never reaches the ledger. A test overrides this token.
         { provide: SYNC_AUTHENTICATOR, useExisting: DEVICE_SYNC_AUTHENTICATOR },
-        // §38.27 / §38.10.3: production supports no aggregate type yet, so every
-        // mutation is a recorded per-mutation rejection. A test overrides this token.
-        { provide: SYNC_MUTATION_APPLIER, useClass: FailClosedMutationApplier },
+        // §38.27 / §38.10.3: production supports the two inventory aggregates
+        // the desktop can produce offline (Tier 2, §38.22 — M4-S4): every
+        // other aggregate is still a recorded per-mutation rejection. A test
+        // overrides this token.
+        {
+          provide: SYNC_MUTATION_APPLIER,
+          inject: [InventoryService, StockCountService],
+          useFactory: (inventory: InventoryService, counts: StockCountService): SyncMutationApplier =>
+            new InventoryMutationApplier(inventory, counts),
+        },
         // §9.4 (M2-S4): production admission re-validates live membership and
         // §11 effective permissions inside the acceptance transaction. It is
         // only ever reached with a trusted context, which production does not

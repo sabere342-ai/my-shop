@@ -29,6 +29,15 @@
  *    the derived level it produced, and the `INVENTORY_*` history event commit
  *    or roll back together.
  *
+ * One fold, three producers (M4-S4): the fold below is factored as
+ * `foldMovementInTransaction` so the *same* transaction-scoped path answers
+ * every way a movement comes into existence — the plain movements route
+ * (`submitMovement`, canonicalized offer included), the §15.8 count poster
+ * (which builds the offer from its own locked count lines and posts the
+ * variance inside the count's transaction), and the §38 Tier-2 offline applier
+ * (which folds a pushed adjustment inside the ledger's transaction, stamping
+ * the mutation's origin identity). There is no second engine.
+ *
  * Movement identity (§38.14.1): the caller's `movementId` *is* the movement's
  * primary key and its idempotency identity. An identical retry reads the
  * stored movement and answers `REPLAY` — never a second effect; the same
@@ -313,7 +322,49 @@ export class InventoryService {
     // Canonicalized before any connection: the raw wire is never trusted, and
     // a refused offer never costs the database a round trip.
     const offer = canonicalizeOrRefuse(input.offered);
-    return withTenantTransaction(this.host, input.organizationId, async (tx) => {
+    return withTenantTransaction(this.host, input.organizationId, (tx) =>
+      this.foldMovementInTransaction(
+        tx,
+        { organizationId: input.organizationId, actorUserId: input.actorUserId },
+        offer,
+        {},
+        now,
+      ),
+    );
+  }
+
+  /**
+   * The transaction-scoped fold (§40.8 M4-S4): the movement engine itself,
+   * callable with **any** open tenant transaction. The route
+   * (`submitMovement`) opens its own; the count poster calls this inside the
+   * count's posting transaction; the offline applier calls this inside the
+   * ledger's acceptance transaction — three producers, one engine, one audit
+   * law. It runs steps 1–8 exactly as the route order documents them.
+   *
+   * The options carry only the two facts a producer may declare: the audit
+   * `documentRef` (the count poster names its document), and the §38.8.1
+   * mutation origin the offline path stamps onto the movement row (the route
+   * leaves them null — an online movement has no mutation origin).
+   */
+  async foldMovementInTransaction(
+    tx: Tx,
+    source: { readonly organizationId: string; readonly actorUserId: string },
+    offer: MovementOffer,
+    options: {
+      readonly auditDocumentRef?: string;
+      readonly originMutation?: {
+        readonly mutationId: string;
+        readonly deviceId: string;
+        readonly deviceLocalSequence: number;
+      };
+    } = {},
+    now: Date = new Date(),
+  ): Promise<MovementSubmissionResponse> {
+    // Canonicalized before any connection: the raw wire is never trusted, and
+    // a refused offer never costs the database a round trip. (The route's
+    // canonicalization runs there; a producer offering a stored/verified fact
+    // hands this method an already-canonical offer.)
+    return (async () => {
       const stored = await tx.stockMovement.findUnique({
         where: { id: offer.movementId },
         include: movementInclude,
@@ -323,7 +374,7 @@ export class InventoryService {
       }
 
       const variant = await this.lockLiveVariant(tx, offer.variantId);
-      const location = await this.resolveLocation(tx, input.organizationId, offer.locationId);
+      const location = await this.resolveLocation(tx, source.organizationId, offer.locationId);
 
       // The §15.6 conditional fold, behind the row lock the variant row took
       // above (re-read at the movement level as well, so a level created by an
@@ -350,7 +401,7 @@ export class InventoryService {
       // rounding its own transaction will commit, never a cache's. An
       // organization that has never had a settings row answers the §30.6
       // default, `HALF_UP`.
-      const roundingMode = await readRoundingMode(tx, input.organizationId);
+      const roundingMode = await readRoundingMode(tx, source.organizationId);
       const basisAverage: bigint | null =
         level === null || level.averageCostMinor === null ? null : level.averageCostMinor;
 
@@ -409,23 +460,26 @@ export class InventoryService {
         resultingAverage = basisAverage;
       }
 
-      const serverSequence = await allocateServerSequence(tx, input.organizationId);
+      const serverSequence = await allocateServerSequence(tx, source.organizationId);
 
       let movement: Prisma.StockMovementGetPayload<{ include: typeof movementInclude }>;
       try {
         movement = await tx.stockMovement.create({
           data: {
             id: offer.movementId,
-            organizationId: input.organizationId,
+            organizationId: source.organizationId,
             variantId: variant.id,
             locationId: location.id,
             cause: offer.cause,
             quantityDelta: offer.quantityDelta,
             unitCostMinor: unitCostApplied,
             reversesMovementId: null,
-            originMutationId: null,
-            deviceId: null,
-            deviceLocalSequence: null,
+            // The §38.8.1 origin trace: stamped only by the offline applier —
+            // the route's online movement has no mutation origin.
+            originMutationId: options.originMutation?.mutationId ?? null,
+            deviceId: options.originMutation?.deviceId ?? null,
+            deviceLocalSequence:
+              options.originMutation === undefined ? null : BigInt(options.originMutation.deviceLocalSequence),
             serverSequence,
             reasonCode: offer.reasonCode,
             reasonNote: offer.reasonNote,
@@ -445,7 +499,7 @@ export class InventoryService {
       if (level === null) {
         await tx.stockLevel.create({
           data: {
-            organizationId: input.organizationId,
+            organizationId: source.organizationId,
             variantId: variant.id,
             locationId: location.id,
             quantity: resulting,
@@ -464,10 +518,10 @@ export class InventoryService {
         });
       }
 
-      await this.appendAudit(tx, input.organizationId, input.actorUserId, {
+      await this.appendAudit(tx, source.organizationId, source.actorUserId, {
         eventType: auditEventTypeFor(offer),
         targetId: movement.id,
-        documentRef: `variant:${variant.id}:location:${location.id}`,
+        documentRef: options.auditDocumentRef ?? `variant:${variant.id}:location:${location.id}`,
         occurredAt: now,
         payload: {
           cause: offer.cause,
@@ -479,6 +533,13 @@ export class InventoryService {
           ...(offer.reasonCode === null ? {} : { reasonCode: offer.reasonCode }),
           ...(offer.reasonNote === null ? {} : { reasonNote: offer.reasonNote }),
           ...(offer.documentRef === null ? {} : { documentRef: offer.documentRef }),
+          ...(options.originMutation === undefined
+            ? {}
+            : {
+                originMutationId: options.originMutation.mutationId,
+                originDeviceId: options.originMutation.deviceId,
+                originDeviceLocalSequence: options.originMutation.deviceLocalSequence.toString(),
+              }),
           // The costing facts (§30.2): the snapshot the movement recorded, the
           // average before and after the fold, and the exact resulting value —
           // every one a decimal string, none a float.
@@ -493,7 +554,7 @@ export class InventoryService {
       this.logger?.info(
         {
           component: 'inventory',
-          organizationId: input.organizationId,
+          organizationId: source.organizationId,
           movementId: movement.id,
           cause: offer.cause,
           quantityDelta: offer.quantityDelta.toString(),
@@ -516,7 +577,7 @@ export class InventoryService {
           updatedAt: now.toISOString(),
         },
       };
-    });
+    })();
   }
 
   // --- internals ---
@@ -528,7 +589,7 @@ export class InventoryService {
    * scopes the insert to the trusted tenant context, so the row is born inside
    * the right tenant.
    */
-  private async ensureDefaultLocation(
+  async ensureDefaultLocation(
     tx: Tx,
     organizationId: string,
   ): Promise<{ id: string; name: string; isDefault: boolean }> {
@@ -557,9 +618,10 @@ export class InventoryService {
    * Resolves the movement's location: the explicit id must belong to the
    * organization (RLS and the composite foreign key both enforce that fact),
    * and an absent id names the V1 default. A foreign location id is a 404 —
-   * never an existence leak (ADR-029 posture).
+   * never an existence leak (ADR-029 posture). Module-shared with the count
+   * service's document resolution, one rule, one implementation (M4-S4).
    */
-  private async resolveLocation(
+  async resolveLocation(
     tx: Tx,
     organizationId: string,
     locationId: string | null,
@@ -580,9 +642,10 @@ export class InventoryService {
    * the query; a foreign id is the same honest 404 the deleted parent gets).
    * `SELECT … FOR UPDATE` is the serialization point for two racing
    * submissions to one variant; the read-modify-write span it protects is the
-   * level fold below.
+   * level fold below. Module-shared with the count poster, which reads the
+   * same level span before deciding its variance (one lock, one rule).
    */
-  private async lockLiveVariant(
+  async lockLiveVariant(
     tx: Tx,
     variantId: string,
   ): Promise<{
@@ -605,6 +668,30 @@ export class InventoryService {
       where: { id: variantId },
       include: { product: { select: { nameAr: true, deletedAt: true } } },
     });
+  }
+
+  /**
+   * The authoritative level read behind the variant's own row lock (§8.2): the
+   * variant row is taken first (the same serialization point every fold uses),
+   * then the level's quantity and costing basis are read inside that lock
+   * span. The count poster derives its §15.6 variance from exactly this
+   * read — the same lock the movement fold takes, so quantity and cost can
+   * never disagree with the ledger even at read time.
+   */
+  async lockVariantLevel(
+    tx: Tx,
+    variantId: string,
+    locationId: string,
+  ): Promise<{ current: bigint; averageCostMinor: bigint | null }> {
+    await this.lockLiveVariant(tx, variantId);
+    const level = await tx.stockLevel.findFirst({
+      where: { variantId, locationId },
+      select: { quantity: true, averageCostMinor: true },
+    });
+    return {
+      current: level === null ? 0n : level.quantity,
+      averageCostMinor: level === null || level.averageCostMinor === null ? null : level.averageCostMinor,
+    };
   }
 
   /**
@@ -698,7 +785,8 @@ export class InventoryService {
         | 'INVENTORY_OPENING_BALANCE_RECORDED'
         | 'INVENTORY_ADJUSTMENT_RECORDED'
         | 'INVENTORY_PURCHASE_RECEIPT_RECORDED'
-        | 'INVENTORY_REVALUATION_APPLIED';
+        | 'INVENTORY_REVALUATION_APPLIED'
+        | 'INVENTORY_STOCK_COUNT_ADJUSTMENT_RECORDED';
       readonly targetId: string;
       readonly documentRef: string;
       readonly occurredAt: Date;
@@ -722,7 +810,9 @@ export class InventoryService {
  * The audit event type a submitted cause produces (§32.2's discipline: one
  * producing path per event type). The receipt and the revaluation carry their
  * own types since M4-S3; the adjustment keeps §38.5's; the opening balance
- * keeps M4-S2's.
+ * keeps M4-S2's. M4-S4 adds the count posting's cause: its producing path is
+ * the count poster (§15.8), and its per-movement audit event says so — the
+ * count document's own POSTED event carries the per-line facts above it.
  */
 function auditEventTypeFor(
   offer: MovementOffer,
@@ -730,7 +820,8 @@ function auditEventTypeFor(
   | 'INVENTORY_OPENING_BALANCE_RECORDED'
   | 'INVENTORY_ADJUSTMENT_RECORDED'
   | 'INVENTORY_PURCHASE_RECEIPT_RECORDED'
-  | 'INVENTORY_REVALUATION_APPLIED' {
+  | 'INVENTORY_REVALUATION_APPLIED'
+  | 'INVENTORY_STOCK_COUNT_ADJUSTMENT_RECORDED' {
   switch (offer.cause) {
     case 'OPENING_BALANCE':
       return 'INVENTORY_OPENING_BALANCE_RECORDED';
@@ -740,6 +831,8 @@ function auditEventTypeFor(
       return 'INVENTORY_REVALUATION_APPLIED';
     case 'MANUAL_ADJUSTMENT':
       return 'INVENTORY_ADJUSTMENT_RECORDED';
+    case 'STOCK_COUNT_ADJUSTMENT':
+      return 'INVENTORY_STOCK_COUNT_ADJUSTMENT_RECORDED';
   }
 }
 

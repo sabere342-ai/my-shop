@@ -46,6 +46,7 @@ import { DomainError } from '../../errors/domain.error';
 import { ERROR_CODES } from '../../errors/problem';
 import type { AuthorizationService, EffectiveAuthorization } from '../../tenancy/authorization/authorization.service';
 import type { PermissionId } from '../../tenancy/authorization/permission-catalog';
+import { INVENTORY_AGGREGATES } from '../../inventory/inventory.contract';
 import { MutationRejectedError } from '../ledger/mutation-ledger.errors';
 import type { MutationPayload } from '../sync.contract';
 import type { SyncTrustedContext } from './sync-auth';
@@ -65,22 +66,48 @@ export interface SyncIngressRevalidator {
 }
 
 /**
- * The required permission id of one `(aggregateType, operationType)` admission.
+ * The required permission ids of one `(aggregateType, operationType)` admission.
  *
- * The §11.2 catalog is the only source of ids. M2-S4 admits exactly one
+ * The §11.2 catalog is the only source of ids. M2-S4 admitted exactly one
  * composition — a SALE created by its own producer — because that is the one
- * the acceptance fixtures can script against a server that has no business
- * module yet. Anything else fails closed: `PERMISSION_DENIED` with no second
- * guess.
+ * the acceptance fixtures script against a server that has no other business
+ * module. Business slices own the map when they own the aggregate: M4-S4's
+ * Tier-2 inventory producer adds its two (§38.22 — a movement write rides
+ * `inventory.adjust`, a count document rides `inventory.count`). A map entry
+ * is either a static list or a payload-shaped resolver — the dynamic half of
+ * the cost rules: an adjustment that *offers* a cost demands the cost
+ * authority `catalog.cost.edit` at admission too, mirroring what the fold
+ * refuses inside its transaction. Anything unmapped fails closed:
+ * `PERMISSION_DENIED` with no second guess.
  */
-const REQUIRED_PERMISSION_BY_ADMISSION: ReadonlyMap<string, readonly PermissionId[]> = new Map([
-  [`SALE:${'CREATE'}`, ['sales.create']],
-]);
+type RequiredPermissions = readonly PermissionId[] | ((mutation: MutationPayload) => readonly PermissionId[]);
 
-/** The permission the mutation's admission requires, or `null` when none is served yet. */
-export function requiredPermissionOf(mutation: MutationPayload): PermissionId | null {
+const REQUIRED_PERMISSION_BY_ADMISSION: ReadonlyMap<string, RequiredPermissions> = new Map<string, RequiredPermissions>(
+  [
+    [`SALE:${'CREATE'}`, ['sales.create'] as RequiredPermissions],
+    // Tier 2 (§38.22, M4-S4): the offline inventory producer's admissions,
+    // re-proven at acceptance against the current, live effective set (§9.4).
+    [
+      `${INVENTORY_AGGREGATES.adjustment}:${'CREATE'}`,
+      (mutation: MutationPayload): readonly PermissionId[] =>
+        // A cost offer rides the payload when the device recorded one; posting
+        // it is the `catalog.cost.edit` act, so acceptance demands the same
+        // authority the fold would demand an instant later.
+        typeof mutation.payload['unitCostMinor'] === 'string'
+          ? ['inventory.adjust', 'catalog.cost.edit']
+          : ['inventory.adjust'],
+    ],
+    [`${INVENTORY_AGGREGATES.count}:${'CREATE'}`, ['inventory.count'] as RequiredPermissions],
+  ],
+);
+
+/** The permissions the mutation's admission requires, or `null` when none is served yet. */
+export function requiredPermissionsOf(mutation: MutationPayload): readonly PermissionId[] | null {
   const required = REQUIRED_PERMISSION_BY_ADMISSION.get(`${mutation.aggregateType}:${mutation.operationType}`);
-  return required === undefined ? null : (required[0] ?? null);
+  if (required === undefined) {
+    return null;
+  }
+  return typeof required === 'function' ? required(mutation) : required;
 }
 
 /**
@@ -125,8 +152,8 @@ export class MembershipPermissionRevalidator implements SyncIngressRevalidator {
       throw error;
     }
 
-    const required = requiredPermissionOf(mutation);
-    if (required === null || !effective.permissions.includes(required)) {
+    const required = requiredPermissionsOf(mutation);
+    if (required === null || !required.every((permission) => effective.permissions.includes(permission))) {
       throw new MutationRejectedError(ERROR_CODES.PERMISSION_DENIED);
     }
   }

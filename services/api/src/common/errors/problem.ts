@@ -67,6 +67,24 @@ export const ERROR_CODES = {
   INVENTORY_OPENING_BALANCE_DUPLICATE: 'INVENTORY_OPENING_BALANCE_DUPLICATE',
 
   /**
+   * Master Plan section 15.8 / section 40.8 (M4-S4): the count document is
+   * closed history — POSTED (its variance already posted to the movement
+   * ledger) or CANCELLED (its attribution facts are committed). A posting
+   * against a cancelled count, or a cancellation of a posted one, is refused;
+   * a repeated posting resolves by REPLAY (§38.9.1), never by crossing the
+   * trigger-guarded lifecycle again.
+   */
+  STOCK_COUNT_CLOSED: 'STOCK_COUNT_CLOSED',
+
+  /**
+   * Master Plan section 15.8 / O-14 (M4-S4): every count line whose posting
+   * would *change* the authoritative quantity is reason-coded — an unexplained
+   * variance does not post. The operator resolves it by recording the line's
+   * §38.5 reason code before posting; a matched line (no variance) needs none.
+   */
+  STOCK_COUNT_REASON_REQUIRED: 'STOCK_COUNT_REASON_REQUIRED',
+
+  /**
    * Master Plan section 30 / section 40.8 (M4-S3): the movement needs a cost
    * basis the engine cannot fabricate — a quantity correction or a cost-bearing
    * inclusion on stock no costing movement ever costed, or a revaluation named
@@ -147,6 +165,8 @@ const MESSAGE_BY_CODE: Readonly<Record<ErrorCode, string>> = {
   CATALOG_SKU_DUPLICATE: 'A variant of this organization already uses this SKU.',
   INVENTORY_OPENING_BALANCE_DUPLICATE: 'The opening balance for this stock is already recorded.',
   INVENTORY_COST_BASIS_REQUIRED: 'This stock has no recorded cost basis; record the acquisition cost explicitly.',
+  STOCK_COUNT_CLOSED: 'The stock count is already closed.',
+  STOCK_COUNT_REASON_REQUIRED: 'The variance needs a reason code before the count can post.',
   CLIENT_TOO_OLD: 'This app version is too old. Update to continue.',
   UNSUPPORTED_MUTATION: 'This operation is not supported by the server.',
 
@@ -176,6 +196,13 @@ const STATUS_BY_CODE: Readonly<Record<ErrorCode, number>> = {
   // resolves by choosing a different value.
   CATALOG_SKU_DUPLICATE: 409,
   INVENTORY_OPENING_BALANCE_DUPLICATE: 409,
+  // M4-S4: a post of a closed count (and a cancel of a posted one) is a
+  // lifecycle conflict; the idempotent shapes answer REPLAY instead.
+  STOCK_COUNT_CLOSED: 409,
+  // M4-S4/O-14: posting an unexplained variance is refused; the operator
+  // resolves it by giving the line its reason — a state conflict, like the
+  // other engine refusals whose resolution is a different record.
+  STOCK_COUNT_REASON_REQUIRED: 409,
   // M4-S3: a missing cost basis is a business state conflict the caller resolves
   // by supplying the acquisition cost — a 409, like every other engine refusal
   // whose resolution names a different admission, not a different shape.
@@ -353,6 +380,9 @@ const TITLE_BY_CODE: Readonly<Record<ErrorCode, string>> = {
   REPLAY: 'Already processed',
   MUTATION_CONTRADICTION: 'Conflicting operation',
   INVENTORY_CONFLICT: 'Inventory conflict',
+
+  STOCK_COUNT_CLOSED: 'Stock count closed',
+  STOCK_COUNT_REASON_REQUIRED: 'Reason code required',
   OFFLINE_GRACE_EXPIRED: 'Offline window expired',
   DEVICE_REVOKED: 'Device revoked',
   SETTINGS_VERSION_CONFLICT: 'Settings version conflict',
