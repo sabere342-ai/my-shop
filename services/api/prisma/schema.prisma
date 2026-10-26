@@ -251,6 +251,8 @@ model Organization {
   locations      InventoryLocation[]
   stockMovements StockMovement[]
   stockLevels    StockLevel[]
+  stockCounts    StockCount[]
+  countLines     StockCountLine[]
 
   @@map("organizations")
 }
@@ -763,6 +765,7 @@ model ProductVariant {
 
   movements   StockMovement[]
   stockLevels StockLevel[]
+  countLines  StockCountLine[]
 
   // The composite target stock_movements / stock_levels (M4-S2) pin to; the
   // database index that makes it real arrives with migration 0014.
@@ -818,6 +821,7 @@ model InventoryLocation {
   organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   movements    StockMovement[]
   stockLevels  StockLevel[]
+  stockCounts  StockCount[]
 
   // The composite target stock_movements / stock_levels (M4-S2) pin to.
   @@unique([id, organizationId])
@@ -858,6 +862,9 @@ model StockMovement {
   /// foreign key pins it to the target's `(id, organization_id)` pair.
   reverses            StockMovement?   @relation("StockCorrection", fields: [reversesMovementId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
   correctedBy         StockMovement[]  @relation("StockCorrection")
+  /// The §15.8 (M4-S4) count line that this movement realized, if any — the
+  /// posting's audit-linked attachment (the composite FK keeps it tenant-pinned).
+  countLine           StockCountLine?  @relation("StockCountLineMovement")
   /// Section 38.14.1: the outbox mutation that produced a device-originated
   /// movement. NULL for a server-originated one; unique per organization.
   originMutationId    String?   @map("origin_mutation_id") @db.Uuid
@@ -929,4 +936,114 @@ model StockLevel {
   @@index([organizationId, locationId], map: "stock_levels_organization_id_location_idx")
   @@index([organizationId, variantId], map: "stock_levels_organization_id_variant_idx")
   @@map("stock_levels")
+}
+
+/// Section 15.8 + section 40.8 M4-S4: the stock-count document — a location's
+/// physical count, recorded with attribution (actor, verdict, timestamps) and
+/// closed exactly once. §15.8: "A count is a document with an actor and an
+/// **approval-free but audited** posting path." The lifecycle is the closed
+/// OPEN → POSTED / OPEN → CANCELLED vocabulary the service drives and the
+/// migration 0016 CHECKs and transition trigger restate; a POSTED count is
+/// immutable history. Posting never touches `stock_levels` directly: every
+/// variance the posting applies is one authoritative §15.5 movement (`STOCK_COUNT_ADJUSTMENT`, §15.5)
+/// through the M4-S2 movement engine and its M4-S3 costing fold (§30.5:
+/// count-driven differences cost at the current average), committed in the
+/// same transaction as the count status and the class-A audit event
+/// (§32.5, the M4-S4 acceptance: "Adjustment posts movement and audit
+/// atomically"). Forced-RLS tenant-owned.
+model StockCount {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  locationId     String   @map("location_id") @db.Uuid
+  /// The closed lifecycle status: `OPEN`, `POSTED`, `CANCELLED` (migration
+  /// 0016 restates the vocabulary and the fact-shaped posting/cancellation
+  /// attribution CHECK).
+  status         String   @default("OPEN") @db.VarChar(16)
+  /// The §32.6 attribution: the operator who opened the count.
+  actorUserId    String   @map("actor_user_id") @db.Uuid
+  /// The operator's own words, bounded like every §15.5 document note.
+  note           String?  @db.VarChar(300)
+
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  /// The POSTED closure facts — never set for an OPEN row, always both for a
+  /// POSTED one (CHECK pair of migration 0016).
+  postedAt          DateTime? @map("posted_at") @db.Timestamptz(6)
+  postedActorUserId String?   @map("posted_actor_user_id") @db.Uuid
+  /// The CANCELLED closure facts — the same legal pairing, one per status.
+  cancelledAt          DateTime? @map("cancelled_at") @db.Timestamptz(6)
+  cancelledActorUserId String?   @map("cancelled_actor_user_id") @db.Uuid
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  location     InventoryLocation  @relation(fields: [locationId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
+  lines        StockCountLine[]
+
+  // One per-tenant identity row and the deterministic list order; the lifecycle
+  // trigger, the status CHECKs, and the forced-RLS policy are migration 0016's
+  // (Prisma shapes no trigger, no CHECK, no policy — the same discrimination
+  // the M4-S2/M4-S3 inventory models recorded).
+  @@unique([id, organizationId])
+  @@index([organizationId, locationId, createdAt], map: "stock_counts_organization_location_created_idx")
+  @@map("stock_counts")
+}
+
+/// Section 15.8 + section 40.8 M4-S4: one physically observed variant on one
+/// count document. `counted_quantity` is the observation (zero is a real
+/// observation — the shelf is empty — and an omitted variant simply has no
+/// line: absence is never read as a zero); `expected_quantity` is the system
+/// quantity the operator's variance preview was captured against at record
+/// time, honest history that never claims to be the fold's basis — the posting
+/// re-verifies against the locked authoritative level (§15.6). The optional
+/// `unit_cost_minor` is a §30.1 cost *offer* for the only case that needs one:
+/// an increase on stock with no authoritative basis, admitted only to the
+/// costing authority (never implied, never a fabricated zero). `movement_id`
+/// attaches the posting's authoritative movement per differing line — one line
+/// per variant per count (a repeat scan edits the same observation), one
+/// movement per line, ever.
+model StockCountLine {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  countId        String   @map("count_id") @db.Uuid
+  variantId      String   @map("variant_id") @db.Uuid
+  /// The physical observation: exact base units, non-negative, 12-digit bound
+  /// (migration 0016's CHECKs restate the movement-magnitude law of 0014).
+  countedQuantity BigInt  @map("counted_quantity")
+  /// The system quantity at record time — the snapshot variance preview used.
+  expectedQuantity BigInt @map("expected_quantity")
+  /// The §38.5 closed reason vocabulary; the count posting's movements carry it
+  /// verbatim (O-14's mandatory reason, per differing line).
+  reasonCode     String?  @map("reason_code") @db.VarChar(24)
+  /// The §30.1 cost offer; refused implicitly by the service for any decrease
+  /// (a consumption costs at the current §30.2 average) and admitted to a
+  /// posting only with the costing authority when the basis is missing.
+  unitCostMinor  BigInt?  @map("unit_cost_minor")
+  /// The recording facts: who counted, and when — refreshed on a re-record
+  /// (§15.8: an edit before posting revises the observation), immutable after.
+  recordedAt     DateTime @map("recorded_at") @db.Timestamptz(6)
+  recordedBy     String   @map("recorded_by") @db.Uuid
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamp(3)
+  /// The posting result: the §38.14.1 movement this line's variance produced
+  /// (NULL for a matched line — a counted quantity equal to the system
+  /// quantity produces no movement, exactly O-14's "no unnecessary movement").
+  movementId     String?  @map("movement_id") @db.Uuid
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  count        StockCount    @relation(fields: [countId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
+  variant      ProductVariant @relation(fields: [variantId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
+  /// The authoritative movement the posting attached — a composite FK pins it
+  /// to this tenant's ledger, so no count line can ever cite a foreign row.
+  movement     StockMovement? @relation("StockCountLineMovement", fields: [movementId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
+
+  // Migration 0016's identities: one line per variant per count (the repeat
+  // scan IS the edit), one movement per line ever, the deterministic read
+  // order. The partial uniques (movement-attachment-once) are migration-only,
+  // exactly like every other predicated index in this schema. The
+  // `movement_id`-to-`stock_movements` pairing is a modelable full unique
+  // (nullable both members), declared below.
+  @@unique([movementId, organizationId], map: "stock_count_lines_movement_id_organization_key")
+  @@unique([organizationId, countId, variantId], map: "stock_count_lines_count_variant_key")
+  @@unique([id, organizationId])
+  @@index([organizationId, countId], map: "stock_count_lines_organization_count_idx")
+  @@map("stock_count_lines")
 }
