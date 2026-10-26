@@ -100,6 +100,17 @@ export interface CreateProductRequest {
   readonly purchasingUnit?: object;
 }
 
+/** OpenAPI schema `CreateStockCountRequest` (Master Plan §7.1, ADR-001). */
+export interface CreateStockCountRequest {
+  readonly locationId?: object;
+  readonly note?: object;
+}
+
+/** OpenAPI schema `CreateStockCountResponse` (Master Plan §7.1, ADR-001). */
+export interface CreateStockCountResponse {
+  readonly count: StockCountResponse;
+}
+
 /** OpenAPI schema `CreateVariantRequest` (Master Plan §7.1, ADR-001). */
 export interface CreateVariantRequest {
   readonly sku: string;
@@ -288,6 +299,12 @@ export interface PermissionOverrideWire {
   readonly effect: 'ALLOW' | 'DENY';
 }
 
+/** OpenAPI schema `PostStockCountResponse` (Master Plan §7.1, ADR-001). */
+export interface PostStockCountResponse {
+  readonly status: 'APPLIED' | 'REPLAY';
+  readonly count: StockCountResponse;
+}
+
 /** OpenAPI schema `ProblemDocument` (Master Plan §7.1, ADR-001). */
 export interface ProblemDocument {
   readonly type: string;
@@ -311,6 +328,8 @@ export interface ProblemDocument {
     | 'SETTINGS_VERSION_CONFLICT'
     | 'CATALOG_SKU_DUPLICATE'
     | 'INVENTORY_OPENING_BALANCE_DUPLICATE'
+    | 'STOCK_COUNT_CLOSED'
+    | 'STOCK_COUNT_REASON_REQUIRED'
     | 'INVENTORY_COST_BASIS_REQUIRED'
     | 'REPLAY'
     | 'MUTATION_CONTRADICTION'
@@ -447,6 +466,19 @@ export interface ReadinessReport {
   readonly checks: Readonly<Record<string, ReadinessDetail>>;
 }
 
+/** OpenAPI schema `RecordCountLineRequest` (Master Plan §7.1, ADR-001). */
+export interface RecordCountLineRequest {
+  readonly variantId: string;
+  readonly countedQuantity: string;
+  readonly reasonCode?: 'DAMAGED' | 'EXPIRED' | 'LOST' | 'MISCOUNT' | 'RESTOCK' | 'OTHER';
+  readonly unitCostMinor?: object;
+}
+
+/** OpenAPI schema `RecordCountLineResponse` (Master Plan §7.1, ADR-001). */
+export interface RecordCountLineResponse {
+  readonly count: unknown;
+}
+
 /** OpenAPI schema `RefreshRequest` (Master Plan §7.1, ADR-001). */
 export interface RefreshRequest {
   readonly refreshToken: string;
@@ -491,6 +523,37 @@ export interface RolesListResponse {
 export interface SnapshotResponse {
   readonly snapshot: string;
   readonly expiresAt: string;
+}
+
+/** OpenAPI schema `StockCountLineResponse` (Master Plan §7.1, ADR-001). */
+export interface StockCountLineResponse {
+  readonly lineId: string;
+  readonly variantId: string;
+  readonly sku: string;
+  readonly countedQuantity: string;
+  readonly expectedQuantity: string;
+  readonly reasonCode?: 'DAMAGED' | 'EXPIRED' | 'LOST' | 'MISCOUNT' | 'RESTOCK' | 'OTHER';
+  readonly unitCostMinor?: string;
+  readonly recordedAt: string;
+  readonly movementId?: object;
+}
+
+/** OpenAPI schema `StockCountListResponse` (Master Plan §7.1, ADR-001). */
+export interface StockCountListResponse {
+  readonly counts: readonly StockCountResponse[];
+}
+
+/** OpenAPI schema `StockCountResponse` (Master Plan §7.1, ADR-001). */
+export interface StockCountResponse {
+  readonly countId: string;
+  readonly locationId: string;
+  readonly locationName: string;
+  readonly status: 'OPEN' | 'POSTED' | 'CANCELLED';
+  readonly note?: object;
+  readonly createdAt: string;
+  readonly postedAt?: object;
+  readonly cancelledAt?: object;
+  readonly lines: readonly StockCountLineResponse[];
 }
 
 /** OpenAPI schema `SubmitMovementRequest` (Master Plan §7.1, ADR-001). */
