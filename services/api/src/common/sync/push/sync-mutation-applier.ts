@@ -44,10 +44,15 @@ export interface SyncMutationApplier {
 }
 
 /**
- * The production default: no aggregate type is supported yet, so every mutation is
- * a permanent `UNSUPPORTED_MUTATION` rejection. The refusal is raised from inside
+ * The documented fail-closed default: every mutation is a permanent
+ * `UNSUPPORTED_MUTATION` rejection. The refusal is raised from inside
  * the effect on purpose, so the S4 ledger persists a `REJECTED` row and a replay is
  * answered from the store rather than re-attempted (§38.13).
+ *
+ * M4-S4 (Tier 2, §38.22) binds the production token to the inventory applier
+ * instead — which keeps this class as the narrow-wiring default and as the last
+ * line of the same contract: an aggregate without an apply path is recorded,
+ * never silently applied.
  */
 export class FailClosedMutationApplier implements SyncMutationApplier {
   effectFor(): SyncMutationEffect {

@@ -137,7 +137,7 @@ interface MigrationRow {
 /** The §4 classification, pinned as data so a change must be an explicit edit here. */
 const TENANT_ROOT_TABLE = 'organizations';
 
-/** The eighteen tenant tables whose isolation column is their `organization_id`. */
+/** The twenty tenant tables whose isolation column is their `organization_id`. */
 const TENANT_ORG_TABLES: readonly string[] = [
   'audit_events',
   'change_log',
@@ -154,6 +154,8 @@ const TENANT_ORG_TABLES: readonly string[] = [
   'products',
   'role_permissions',
   'roles',
+  'stock_count_lines',
+  'stock_counts',
   'stock_levels',
   'stock_movements',
   'sync_sequences',
@@ -218,6 +220,8 @@ const CATALOG_PRODUCT_ID = 'd0d0d0d0-d0d0-4d0d-8d0d-d0d0d0d0d0d0';
  */
 const INVENTORY_PROBE_VARIANT_ID = 'e1e1e1e1-e1e1-4e1e-8e1e-e1e1e1e1e1e1';
 const INVENTORY_PROBE_LOCATION_ID = 'e2e2e2e2-e2e2-4e2e-8e2e-e2e2e2e2e2e2';
+const INVENTORY_PROBE_COUNT_ID = 'e3e3e3e3-e3e3-4e3e-8e3e-e3e3e3e3e3e3';
+const INVENTORY_PROBE_COUNT_LINE_ID = 'e4e4e4e4-e4e4-4e4e-8e4e-e4e4e4e4e4e4';
 
 const BOOTSTRAP_KEY_A = 'rls-tenant-a';
 const BOOTSTRAP_KEY_B = 'rls-tenant-b';
@@ -233,7 +237,7 @@ const SEEDED_PAYLOAD_HASH = 'a'.repeat(64);
  * parameters written so the row being written names tenant B while the
  * transaction's trusted context names tenant A. PostgreSQL must answer `42501`.
  */
-const CROSS_TENANT_INSERT: ReadonlyMap<string, { sql: string; params: readonly unknown[] }> = new Map([
+const CROSS_TENANT_INSERT: ReadonlyMap<string, { sql: string; params: readonly unknown[]; state?: string }> = new Map([
   [
     'audit_events',
     {
@@ -386,6 +390,35 @@ const CROSS_TENANT_INSERT: ReadonlyMap<string, { sql: string; params: readonly u
     },
   ],
   [
+    'stock_counts',
+    {
+      // The row satisfies every 0016 CHECK (an OPEN count with no note, no
+      // posting/cancellation facts), so the RLS WITH CHECK is the only thing
+      // that can refuse it. `stock_counts` has no INSERT trigger: the policy
+      // answers 42501 exactly like every other plain tenant table.
+      sql: `INSERT INTO stock_counts (organization_id, location_id, actor_user_id)
+              VALUES ($1::uuid, $2::uuid, $3::uuid)`,
+      params: [ORG_B, INVENTORY_PROBE_LOCATION_ID, USER_ID],
+    },
+  ],
+  [
+    'stock_count_lines',
+    {
+      // The row satisfies every 0016 CHECK, but the parent-status trigger runs
+      // BEFORE the RLS WITH CHECK: the line's parent count is addressed by the
+      // composite foreign key with the *row's* organization (tenant B here),
+      // and tenant B's counts are invisible under tenant A's (or no) context —
+      // so the parent lookup finds nothing and the trigger refuses with P0001
+      // before the policy is ever consulted. The denial is still absolute:
+      // fail-closed by the parent pin, then by the policy (verified live:
+      // the control table below answers 42501 in the same run).
+      sql: `INSERT INTO stock_count_lines (organization_id, count_id, variant_id, counted_quantity, expected_quantity, recorded_at, recorded_by)
+              VALUES ($1::uuid, $2::uuid, $3::uuid, 1, 1, now(), $4::uuid)`,
+      params: [ORG_B, INVENTORY_PROBE_COUNT_ID, INVENTORY_PROBE_VARIANT_ID, USER_ID],
+      state: 'P0001',
+    },
+  ],
+  [
     'sync_sequences',
     {
       sql: `INSERT INTO sync_sequences (organization_id, last_sequence) VALUES ($1::uuid, 1)`,
@@ -398,7 +431,7 @@ const CROSS_TENANT_INSERT: ReadonlyMap<string, { sql: string; params: readonly u
  * The UPDATE that would migrate a tenant A row into tenant B — the
  * ownership-move probe every `WITH CHECK` must refuse exactly as an insert.
  */
-const CROSS_TENANT_MOVE: ReadonlyMap<string, { sql: string; params: readonly unknown[] }> = new Map([
+const CROSS_TENANT_MOVE: ReadonlyMap<string, { sql: string; params: readonly unknown[]; state?: string }> = new Map([
   [
     'audit_events',
     {
@@ -522,6 +555,28 @@ const CROSS_TENANT_MOVE: ReadonlyMap<string, { sql: string; params: readonly unk
     },
   ],
   [
+    'stock_counts',
+    {
+      // The OPEN count's stable-identity trigger (location, actor, created_at,
+      // and the posting facts all unchanged) passes the move through itself,
+      // so the RLS WITH CHECK is the denial: 42501.
+      sql: `UPDATE stock_counts SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
+      params: [ORG_B, ORG_A],
+    },
+  ],
+  [
+    'stock_count_lines',
+    {
+      // The parent-status trigger runs before the WITH CHECK: the moved row's
+      // parent count (now addressed in tenant B) is invisible under tenant A's
+      // context, so the parent pin refuses with P0001 — the same law as the
+      // INSERT probe above, from the same trigger.
+      sql: `UPDATE stock_count_lines SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
+      params: [ORG_B, ORG_A],
+      state: 'P0001',
+    },
+  ],
+  [
     'sync_sequences',
     {
       sql: `UPDATE sync_sequences SET organization_id = $1::uuid WHERE organization_id = $2::uuid`,
@@ -587,12 +642,15 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
 
   /**
    * The SQLSTATE behind a failed raw statement (Prisma carries the driver's
-   * five-digit SQLSTATE in the message). `42501` is the row-level-security and
+   * five-character SQLSTATE in the message). `42501` is the row-level-security and
    * insufficient-privilege code every denial below is classified by, and it is
-   * asserted as the database's answer rather than a wording detail.
+   * asserted as the database's answer rather than a wording detail. `P0001`
+   * (raise_exception) is the one non-numeric state in the suite: the
+   * migration-only trigger that pins a stock count line to its parent count
+   * refuses a cross-tenant line before the RLS policy is ever consulted.
    */
   const sqlStateOf = (error: unknown): string | undefined =>
-    error instanceof Error ? (/Code: `(\d{5})`/.exec(error.message)?.[1] ?? undefined) : undefined;
+    error instanceof Error ? (/Code: `([A-Z0-9]{5})`/.exec(error.message)?.[1] ?? undefined) : undefined;
 
   /** A quoted SQL list over a compile-time constant table name set (no client input). */
   const tableList = (tables: readonly string[]): string => tables.map((table) => `'${table}'`).join(', ');
@@ -803,6 +861,27 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
         INVENTORY_PROBE_VARIANT_ID,
         INVENTORY_PROBE_LOCATION_ID,
       );
+      // M4-S4 (§15.8): one OPEN count of tenant A at the fixture location, and
+      // one recorded line of it, so the ownership-move probes against the two
+      // new tables match rows the policies must refuse to move (the same
+      // match-nothing-proves-nothing argument the M4-S2 seeds make).
+      await tx.$executeRawUnsafe(
+        `INSERT INTO stock_counts (id, organization_id, location_id, actor_user_id)
+           VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid)`,
+        INVENTORY_PROBE_COUNT_ID,
+        ORG_A,
+        INVENTORY_PROBE_LOCATION_ID,
+        USER_ID,
+      );
+      await tx.$executeRawUnsafe(
+        `INSERT INTO stock_count_lines (id, organization_id, count_id, variant_id, counted_quantity, expected_quantity, recorded_at, recorded_by)
+           VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 3, 5, now(), $5::uuid)`,
+        INVENTORY_PROBE_COUNT_LINE_ID,
+        ORG_A,
+        INVENTORY_PROBE_COUNT_ID,
+        INVENTORY_PROBE_VARIANT_ID,
+        USER_ID,
+      );
     });
 
     // The decision D-A fixture needs a second membership edge of the same
@@ -998,7 +1077,9 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
 
       // And a context-free write is refused with the RLS code, never applied:
       // the insert attempts tenant B's data, which no legitimate application
-      // action can mint outside a trusted transaction.
+      // action can mint outside a trusted transaction. The one exception is
+      // `stock_count_lines` (its parent pin refuses P0001 before the policy
+      // is consulted — see the probe map); the refusal class is the same.
       for (const table of TENANT_ORG_TABLES) {
         const insert = CROSS_TENANT_INSERT.get(table);
         if (insert === undefined) {
@@ -1006,7 +1087,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
         }
         const error = await app.$executeRawUnsafe(insert.sql, ...insert.params).catch((caught: unknown) => caught);
         expect(error).toBeInstanceOf(Error);
-        expect(sqlStateOf(error)).toBe('42501');
+        expect(sqlStateOf(error)).toBe(insert.state ?? '42501');
       }
 
       // The tenant root: no context, no root — minting one is refused.
@@ -1077,7 +1158,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
       expect(deleted).toBe(0);
     });
 
-    it('a cross-tenant INSERT — context A, row B — is refused 42501 in every tenant table', async () => {
+    it('a cross-tenant INSERT — context A, row B — is refused in every tenant table', async () => {
       for (const table of TENANT_ORG_TABLES) {
         const insert = CROSS_TENANT_INSERT.get(table);
         if (insert === undefined) {
@@ -1087,7 +1168,10 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
           (caught: unknown) => caught,
         );
         expect(error).toBeInstanceOf(Error);
-        expect(sqlStateOf(error)).toBe('42501');
+        // 42501 is the RLS answer; `stock_count_lines` is refused one step
+        // earlier, by its parent-status trigger (P0001), because the row's
+        // parent count is addressed in a tenant the context cannot see.
+        expect(sqlStateOf(error)).toBe(insert.state ?? '42501');
       }
 
       // The root's two scopes, both refused:
@@ -1118,7 +1202,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
       expect(sqlStateOf(foreignId)).toBe('42501');
     });
 
-    it('an ownership-moving UPDATE — context A, row moved to B — is refused 42501 in every tenant table', async () => {
+    it('an ownership-moving UPDATE — context A, row moved to B — is refused in every tenant table', async () => {
       for (const table of TENANT_ORG_TABLES) {
         const move = CROSS_TENANT_MOVE.get(table);
         if (move === undefined) {
@@ -1128,7 +1212,9 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
           (caught: unknown) => caught,
         );
         expect(error).toBeInstanceOf(Error);
-        expect(sqlStateOf(error)).toBe('42501');
+        // Same refusal split as the INSERT loop: the policy's 42501, or the
+        // count line's parent pin (P0001) firing before the policy.
+        expect(sqlStateOf(error)).toBe(move.state ?? '42501');
       }
 
       // A foreign scope cannot rename the root row either: the update simply
@@ -1327,8 +1413,8 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
     });
   });
 
-  describe('AC-07: the fresh install applied exactly the fifteen-path history', () => {
-    it('records exactly 0001 through 0015, every one finished and never rolled back', async () => {
+  describe('AC-07: the fresh install applied exactly the sixteen-path history', () => {
+    it('records exactly 0001 through 0016, every one finished and never rolled back', async () => {
       const rows = await migrator.$queryRawUnsafe<MigrationRow[]>(
         `SELECT migration_name FROM _prisma_migrations ORDER BY migration_name`,
       );
@@ -1349,6 +1435,7 @@ describe('tenant row-level security acceptance (real PostgreSQL)', () => {
         '0013_product_catalog',
         '0014_inventory_core',
         '0015_inventory_costing',
+        '0016_stock_counts',
       ]);
     });
   });

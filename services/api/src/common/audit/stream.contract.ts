@@ -121,6 +121,14 @@ export const AUDIT_EVENT_TYPES = [
   'INVENTORY_ADJUSTMENT_RECORDED',
   'INVENTORY_PURCHASE_RECEIPT_RECORDED',
   'INVENTORY_REVALUATION_APPLIED',
+  // M4-S4 (§15.8): the count document's lifecycle events (RECORDED opens a
+  // count, POSTED carries the variance postings' per-line movement facts,
+  // CANCELLED closes an abandoned count), and the per-movement event the count
+  // posting's causes carry — one producing path, the count poster (§32.2A).
+  'INVENTORY_STOCK_COUNT_RECORDED',
+  'INVENTORY_STOCK_COUNT_POSTED',
+  'INVENTORY_STOCK_COUNT_CANCELLED',
+  'INVENTORY_STOCK_COUNT_ADJUSTMENT_RECORDED',
 ] as const;
 
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];

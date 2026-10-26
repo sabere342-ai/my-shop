@@ -133,7 +133,7 @@ export class MutationPayload {
   @ApiProperty({
     description:
       'The kind of business object the mutation addresses (§38.8.1 `aggregate_type`). ' +
-      'Known values: SALE, SALE_PAYMENT, RETURN, CUSTOMER_COLLECTION, INVENTORY_ADJUSTMENT — ' +
+      'Known values: SALE, SALE_PAYMENT, RETURN, CUSTOMER_COLLECTION, INVENTORY_ADJUSTMENT, INVENTORY_COUNT — ' +
       'an open list (§38.8.1 ends with an ellipsis), so a new aggregate type is additive.',
   })
   @IsString()

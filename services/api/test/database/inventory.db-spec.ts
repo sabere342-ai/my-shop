@@ -35,6 +35,12 @@
  *  8. **The CHECKs are the last line of defence** — a writer bypassing the
  *     service cannot store negative stock or a foreign cause: the PostgreSQL
  *     refusals name the violations.
+ *  9. **M4-S4 stock counts (§15.8)** — the count document's lifecycle folds
+ *     through the same movement engine: the post re-locks each line against
+ *     the authoritative level, an unexplained variance refuses (O-14), a cost
+ *     offer escalates `catalog.cost.edit` at the posting, a posted document is
+ *     closed history (trigger law), a racing post answers REPLAY once, and a
+ *     foreign tenant finds only the honest 404.
  *
  * Environment: `DATABASE_URL`/`MIGRATION_DATABASE_URL` naming `my_shop_test`,
  * `ADMIN_DATABASE_URL` naming something else — guarded as every database
@@ -48,9 +54,13 @@ import { PrismaClient, type Prisma } from '@prisma/client';
 
 import { CatalogService } from '../../src/common/catalog/catalog.service';
 import { InventoryService } from '../../src/common/inventory/inventory.service';
+import { StockCountService } from '../../src/common/inventory/count/stock-count.service';
+import { AuthorizationService } from '../../src/common/tenancy/authorization/authorization.service';
 import { AuditStreamWriter } from '../../src/common/audit/audit-stream-writer';
 import { verifyAuditStreamScope } from '../../src/common/audit/audit-integrity';
 import { withTenantTransaction } from '../../src/common/database/tenant-context';
+import { parseCountCostOffer, parseCountedQuantity } from '../../src/common/inventory/count/stock-count.domain';
+import type { AdjustmentReasonCode } from '../../src/common/inventory/inventory.contract';
 import { OrganizationBootstrapService } from '../../src/common/bootstrap/organization-bootstrap.service';
 
 /** The one database this suite may destroy; `scripts/db.mjs` enforces the same name. */
@@ -743,8 +753,8 @@ describe('inventory acceptance (real PostgreSQL, §15.4–§15.6A / §38.14.1)',
       const events = await inTenant(
         mainOrgId,
         (tx) =>
-          tx.$queryRaw<{ event_type: string; target_id: string }[]>`
-          SELECT event_type, target_id FROM audit_events
+          tx.$queryRaw<{ event_type: string; target_id: string; target_type: string | null }[]>`
+          SELECT event_type, target_id, target_type FROM audit_events
            WHERE event_type LIKE 'INVENTORY_%' AND organization_id = ${mainOrgId}::uuid
            ORDER BY sequence`,
       );
@@ -753,14 +763,31 @@ describe('inventory acceptance (real PostgreSQL, §15.4–§15.6A / §38.14.1)',
         (tx) =>
           tx.$queryRaw<{ id: string }[]>`SELECT id FROM stock_movements WHERE organization_id = ${mainOrgId}::uuid`,
       );
-      expect(events.length).toBe(movements.length);
-      const qualified = new Set(events.map((row) => row.event_type));
+      // M4-S4 (§15.8): a count document audits its own lifecycle — one event
+      // per count decision, targeting the STOCK_COUNT document — so the
+      // movement↔event one-to-one law is pinned on the events that *target
+      // movements*; the count documents' events assert their own closed
+      // vocabulary beside it.
+      const movementEvents = events.filter((row) => row.target_type === 'STOCK_MOVEMENT');
+      expect(movementEvents.length).toBe(movements.length);
+      expect(new Set(movementEvents.map((row) => row.target_id))).toEqual(new Set(movements.map((row) => row.id)));
+      const qualified = new Set(movementEvents.map((row) => row.event_type));
       for (const type of qualified) {
         expect([
           'INVENTORY_OPENING_BALANCE_RECORDED',
           'INVENTORY_ADJUSTMENT_RECORDED',
           'INVENTORY_PURCHASE_RECEIPT_RECORDED',
           'INVENTORY_REVALUATION_APPLIED',
+          // M4-S4: the count poster's movements audit as the count cause.
+          'INVENTORY_STOCK_COUNT_ADJUSTMENT_RECORDED',
+        ]).toContain(type);
+      }
+      const documentEvents = events.filter((row) => row.target_type === 'STOCK_COUNT');
+      for (const type of new Set(documentEvents.map((row) => row.event_type))) {
+        expect([
+          'INVENTORY_STOCK_COUNT_RECORDED',
+          'INVENTORY_STOCK_COUNT_POSTED',
+          'INVENTORY_STOCK_COUNT_CANCELLED',
         ]).toContain(type);
       }
 
@@ -1289,6 +1316,381 @@ describe('inventory acceptance (real PostgreSQL, §15.4–§15.6A / §38.14.1)',
           tx.$executeRaw`
           UPDATE organization_settings SET rounding_mode = 'HALF_UP' WHERE organization_id = ${mainOrgId}::uuid`,
       );
+    });
+  });
+
+  describe('M4-S4 stock counts (§15.8 — the lifecycle, the trigger law, and the one engine)', () => {
+    let counts: StockCountService;
+    let authorization: AuthorizationService;
+
+    beforeAll(() => {
+      authorization = new AuthorizationService({ prisma: app });
+      counts = new StockCountService({ prisma: app }, new AuditStreamWriter(), authorization, inventory);
+    });
+
+    /** One fresh variant for this block's own facts (isolated from every earlier describe). */
+    async function freshVariant(tag: string): Promise<string> {
+      const created = await catalog.createVariant({
+        organizationId: mainOrgId,
+        actorUserId: mainOwnerId,
+        productId,
+        offered: { sku: `INV-COUNT-${tag}-${randomUUID().slice(0, 8).toUpperCase()}` },
+      });
+      return created.id;
+    }
+
+    /** The derived quantity of one variant, or `null` when no level exists yet. */
+    async function levelOf(variantId: string): Promise<string | null> {
+      const levels = await inventory.listLevels(mainOrgId, { variantId });
+      return levels[0]?.quantity ?? null;
+    }
+
+    /** One observation recorded through the real canonicalizers, as the harness reads. */
+    async function record(
+      countId: string,
+      variantId: string,
+      countedQuantity: string,
+      reasonCode: string | null = null,
+      unitCostMinor: string | null = null,
+    ): Promise<Awaited<ReturnType<StockCountService['recordCountLine']>>> {
+      return counts.recordCountLine(mainOrgId, mainOwnerId, countId, {
+        variantId,
+        countedQuantity: parseCountedQuantity(countedQuantity),
+        reasonCode: reasonCode === null ? null : (reasonCode as AdjustmentReasonCode),
+        unitCostMinor: unitCostMinor === null ? null : parseCountCostOffer(unitCostMinor),
+      });
+    }
+
+    /** The count's own adjustment movements (deterministic ids = the line ids). */
+    async function countMovementsOf(variantId: string): Promise<{ id: string; quantity_delta: string }[]> {
+      return inTenant(
+        mainOrgId,
+        (tx) =>
+          tx.$queryRaw<{ id: string; quantity_delta: string }[]>`
+          SELECT id::text, quantity_delta::text FROM stock_movements
+           WHERE organization_id = ${mainOrgId}::uuid AND variant_id = ${variantId}::uuid
+             AND cause = 'STOCK_COUNT_ADJUSTMENT'
+           ORDER BY server_sequence`,
+      );
+    }
+
+    /** A non-owner membership the §11 catalog actually defines: count authority, no cost authority. */
+    async function stockkeeperActor(): Promise<string> {
+      const stockkeeper = await app.user.create({
+        data: { email: `count-keeper-${randomUUID().slice(0, 10)}@example.test` },
+      });
+      await inTenant(mainOrgId, (tx) =>
+        tx.organizationMembership.create({
+          data: { organizationId: mainOrgId, userId: stockkeeper.id },
+        }),
+      );
+      const roles = await authorization.listRoles(mainOrgId);
+      const stockkeeperRole = roles.find((role) => role.key === 'stockkeeper');
+      if (stockkeeperRole === undefined) {
+        throw new Error('the seeded organization has no stockkeeper preset role');
+      }
+      await authorization.assignMembershipAuthorization({
+        organizationId: mainOrgId,
+        userId: stockkeeper.id,
+        roleId: stockkeeperRole.id,
+        allow: [],
+        deny: [],
+      });
+      return stockkeeper.id;
+    }
+
+    it('0016 deploys with the chain; both tables carry the 0014 RLS posture and the lifecycle triggers', async () => {
+      const migrations = await admin.$queryRaw<{ migration_name: string }[]>`
+        SELECT migration_name FROM _prisma_migrations WHERE migration_name = '0016_stock_counts' AND finished_at IS NOT NULL`;
+      expect(migrations).toHaveLength(1);
+
+      const posture = await admin.$queryRaw<{ tablename: string; row_security: boolean; forced: boolean }[]>`
+        SELECT c.relname AS tablename, c.relrowsecurity AS row_security, c.relforcerowsecurity AS forced
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind = 'r'
+           AND c.relname IN ('stock_counts', 'stock_count_lines')`;
+      expect(posture).toHaveLength(2);
+      for (const row of posture) {
+        expect(row.row_security).toBe(true);
+        expect(row.forced).toBe(true);
+      }
+
+      const triggers = await admin.$queryRaw<{ trigger_name: string }[]>`
+        SELECT DISTINCT trigger_name FROM information_schema.triggers
+         WHERE trigger_schema = 'public'
+           AND trigger_name IN ('stock_counts_transition_guard', 'stock_count_lines_immutable_when_closed', 'stock_count_lines_delete_guard')
+         ORDER BY trigger_name`;
+      expect(triggers.map((row) => row.trigger_name)).toEqual([
+        'stock_count_lines_delete_guard',
+        'stock_count_lines_immutable_when_closed',
+        'stock_counts_transition_guard',
+      ]);
+    });
+
+    it('the lifecycle folds through the one engine: per-line variance, deterministic movement ids, idempotent post', async () => {
+      const variantId = await freshVariant('FOLD');
+      await submit(mainOrgId, mainOwnerId, {
+        cause: 'OPENING_BALANCE',
+        variantId,
+        quantityDelta: '10',
+        unitCostMinor: '1000',
+      });
+
+      const created = await counts.createCount(mainOrgId, mainOwnerId, { locationId: null, note: 'جرد المخزن' });
+      expect(created.status).toBe('OPEN');
+      expect(created.locationName).toBe('المخزن الرئيسي');
+      expect(created.lines).toEqual([]);
+
+      // A repeated scan *edits* the same observation: one line, one id.
+      const first = await record(created.countId, variantId, '7');
+      const second = await record(created.countId, variantId, '6', 'DAMAGED');
+      expect(second.lines).toHaveLength(1);
+      expect(second.lines[0]?.lineId).toBe(first.lines[0]?.lineId);
+      expect(second.lines[0]?.countedQuantity).toBe('6');
+      const lineId = second.lines[0]?.lineId ?? '';
+
+      const posted = await counts.postCount(mainOrgId, mainOwnerId, created.countId);
+      expect(posted.status).toBe('APPLIED');
+      expect(posted.count.status).toBe('POSTED');
+      expect(posted.count.postedAt).not.toBeNull();
+      expect(posted.count.lines[0]?.movementId).toBe(lineId);
+
+      // The fold ran: 10 − 4 = 6, through one STOCK_COUNT_ADJUSTMENT movement
+      // whose identity is the line's own id.
+      await expect(levelOf(variantId)).resolves.toBe('6');
+      const movements = await countMovementsOf(variantId);
+      expect(movements).toEqual([{ id: lineId, quantity_delta: '-4' }]);
+
+      // §38.9.1: the count row is the posting's idempotency identity — the
+      // stored document answers the replay, no second movement, no second fold.
+      const replay = await counts.postCount(mainOrgId, mainOwnerId, created.countId);
+      expect(replay.status).toBe('REPLAY');
+      await expect(levelOf(variantId)).resolves.toBe('6');
+      await expect(countMovementsOf(variantId)).resolves.toEqual(movements);
+
+      // The two class-A faces: the document events target the count, the
+      // movement event targets the movement — one each, in one transaction.
+      const events = await inTenant(
+        mainOrgId,
+        (tx) =>
+          tx.$queryRaw<{ event_type: string; target_type: string; target_id: string }[]>`
+          SELECT event_type, target_type, target_id::text FROM audit_events
+           WHERE organization_id = ${mainOrgId}::uuid
+             AND event_type IN ('INVENTORY_STOCK_COUNT_RECORDED', 'INVENTORY_STOCK_COUNT_POSTED', 'INVENTORY_STOCK_COUNT_ADJUSTMENT_RECORDED')
+             AND (target_id::text = ${created.countId} OR target_id::text = ${lineId})`,
+      );
+      expect(events).toEqual(
+        expect.arrayContaining([
+          { event_type: 'INVENTORY_STOCK_COUNT_RECORDED', target_type: 'STOCK_COUNT', target_id: created.countId },
+          { event_type: 'INVENTORY_STOCK_COUNT_POSTED', target_type: 'STOCK_COUNT', target_id: created.countId },
+          { event_type: 'INVENTORY_STOCK_COUNT_ADJUSTMENT_RECORDED', target_type: 'STOCK_MOVEMENT', target_id: lineId },
+        ]),
+      );
+
+      // A posted count is closed history, by the trigger and the lifecycle
+      // together — and its observations are no longer writable.
+      await expect(record(created.countId, variantId, '9', 'MISCOUNT')).rejects.toMatchObject({
+        code: 'STOCK_COUNT_CLOSED',
+      });
+      await expect(counts.cancelCount(mainOrgId, mainOwnerId, created.countId)).rejects.toMatchObject({
+        code: 'STOCK_COUNT_CLOSED',
+      });
+      await expect(
+        inTenant(
+          mainOrgId,
+          (tx) => tx.$executeRaw`UPDATE stock_count_lines SET counted_quantity = 9 WHERE id = ${lineId}::uuid`,
+        ),
+      ).rejects.toMatchObject({ message: expect.stringContaining('only while the count is OPEN') });
+      await expect(
+        inTenant(mainOrgId, (tx) => tx.$executeRaw`DELETE FROM stock_count_lines WHERE id = ${lineId}::uuid`),
+      ).rejects.toMatchObject({ message: expect.stringContaining('cannot be deleted') });
+      await expect(
+        inTenant(
+          mainOrgId,
+          (tx) => tx.$executeRaw`UPDATE stock_counts SET status = 'OPEN' WHERE id = ${created.countId}::uuid`,
+        ),
+      ).rejects.toMatchObject({ message: expect.stringContaining('is immutable') });
+    });
+
+    it('a differing line without a reason is refused before anything moves — O-14, whole document', async () => {
+      const variantId = await freshVariant('REASON');
+      await submit(mainOrgId, mainOwnerId, {
+        cause: 'OPENING_BALANCE',
+        variantId,
+        quantityDelta: '5',
+        unitCostMinor: '1000',
+      });
+
+      const created = await counts.createCount(mainOrgId, mainOwnerId, { locationId: null, note: null });
+      await record(created.countId, variantId, '2');
+
+      await expect(counts.postCount(mainOrgId, mainOwnerId, created.countId)).rejects.toMatchObject({
+        code: 'STOCK_COUNT_REASON_REQUIRED',
+      });
+
+      // Nothing moved and nothing closed: the refusal is whole.
+      await expect(levelOf(variantId)).resolves.toBe('5');
+      await expect(countMovementsOf(variantId)).resolves.toEqual([]);
+      const reopened = await counts.getCount(mainOrgId, created.countId);
+      expect(reopened.status).toBe('OPEN');
+
+      // The operator resolves it and the very same document posts.
+      await record(created.countId, variantId, '2', 'EXPIRED');
+      await expect(counts.postCount(mainOrgId, mainOwnerId, created.countId)).resolves.toMatchObject({
+        status: 'APPLIED',
+      });
+      await expect(levelOf(variantId)).resolves.toBe('2');
+    });
+
+    it('zero is a real observation: the empty shelf posts its honest subtraction', async () => {
+      const variantId = await freshVariant('ZERO');
+      await submit(mainOrgId, mainOwnerId, {
+        cause: 'OPENING_BALANCE',
+        variantId,
+        quantityDelta: '3',
+        unitCostMinor: '1000',
+      });
+
+      const created = await counts.createCount(mainOrgId, mainOwnerId, { locationId: null, note: null });
+      await record(created.countId, variantId, '0', 'LOST');
+      await expect(counts.postCount(mainOrgId, mainOwnerId, created.countId)).resolves.toMatchObject({
+        status: 'APPLIED',
+      });
+      await expect(levelOf(variantId)).resolves.toBe('0');
+    });
+
+    it('a cost offer escalates §11 at the posting: the stockkeeper is refused, the owner folds', async () => {
+      // A count whose line *offers* a cost (an increase to be valued) exercises
+      // the posting-time authorization: `catalog.cost.edit` is read from the
+      // caller's current effective set inside the posting transaction.
+      const stockkeeperId = await stockkeeperActor();
+      const variantId = await freshVariant('COST');
+      const created = await counts.createCount(mainOrgId, mainOwnerId, { locationId: null, note: null });
+      await record(created.countId, variantId, '4', 'MISCOUNT', '2000');
+
+      // The stockkeeper counts — and may not value: the cost authority is
+      // missing, so the posting refuses and leaves the document OPEN.
+      await expect(counts.postCount(mainOrgId, stockkeeperId, created.countId)).rejects.toMatchObject({
+        code: 'PERMISSION_DENIED',
+      });
+      await expect(levelOf(variantId)).resolves.toBeNull();
+      await expect(counts.getCount(mainOrgId, created.countId)).resolves.toMatchObject({ status: 'OPEN' });
+
+      // The owner holds the authority: the very same document folds — four
+      // fresh units receive the offered basis, and the offered cost rode it.
+      await expect(counts.postCount(mainOrgId, mainOwnerId, created.countId)).resolves.toMatchObject({
+        status: 'APPLIED',
+      });
+      await expect(levelOf(variantId)).resolves.toBe('4');
+      const valued = await inventory.listValuation(mainOrgId, { variantId });
+      expect(valued.levels[0]?.averageCostMinor).toBe('2000');
+      await expect(countMovementsOf(variantId)).resolves.toEqual([expect.objectContaining({ quantity_delta: '4' })]);
+    });
+
+    it('a basis-less increase without a cost offer refuses INVENTORY_COST_BASIS_REQUIRED — never a fabricated zero', async () => {
+      const variantId = await freshVariant('BASIS');
+      const created = await counts.createCount(mainOrgId, mainOwnerId, { locationId: null, note: null });
+      await record(created.countId, variantId, '2', 'MISCOUNT');
+
+      await expect(counts.postCount(mainOrgId, mainOwnerId, created.countId)).rejects.toMatchObject({
+        code: 'INVENTORY_COST_BASIS_REQUIRED',
+      });
+      await expect(levelOf(variantId)).resolves.toBeNull();
+      await expect(counts.getCount(mainOrgId, created.countId)).resolves.toMatchObject({ status: 'OPEN' });
+
+      // The operator resolves it the honest way: an explicitly offered basis.
+      await record(created.countId, variantId, '2', 'MISCOUNT', '1500');
+      await expect(counts.postCount(mainOrgId, mainOwnerId, created.countId)).resolves.toMatchObject({
+        status: 'APPLIED',
+      });
+      const valued = await inventory.listValuation(mainOrgId, { variantId });
+      expect(valued.levels[0]?.quantity).toBe('2');
+      expect(valued.levels[0]?.averageCostMinor).toBe('1500');
+    });
+
+    it('a cancellation closes nothing but the document: replay-stable, and its observations rest unposted', async () => {
+      const variantId = await freshVariant('CANCEL');
+      const created = await counts.createCount(mainOrgId, mainOwnerId, { locationId: null, note: 'abandoned' });
+      await record(created.countId, variantId, '1', 'OTHER');
+
+      const cancelled = await counts.cancelCount(mainOrgId, mainOwnerId, created.countId);
+      expect(cancelled.status).toBe('APPLIED');
+      expect(cancelled.count.status).toBe('CANCELLED');
+      expect(cancelled.count.cancelledAt).not.toBeNull();
+
+      // The observation rests unposted: no movement, level untouched.
+      await expect(levelOf(variantId)).resolves.toBeNull();
+      await expect(countMovementsOf(variantId)).resolves.toEqual([]);
+
+      // §38.9.1 on the cancel face: a re-cancel answers the stored document.
+      await expect(counts.cancelCount(mainOrgId, mainOwnerId, created.countId)).resolves.toMatchObject({
+        status: 'REPLAY',
+      });
+      // A cancelled count refuses the posting side with the closed-document code.
+      await expect(counts.postCount(mainOrgId, mainOwnerId, created.countId)).rejects.toMatchObject({
+        code: 'STOCK_COUNT_CLOSED',
+      });
+      // And its lines are unwritable history.
+      await expect(record(created.countId, variantId, '2', 'OTHER')).rejects.toMatchObject({
+        code: 'STOCK_COUNT_CLOSED',
+      });
+    });
+
+    it('two racing posts of one count produce one effect: one acceptance, one stored replay', async () => {
+      const variantId = await freshVariant('RACE');
+      await submit(mainOrgId, mainOwnerId, {
+        cause: 'OPENING_BALANCE',
+        variantId,
+        quantityDelta: '8',
+        unitCostMinor: '1000',
+      });
+
+      const created = await counts.createCount(mainOrgId, mainOwnerId, { locationId: null, note: null });
+      await record(created.countId, variantId, '6', 'MISCOUNT');
+
+      const outcomes = await Promise.all([
+        counts.postCount(mainOrgId, mainOwnerId, created.countId),
+        counts.postCount(mainOrgId, mainOwnerId, created.countId),
+      ]);
+      expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(['APPLIED', 'REPLAY']);
+
+      // The doc lock serialized the fold: exactly one −2 movement, one level fact.
+      await expect(levelOf(variantId)).resolves.toBe('6');
+      await expect(countMovementsOf(variantId)).resolves.toEqual([expect.objectContaining({ quantity_delta: '-2' })]);
+    });
+
+    it('a foreign tenant finds only the honest 404 — the RLS never names another tenant’s document', async () => {
+      const variantId = await freshVariant('TENANT');
+      const created = await counts.createCount(mainOrgId, mainOwnerId, { locationId: null, note: null });
+      await record(created.countId, variantId, '5', 'MISCOUNT');
+
+      // The other organization's owner cannot read, record, or post the
+      // foreign count: every face answers the same unknown-document refusal.
+      await expect(counts.getCount(otherOrgId, created.countId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      await expect(
+        counts.recordCountLine(otherOrgId, otherOwnerId, created.countId, {
+          variantId,
+          countedQuantity: 9n,
+          reasonCode: 'MISCOUNT',
+          unitCostMinor: null,
+        }),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      await expect(counts.postCount(otherOrgId, otherOwnerId, created.countId)).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
+
+      // And the context-free probes see nothing: the RLS scopes the table.
+      const visible = await inTenant(
+        otherOrgId,
+        (tx) =>
+          tx.$queryRaw<{ n: bigint }[]>`
+          SELECT count(*)::bigint AS n FROM stock_counts
+           WHERE organization_id <> current_setting('app.current_organization_id', true)::uuid`,
+      );
+      expect(visible[0]?.n).toBe(0n);
+      // The observation rests unposted: the foreign tenant changed nothing.
+      await expect(levelOf(variantId)).resolves.toBeNull();
     });
   });
 });
