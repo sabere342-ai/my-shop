@@ -31,6 +31,7 @@
     "catalog:walkthrough": "node scripts/catalog-walkthrough.mjs",
     "inventory:walkthrough": "node scripts/inventory-walkthrough.mjs",
     "costing:walkthrough": "node scripts/costing-walkthrough.mjs",
+    "counts:walkthrough": "node scripts/counts-walkthrough.mjs",
     "postinstall": "prisma generate"
   },
   "dependencies": {
